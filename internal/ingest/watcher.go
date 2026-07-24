@@ -70,16 +70,22 @@ func (w *CDRWatcher) scan(ctx context.Context) error {
 		if err != nil || !device.Enabled || device.PurgeState != "active" {
 			continue
 		}
-		files, err := os.ReadDir(filepath.Join(w.Root, entry.Name()))
+		deviceDir := filepath.Join(w.Root, entry.Name())
+		files, err := os.ReadDir(deviceDir)
 		if err != nil {
 			slog.Warn("unable to read device CDR directory", "device", deviceID, "error", err)
 			continue
 		}
 		for _, file := range files {
-			if file.IsDir() || strings.HasPrefix(file.Name(), ".") || strings.HasSuffix(file.Name(), ".part") {
+			if file.IsDir() {
+				slog.Warn("CDR subdirectory ignored; upload files to FTP home root",
+					"device", deviceID, "dir", file.Name())
 				continue
 			}
-			path := filepath.Join(w.Root, entry.Name(), file.Name())
+			if strings.HasPrefix(file.Name(), ".") || strings.HasSuffix(file.Name(), ".part") {
+				continue
+			}
+			path := filepath.Join(deviceDir, file.Name())
 			info, err := file.Info()
 			if err != nil || time.Since(info.ModTime()) < w.MinAge {
 				continue
@@ -113,13 +119,15 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	sum := sha256.Sum256(content)
 	checksum := hex.EncodeToString(sum[:])
 	objectKey := fmt.Sprintf("cdr/%s/%s/%s-%s", device.ID, time.Now().UTC().Format("2006/01/02"), checksum[:16], filepath.Base(path))
-	fileID, err := w.Store.RegisterIngestFile(ctx, device.ID, filepath.Base(path), objectKey, checksum, info.Size())
-	if errors.Is(err, store.ErrNotFound) {
-		return os.Remove(path)
-	}
+	claim, err := w.Store.ClaimIngestFile(ctx, device.ID, filepath.Base(path), objectKey, checksum, info.Size())
 	if err != nil {
 		return err
 	}
+	if !claim.Retry {
+		return os.Remove(path)
+	}
+	fileID := claim.ID
+	objectKey = claim.ObjectKey
 	if err := w.Archive.Put(ctx, objectKey, bytes.NewReader(content), int64(len(content)), "text/csv"); err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", 0, 0, err.Error())
 		return err
@@ -127,7 +135,8 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	decoded, err := decodeCDR(content)
 	if err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, err.Error())
-		return os.Remove(path)
+		// Keep the file so a later retry can succeed after content/config fixes.
+		return fmt.Errorf("CDR decode failed: %w", err)
 	}
 	location, err := time.LoadLocation(device.ActiveTimezone)
 	if err != nil {
@@ -146,7 +155,8 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	}).Parse(bytes.NewReader(decoded))
 	if err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, err.Error())
-		return os.Remove(path)
+		// Keep the file for retry after device_sign / column profile corrections.
+		return fmt.Errorf("CDR parse failed: %w", err)
 	}
 	if err := w.Analytics.InsertCDRBatch(ctx, result.Records); err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", result.Rows, uint64(len(result.Records)), err.Error())

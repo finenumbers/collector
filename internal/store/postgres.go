@@ -573,15 +573,114 @@ func (s *Store) ActivateDeviceTimezoneRevision(ctx context.Context, id uuid.UUID
 	return nil
 }
 
-func (s *Store) RegisterIngestFile(ctx context.Context, deviceID uuid.UUID, name, objectKey, checksum string, size int64) (uuid.UUID, error) {
-	var id uuid.UUID
+// IngestFileClaim is the durable ledger row for one CDR content hash.
+// Retry=false means the file was already ingested successfully and the local
+// copy may be deleted. Retry=true means the watcher must (re)process it.
+type IngestFileClaim struct {
+	ID        uuid.UUID
+	ObjectKey string
+	Status    string
+	RowsValid uint64
+	Retry     bool
+}
+
+func IngestFileFullyIngested(status string, rowsValid uint64) bool {
+	return status == "processed" || (status == "quarantined" && rowsValid > 0)
+}
+
+func (s *Store) ClaimIngestFile(
+	ctx context.Context, deviceID uuid.UUID, name, objectKey, checksum string, size int64,
+) (IngestFileClaim, error) {
+	var claim IngestFileClaim
 	err := s.DB.QueryRow(ctx, `INSERT INTO ingest_files(device_id,original_name,object_key,sha256,size_bytes,status)
-		VALUES($1,$2,$3,$4,$5,'received') ON CONFLICT(device_id,sha256) DO NOTHING RETURNING id`,
-		deviceID, name, objectKey, checksum, size).Scan(&id)
+		VALUES($1,$2,$3,$4,$5,'received')
+		ON CONFLICT(device_id,sha256) DO NOTHING
+		RETURNING id,object_key,status,rows_valid`,
+		deviceID, name, objectKey, checksum, size,
+	).Scan(&claim.ID, &claim.ObjectKey, &claim.Status, &claim.RowsValid)
+	if err == nil {
+		claim.Retry = true
+		return claim, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return IngestFileClaim{}, err
+	}
+	err = s.DB.QueryRow(ctx, `SELECT id,object_key,status,rows_valid
+		FROM ingest_files WHERE device_id=$1 AND sha256=$2`, deviceID, checksum).
+		Scan(&claim.ID, &claim.ObjectKey, &claim.Status, &claim.RowsValid)
 	if errors.Is(err, pgx.ErrNoRows) {
+		return IngestFileClaim{}, ErrNotFound
+	}
+	if err != nil {
+		return IngestFileClaim{}, err
+	}
+	if IngestFileFullyIngested(claim.Status, claim.RowsValid) {
+		claim.Retry = false
+		return claim, nil
+	}
+	_, err = s.DB.Exec(ctx, `UPDATE ingest_files
+		SET original_name=$2,object_key=$3,size_bytes=$4,status='received',
+		    error=NULL,processed_at=NULL,rows_total=0,rows_valid=0
+		WHERE id=$1`, claim.ID, name, objectKey, size)
+	if err != nil {
+		return IngestFileClaim{}, err
+	}
+	claim.ObjectKey = objectKey
+	claim.Status = "received"
+	claim.RowsValid = 0
+	claim.Retry = true
+	return claim, nil
+}
+
+// RegisterIngestFile keeps the legacy helper for callers that only need a new row id.
+func (s *Store) RegisterIngestFile(
+	ctx context.Context, deviceID uuid.UUID, name, objectKey, checksum string, size int64,
+) (uuid.UUID, error) {
+	claim, err := s.ClaimIngestFile(ctx, deviceID, name, objectKey, checksum, size)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if !claim.Retry {
 		return uuid.Nil, ErrNotFound
 	}
-	return id, err
+	return claim.ID, nil
+}
+
+type IngestFileSummary struct {
+	ID           uuid.UUID  `json:"id"`
+	OriginalName string     `json:"originalName"`
+	Status       string     `json:"status"`
+	RowsTotal    uint64     `json:"rowsTotal"`
+	RowsValid    uint64     `json:"rowsValid"`
+	Error        string     `json:"error,omitempty"`
+	ReceivedAt   time.Time  `json:"receivedAt"`
+	ProcessedAt  *time.Time `json:"processedAt,omitempty"`
+}
+
+func (s *Store) ListRecentIngestFiles(ctx context.Context, deviceID uuid.UUID, limit int) ([]IngestFileSummary, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := s.DB.Query(ctx, `SELECT id,original_name,status,rows_total,rows_valid,
+		COALESCE(error,''),received_at,processed_at
+		FROM ingest_files WHERE device_id=$1
+		ORDER BY received_at DESC LIMIT $2`, deviceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []IngestFileSummary
+	for rows.Next() {
+		var item IngestFileSummary
+		if err := rows.Scan(
+			&item.ID, &item.OriginalName, &item.Status, &item.RowsTotal, &item.RowsValid,
+			&item.Error, &item.ReceivedAt, &item.ProcessedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *Store) CompleteIngestFile(ctx context.Context, id uuid.UUID, status string, rowsTotal, rowsValid uint64, message string) error {

@@ -673,6 +673,15 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 	addRevisionDiagnostics(response, diagnostics)
 	response["ingestRevision"] = device.ActiveTimezoneRevision
 	response["revisionAligned"] = uint64(device.ActiveTimezoneRevision) == diagnostics.ActiveRevision
+	ingestFiles, ingestErr := s.Store.ListRecentIngestFiles(request.Context(), deviceID, 20)
+	if ingestErr != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to query CDR ingest ledger")
+		return
+	}
+	if ingestFiles == nil {
+		ingestFiles = []store.IngestFileSummary{}
+	}
+	response["cdrIngestFiles"] = ingestFiles
 	writeJSON(writer, http.StatusOK, response)
 }
 

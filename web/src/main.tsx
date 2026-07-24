@@ -109,6 +109,17 @@ type SyslogDiagnostics = {
   oldestDirtyAt: string
   ingressAvailable: boolean
   ingress: IngressStatus
+  cdrIngestFiles?: CdrIngestFile[]
+}
+type CdrIngestFile = {
+  id: string
+  originalName: string
+  status: string
+  rowsTotal: number
+  rowsValid: number
+  error?: string
+  receivedAt: string
+  processedAt?: string
 }
 type CallRow = {
   recordId: string
@@ -538,6 +549,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       Часовой пояс {device.timezone} пересобирается в фоне. До атомарного переключения
       показана активная ревизия {device.activeTimezoneRevision} ({activeDeviceTimezone(device)}).
     </div>}
+    {admin && dataset === 'calls' && diagnostics && <CdrIngestBanner files={diagnostics.cdrIngestFiles || []} />}
     {stats && <div className="stat-strip">
       <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Неуспешных</small><strong>{stats.failedCalls24h.toLocaleString('ru-RU')}</strong></span>
@@ -581,14 +593,34 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   </section>
 }
 
+function CdrIngestBanner({ files }: { files: CdrIngestFile[] }) {
+  if (files.length === 0) {
+    return <div className="timezone-rebuild">
+      CDR ingest: файлов в ledger ещё нет. Если SMG уже отправляет CDR по FTP —
+      проверьте, что файлы лежат в корне FTP home (не в подкаталоге).
+    </div>
+  }
+  const problem = files.find((file) => file.status === 'failed' ||
+    (file.status === 'quarantined' && file.rowsValid === 0) ||
+    file.status === 'received')
+  if (!problem) return null
+  return <div className="timezone-rebuild">
+    CDR ingest: {problem.originalName} → {problem.status}
+    {problem.error ? ` · ${problem.error}` : ''}.
+    Повторная обработка failed/quarantined файлов выполняется автоматически.
+  </div>
+}
+
 function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
   const trace = value.breakdown.filter((row) => row.sourcePort === 10003)
     .reduce((sum, row) => sum + row.count, 0)
+  const cdrFiles = value.cdrIngestFiles || []
   return <details className="diagnostic-panel">
     <summary>
       Диагностика Syslog · Collector {value.version} · parser {value.parserVersion} ·
       порт 10003: {trace.toLocaleString('ru-RU')} · ingress:
       {value.ingressAvailable ? value.ingress.runtime.acceptedDatagrams.toLocaleString('ru-RU') : ' недоступен'}
+      · CDR files: {cdrFiles.length.toLocaleString('ru-RU')}
     </summary>
     <div className="diagnostic-facts">
       <span>Глобально · ingress принято: <strong>{value.ingressAvailable
@@ -628,7 +660,15 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
         (value.correlationComposite || 0) + (value.correlationAmbiguous || 0) +
         (value.correlationOrphan || 0)} / {value.correlationTotal || 0}</strong></span>
       <span>Миграции: <strong>{value.appliedMigrations.join(', ') || '—'}</strong></span>
+      <span>CDR ingest files: <strong>{cdrFiles.length.toLocaleString('ru-RU')}</strong></span>
     </div>
+    {cdrFiles.length > 0 && <div className="diagnostic-breakdown">
+      {cdrFiles.map((file) => <span key={file.id}>
+        <strong>{file.originalName}</strong> · {file.status} ·
+        rows {file.rowsValid}/{file.rowsTotal}
+        {file.error ? ` · ${file.error}` : ''}
+      </span>)}
+    </div>}
     <div className="diagnostic-breakdown">
       {value.breakdown.map((row) => <span key={[
         row.category, row.parseStatus, row.parserVersion, row.headerFormat, row.sourcePort,

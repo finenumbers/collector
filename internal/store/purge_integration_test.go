@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,5 +74,56 @@ func TestDevicePurgeAndUserAdministrationPostgres(t *testing.T) {
 	}
 	if auditRows != 0 {
 		t.Fatalf("%d device audit rows remain after purge", auditRows)
+	}
+}
+
+func TestClaimIngestFileRetriesFailedLedger(t *testing.T) {
+	databaseURL := os.Getenv("POSTGRES_TEST_URL")
+	if databaseURL == "" {
+		t.Skip("POSTGRES_TEST_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	control, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.DB.Close()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := control.CreateInitialAdmin(ctx, "cdr-retry-admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "cdr-retry-smg", SyslogSourceIP: "192.0.2.77", Timezone: "Asia/Novosibirsk",
+	}, admin, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := control.ClaimIngestFile(
+		ctx, device.ID, "a.csv", "cdr/a", strings.Repeat("a", 64), 12,
+	)
+	if err != nil || !first.Retry {
+		t.Fatalf("first claim: %+v %v", first, err)
+	}
+	if err := control.CompleteIngestFile(ctx, first.ID, "failed", 0, 0, "minio down"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := control.ClaimIngestFile(
+		ctx, device.ID, "a.csv", "cdr/a-retry", strings.Repeat("a", 64), 12,
+	)
+	if err != nil || !second.Retry || second.ID != first.ID {
+		t.Fatalf("failed ledger must reopen for retry: %+v %v", second, err)
+	}
+	if err := control.CompleteIngestFile(ctx, second.ID, "processed", 1, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	third, err := control.ClaimIngestFile(
+		ctx, device.ID, "a.csv", "cdr/a-done", strings.Repeat("a", 64), 12,
+	)
+	if err != nil || third.Retry {
+		t.Fatalf("processed ledger must not retry: %+v %v", third, err)
 	}
 }

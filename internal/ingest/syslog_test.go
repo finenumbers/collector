@@ -44,6 +44,38 @@ func TestParseRadiusAttributes(t *testing.T) {
 	}
 }
 
+func TestParseCustomAntifraudWithoutRadiusKeyword(t *testing.T) {
+	raw := RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "10.0.0.10",
+		Payload: []byte(
+			`12:00:01.001 [INFO] aaa. Access-Accept Acct-Session-Id="11000307 6a62" ` +
+				`Calling-Station-Id="73832888803" xpgk-request-type="check_call" xpgk-dst-number-in=74951234567`,
+		),
+	}
+	event := ParseSyslog(raw)
+	if event.Category != "radius" {
+		t.Fatalf("got category %q, want radius", event.Category)
+	}
+	if event.Attributes["acct_session_id"] != "11000307 6a62" {
+		t.Fatalf("quoted session id not extracted: %#v", event.Attributes)
+	}
+	if event.Attributes["xpgk_dst_number_in"] != "74951234567" {
+		t.Fatalf("Custom VSA not extracted: %#v", event.Attributes)
+	}
+}
+
+func TestParseAccountingResponseWithoutRadiusKeyword(t *testing.T) {
+	raw := RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "10.0.0.10",
+		Payload:  []byte(`12:00:01.001 [INFO] aaa. Accounting-Response Acct-Session-Id="session-42"`),
+	}
+	if event := ParseSyslog(raw); event.Category != "radius" {
+		t.Fatalf("got category %q, want radius", event.Category)
+	}
+}
+
 func TestParseRFC3164WebAppIntoSystemJournal(t *testing.T) {
 	raw := RawSyslog{
 		EventID: uuid.New(), DeviceID: uuid.New(),

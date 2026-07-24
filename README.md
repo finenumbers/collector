@@ -15,16 +15,16 @@
 - точная двусторонняя корреляция CDR↔RADIUS по `device_id + normalized Acct-Session-Id`;
 - ClickHouse для событий/вызовов, PostgreSQL для пользователей, устройств, ingest и аудита;
 - first-run создание администратора, Argon2id, серверные сессии, CSRF, lockout и RBAC;
-- компактный русскоязычный интерфейс: логические разделы, «Все Syslog», cursor pagination всей истории, raw payload, поиск и потоковый многостраничный XLSX;
+- компактный светлый русскоязычный интерфейс: sticky-заголовки, infinite scroll по 100 строк, логические разделы, «Все Syslog», raw payload, поиск и потоковый многостраничный XLSX;
 - Docker Compose/Portainer stack для существующего Nginx Proxy Manager, health checks и закрытые внутренние сервисы.
 
 ## Установка через Portainer
 
 1. Убедитесь, что external Docker-сеть NPM существует и называется `proxy`.
 2. В Portainer создайте Stack из Git repository `https://github.com/finenumbers/collector`.
-3. Compose path: `deploy/compose.yml`; reference: release tag либо `main`.
-4. Добавьте переменные из [.env.example](.env.example). Для воспроизводимого deploy задайте `COLLECTOR_VERSION` равным release tag без `v`, например `0.1.0`.
-5. Deploy stack. Portainer загрузит публичный multi-arch образ `ghcr.io/finenumbers/collector`.
+3. Compose path: `deploy/compose.yml`; reference: `main`.
+4. Добавьте переменные из [.env.example](.env.example). Переменная версии образа не используется.
+5. Deploy/redeploy stack. `pull_policy: always` всегда загрузит публичный multi-arch образ `ghcr.io/finenumbers/collector:latest`.
 6. В NPM создайте Proxy Host: scheme `http`, hostname `smg-collector`, port `8080`; включите SSL, Force SSL, HTTP/2 и Block Common Exploits.
 
 Порт `8080` не публикуется на Docker-хосте: NPM обращается к сервису только через сеть `proxy`. Откройте настроенный домен и создайте первого администратора. Затем добавьте SMG; система покажет одноразовые FTP-реквизиты и адрес Syslog.
@@ -39,6 +39,8 @@ Release tag `vX.Y.Z` запускает GitHub Actions и публикует:
 - `linux/amd64` и `linux/arm64`;
 - OCI labels, SBOM и signed GitHub build provenance attestation;
 - GitHub Release с автоматически сформированными release notes.
+
+Production Compose намеренно использует только `ghcr.io/finenumbers/collector:latest` с `pull_policy: always`.
 
 ## Настройка SMG
 

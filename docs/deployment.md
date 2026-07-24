@@ -15,9 +15,9 @@
 ## Portainer
 
 1. Создайте external Docker-сеть `proxy`, если она ещё не создана, и подключите к ней существующий Nginx Proxy Manager.
-2. Создайте Git Stack: repository `https://github.com/finenumbers/collector`, compose path `deploy/compose.yml`, reference — release tag.
-3. Добавьте environment variables из [.env.example](../.env.example), четыре независимых секрета и `COLLECTOR_VERSION=X.Y.Z`.
-4. Deploy stack. Сборка на Portainer не выполняется: используется готовый multi-arch образ GHCR.
+2. Создайте Git Stack: repository `https://github.com/finenumbers/collector`, compose path `deploy/compose.yml`, reference `main`.
+3. Добавьте environment variables из [.env.example](../.env.example) и четыре независимых секрета. Удалите старую переменную `COLLECTOR_VERSION`, если она осталась в Stack.
+4. Deploy/redeploy stack. Сборка на Portainer не выполняется: `pull_policy: always` загружает готовый multi-arch образ `ghcr.io/finenumbers/collector:latest`.
 5. Не публикуйте PostgreSQL, ClickHouse, NATS, MinIO, SFTPGo HTTP или app port `8080`.
 6. Разрешите от SMG только `514/udp`, `21/tcp`, `50000-50100/tcp`.
 

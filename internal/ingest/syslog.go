@@ -31,7 +31,7 @@ var (
 	rfc3164Pattern   = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([0-9]{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
 	rfc3164App       = regexp.MustCompile(`^([A-Za-z0-9_.-]+)(?:\[([0-9]+)\])?:\s*(.*)$`)
 	componentPattern = regexp.MustCompile(`^([A-Za-z0-9_./ -]+?)(?::|\.)\s+(.*)$`)
-	radiusPair       = regexp.MustCompile(`(?i)(Acct-Session-Id|Calling-Station-Id|Called-Station-Id|User-Name|xpgk-request-type|NAS-IP-Address)\s*(?:\(\d+\))?\s*[=:]\s*["']?([^"',;\s]+)`)
+	radiusPair       = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
 	radiusSession    = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
 )
 
@@ -280,7 +280,14 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 	}
 	if event.Category == "radius" {
 		for _, match := range radiusPair.FindAllStringSubmatch(text, -1) {
-			event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(match[2])
+			value := match[2]
+			if value == "" {
+				value = match[3]
+			}
+			if value == "" {
+				value = match[4]
+			}
+			event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(value)
 		}
 		if match := radiusSession.FindStringSubmatch(text); match != nil {
 			event.Attributes["acct_session_id"] = strings.TrimSpace(match[1])
@@ -296,7 +303,12 @@ func classify(component, application, message string) string {
 	switch {
 	case upperApplication == "WEBAPP" || upperComponent == "WEBS" || upperComponent == "SEC":
 		return "system_journal"
-	case strings.Contains(upper, "RADIUS") || strings.Contains(upper, "ACCESS-REQUEST") || strings.Contains(upper, "ACCOUNTING-REQUEST"):
+	case strings.Contains(upper, "RADIUS") ||
+		strings.Contains(upper, "ACCESS-REQUEST") || strings.Contains(upper, "ACCESS-ACCEPT") ||
+		strings.Contains(upper, "ACCESS-REJECT") || strings.Contains(upper, "ACCOUNTING-REQUEST") ||
+		strings.Contains(upper, "ACCOUNTING-RESPONSE") || strings.Contains(upper, "ACCT-SESSION-ID") ||
+		strings.Contains(upper, "CALLING-STATION-ID") || strings.Contains(upper, "CALLED-STATION-ID") ||
+		strings.Contains(upper, "XPGK-"):
 		return "radius"
 	case strings.Contains(upper, "SS7") || strings.Contains(upper, "ISUP") || strings.Contains(upper, "IAM") || strings.Contains(upper, " RLC"):
 		return "isup"

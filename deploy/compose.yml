@@ -97,7 +97,7 @@ services:
     restart: unless-stopped
 
   collector:
-    image: ghcr.io/finenumbers/collector:${COLLECTOR_VERSION:-latest}
+    image: ghcr.io/finenumbers/collector:latest
     pull_policy: always
     depends_on:
       postgres: { condition: service_healthy }

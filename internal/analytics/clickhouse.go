@@ -89,6 +89,17 @@ type CallRow struct {
 	OutgoingDescription string     `json:"outgoingDescription"`
 	RadiusSessionID     string     `json:"radiusSessionId"`
 	UniqueTag           string     `json:"uniqueTag"`
+	SortTime            time.Time  `json:"-"`
+}
+
+type CallCursor struct {
+	SortTime time.Time
+	RecordID uuid.UUID
+}
+
+type CallPage struct {
+	Items   []CallRow
+	HasMore bool
 }
 
 type CDRRecord struct {
@@ -299,8 +310,7 @@ func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, categor
 		case "unknown":
 			query += ` AND (category='unknown' OR parse_status!='parsed')`
 		case "antifraud":
-			query += ` AND category='radius' AND
-				(attributes['xpgk_request_type']!='' OR positionCaseInsensitive(payload,'antifraud')>0)`
+			query += ` AND category='radius'`
 		default:
 			query += ` AND category=?`
 			args = append(args, category)
@@ -341,27 +351,39 @@ func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, categor
 }
 
 func (c *Client) ListCalls(ctx context.Context, deviceID uuid.UUID, search string, limit uint64) ([]CallRow, error) {
+	page, err := c.ListCallsPage(ctx, deviceID, search, limit, nil)
+	return page.Items, err
+}
+
+func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor) (CallPage, error) {
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
 	query := `SELECT record_id,setup_time,duration_ms,release_cause,release_info,
 		incoming_cgpn,outgoing_cgpn,incoming_cdpn,outgoing_cdpn,
-		incoming_description,outgoing_description,radius_session_id,unique_tag
+		incoming_description,outgoing_description,radius_session_id,unique_tag,
+		coalesce(setup_time,ingested_at) AS sort_time
 		FROM collector.cdr_records WHERE device_id=?`
 	args := []any{deviceID}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(incoming_cgpn,?)>0 OR positionCaseInsensitive(outgoing_cgpn,?)>0
 			OR positionCaseInsensitive(incoming_cdpn,?)>0 OR positionCaseInsensitive(outgoing_cdpn,?)>0
-			OR positionCaseInsensitive(radius_session_id,?)>0)`
-		for range 5 {
+			OR positionCaseInsensitive(radius_session_id,?)>0 OR positionCaseInsensitive(unique_tag,?)>0
+			OR positionCaseInsensitive(incoming_description,?)>0 OR positionCaseInsensitive(outgoing_description,?)>0)`
+		for range 8 {
 			args = append(args, search)
 		}
 	}
-	query += ` ORDER BY setup_time DESC LIMIT ?`
-	args = append(args, limit)
+	if cursor != nil {
+		query += ` AND (coalesce(setup_time,ingested_at) < ?
+			OR (coalesce(setup_time,ingested_at) = ? AND record_id < ?))`
+		args = append(args, cursor.SortTime, cursor.SortTime, cursor.RecordID)
+	}
+	query += ` ORDER BY sort_time DESC,record_id DESC LIMIT ?`
+	args = append(args, limit+1)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return CallPage{}, err
 	}
 	defer rows.Close()
 	result := make([]CallRow, 0)
@@ -370,12 +392,19 @@ func (c *Client) ListCalls(ctx context.Context, deviceID uuid.UUID, search strin
 		if err := rows.Scan(&row.RecordID, &row.SetupTime, &row.DurationMS, &row.ReleaseCause,
 			&row.ReleaseInfo, &row.IncomingCgPN, &row.OutgoingCgPN, &row.IncomingCdPN,
 			&row.OutgoingCdPN, &row.IncomingDescription, &row.OutgoingDescription,
-			&row.RadiusSessionID, &row.UniqueTag); err != nil {
-			return nil, err
+			&row.RadiusSessionID, &row.UniqueTag, &row.SortTime); err != nil {
+			return CallPage{}, err
 		}
 		result = append(result, row)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return CallPage{}, err
+	}
+	hasMore := uint64(len(result)) > limit
+	if hasMore {
+		result = result[:limit]
+	}
+	return CallPage{Items: result, HasMore: hasMore}, nil
 }
 
 func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID) ([]TimelineRow, error) {

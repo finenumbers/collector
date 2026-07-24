@@ -276,7 +276,7 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	var nextCursor any
 	if page.HasMore && len(page.Items) > 0 {
 		last := page.Items[len(page.Items)-1]
-		nextCursor = map[string]any{"receivedAt": last.ReceivedAt, "eventId": last.EventID}
+		nextCursor = map[string]any{"before": last.ReceivedAt, "beforeId": last.EventID}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
@@ -289,12 +289,33 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
-	rows, err := s.Analytics.ListCalls(request.Context(), deviceID, request.URL.Query().Get("q"), limit)
+	var cursor *analytics.CallCursor
+	before := request.URL.Query().Get("before")
+	beforeID := request.URL.Query().Get("before_id")
+	if before != "" || beforeID != "" {
+		sortTime, timeErr := time.Parse(time.RFC3339Nano, before)
+		recordID, idErr := uuid.Parse(beforeID)
+		if timeErr != nil || idErr != nil {
+			writeError(writer, http.StatusBadRequest, "invalid call cursor")
+			return
+		}
+		cursor = &analytics.CallCursor{SortTime: sortTime, RecordID: recordID}
+	}
+	page, err := s.Analytics.ListCallsPage(
+		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
+	)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query calls")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
+	var nextCursor any
+	if page.HasMore && len(page.Items) > 0 {
+		last := page.Items[len(page.Items)-1]
+		nextCursor = map[string]any{"before": last.SortTime, "beforeId": last.RecordID}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
+	})
 }
 
 func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) {

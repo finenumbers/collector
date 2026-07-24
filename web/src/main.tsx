@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Activity, AlertTriangle, CirclePlus, Database, FileClock,
@@ -53,11 +53,18 @@ type CallRow = {
   radiusSessionId: string
   uniqueTag: string
 }
+type PageCursor = { before: string; beforeId: string }
+type PageResponse = {
+  items: Array<EventRow | CallRow>
+  hasMore: boolean
+  nextCursor?: PageCursor
+}
 type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
   'q931' | 'ip_connections' | 'ip_modules' | 'radius' | 'config_history' |
   'system_journal' | 'unknown'
 
 let csrfToken = ''
+const PAGE_SIZE = 100
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -260,42 +267,81 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
   const [stats, setStats] = useState<DeviceStats | null>(null)
-  const [eventCursor, setEventCursor] = useState<{ receivedAt: string; eventId: string } | null>(null)
+  const [cursor, setCursor] = useState<PageCursor | null>(null)
   const [hasMore, setHasMore] = useState(false)
+  const tableShellRef = useRef<HTMLDivElement>(null)
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  const loadingRef = useRef(false)
+  const generationRef = useRef(0)
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const category = dataset === 'syslog_all' ? 'all' : dataset
   const exportUrl = `/api/devices/${device.id}/export.xlsx?dataset=${dataset === 'calls' ? 'calls' : 'events'}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}`
+  const pagePath = useCallback((pageCursor?: PageCursor) => {
+    const base = dataset === 'calls'
+      ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+      : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+    return pageCursor
+      ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
+      : base
+  }, [category, dataset, device.id, query])
+  const setBusy = useCallback((value: boolean) => {
+    loadingRef.current = value
+    setLoading(value)
+  }, [])
   useEffect(() => {
     api<DeviceStats>(`/devices/${device.id}/stats`).then(setStats).catch(() => setStats(null))
   }, [device.id])
   useEffect(() => {
+    const generation = ++generationRef.current
+    let active = true
     const timer = window.setTimeout(() => {
-      setLoading(true)
-      const path = dataset === 'calls'
-        ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=500`
-        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=500`
-      api<{ items: Array<EventRow | CallRow>; hasMore?: boolean; nextCursor?: { receivedAt: string; eventId: string } }>(path)
+      setRows([])
+      setCursor(null)
+      setHasMore(false)
+      if (tableShellRef.current) tableShellRef.current.scrollTop = 0
+      setBusy(true)
+      api<PageResponse>(pagePath())
         .then(({ items, hasMore: more, nextCursor }) => {
+          if (!active || generation !== generationRef.current) return
           setRows(items || [])
-          setHasMore(Boolean(more))
-          setEventCursor(nextCursor || null)
+          setHasMore(more)
+          setCursor(nextCursor || null)
         })
-        .finally(() => setLoading(false))
+        .finally(() => {
+          if (active) setBusy(false)
+        })
     }, 250)
-    return () => window.clearTimeout(timer)
-  }, [category, device.id, dataset, query])
-  const loadMoreEvents = () => {
-    if (!eventCursor || loading || dataset === 'calls') return
-    setLoading(true)
-    const path = `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=500&before=${encodeURIComponent(eventCursor.receivedAt)}&before_id=${encodeURIComponent(eventCursor.eventId)}`
-    api<{ items: EventRow[]; hasMore: boolean; nextCursor?: { receivedAt: string; eventId: string } }>(path)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [pagePath, setBusy])
+  const loadMore = useCallback(() => {
+    if (!cursor || !hasMore || loadingRef.current) return
+    const generation = generationRef.current
+    setBusy(true)
+    api<PageResponse>(pagePath(cursor))
       .then(({ items, hasMore: more, nextCursor }) => {
+        if (generation !== generationRef.current) return
         setRows((current) => [...current, ...(items || [])])
         setHasMore(more)
-        setEventCursor(nextCursor || null)
+        setCursor(nextCursor || null)
       })
-      .finally(() => setLoading(false))
-  }
+      .finally(() => {
+        if (generation === generationRef.current) setBusy(false)
+      })
+  }, [cursor, hasMore, pagePath, setBusy])
+  useEffect(() => {
+    const root = tableShellRef.current
+    const target = sentinelRef.current
+    if (!root || !target || !hasMore) return
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) loadMore()
+    }, { root, rootMargin: '240px 0px', threshold: 0 })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [hasMore, loadMore])
+  const showRadiusEmpty = !loading && rows.length === 0 && (dataset === 'antifraud' || dataset === 'radius')
   return <section className="data-view">
     {stats && <div className="stat-strip">
       <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>
@@ -313,16 +359,27 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
         <button className="secondary" onClick={() => { window.location.href = exportUrl }}>Экспорт XLSX</button>
       </div>
     </div>
-    <div className="table-shell">
+    <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
       {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} onSelect={setSelectedCall} /> :
         <EventsTable rows={rows as EventRow[]} onSelect={setSelectedEvent} />}
+      {showRadiusEmpty && <RadiusEmptyState />}
+      <div className="scroll-sentinel" ref={sentinelRef}>
+        {loading && rows.length > 0 ? 'Загрузка следующих 100 записей…' : hasMore ? '' : rows.length > 0 ? 'Все записи загружены' : ''}
+      </div>
     </div>
-    {dataset !== 'calls' && hasMore && <button className="load-more secondary" disabled={loading}
-      onClick={loadMoreEvents}>{loading ? 'Загрузка…' : 'Показать ещё 500'}</button>}
     {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
     {selectedEvent && <EventDrawer event={selectedEvent} onClose={() => setSelectedEvent(null)} />}
   </section>
+}
+
+function RadiusEmptyState() {
+  return <div className="table-empty">
+    <strong>RADIUS-сообщения не получены</strong>
+    <p>Проверьте наличие тестового вызова, включение «АнтиФрод» в активном RADIUS-профиле SMG,
+      группы Access/Accounting серверов и уровень трассировки Syslog. Режим Custom сам по себе
+      задаёт формат RADIUS, но не создаёт события без вызовов.</p>
+  </div>
 }
 
 function CallsTable({ rows, onSelect }: { rows: CallRow[]; onSelect: (row: CallRow) => void }) {

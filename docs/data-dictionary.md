@@ -54,4 +54,6 @@
 
 Сохраняются standard и vendor-specific attributes. Ключевые: Calling/Called-Station-Id, Acct-Session-Id, Event-Timestamp, Acct-Delay-Time, session duration, setup/connect/disconnect, disconnect cause, trunk labels, gateway IP, redirect/original numbers.
 
+Классификатор распознаёт RADIUS и без буквального слова `RADIUS`: по пакетам `Access-Request/Accept/Reject`, `Accounting-Request/Response`, атрибутам `Acct-Session-Id`, `Calling/Called-Station-Id` и VSA `xpgk-*`. В режиме Custom вкладка «АнтиФрод» показывает полный поток категории `radius`, не только события с уже извлечённым `xpgk-request-type`.
+
 Результаты `check_call`: Access-Accept продолжает, Access-Reject завершает, timeout документирован как fail-open после исчерпания серверов/попыток. `save_call` не должен блокировать вызов.

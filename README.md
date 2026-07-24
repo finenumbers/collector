@@ -8,7 +8,7 @@
 ## Реализовано
 
 - изолированная регистрация нескольких SMG по IP-источнику Syslog и отдельной FTP-учётной записи;
-- UDP Syslog receiver с retrying disk spool, JetStream без silent eviction, DLQ/quarantine и сохранением исходного payload;
+- host-network UDP ingress с сохранением реального source IP/port, отдельным durable handoff spool, JetStream без silent eviction, DLQ/quarantine и сохранением исходного payload;
 - tolerant parser Eltex trace envelope, RFC3164/PRI и категорий alarm/call/SIP/ISUP/Q.931/IP/RADIUS/system journal;
 - приём CDR через SFTPGo FTP, неизменяемый raw-архив MinIO, UTF-8/Windows-1251 и динамический порядок колонок;
 - нормализация полного CDR, включая Acct-Session-Id, UniqueTag, SIP Call-ID, GCR, CIC и исходные поля;
@@ -27,7 +27,7 @@
 5. Deploy/redeploy stack. `pull_policy: always` всегда загрузит публичный multi-arch образ `ghcr.io/finenumbers/collector:latest`.
 6. В NPM создайте Proxy Host: scheme `http`, hostname `smg-collector`, port `8080`; включите SSL, Force SSL, HTTP/2 и Block Common Exploits.
 
-Порт `8080` не публикуется на Docker-хосте: NPM обращается к сервису только через сеть `proxy`. Откройте настроенный домен и создайте первого администратора. Затем добавьте SMG; система покажет одноразовые FTP-реквизиты и адрес Syslog.
+Порт `8080` не публикуется на Docker-хосте: NPM обращается к сервису только через сеть `proxy`. Отдельный `collector-ingress` использует host network только для `514/udp`, чтобы Docker SNAT не скрывал IP конкретного SMG. Откройте настроенный домен и создайте первого администратора. Затем добавьте SMG; система покажет одноразовые FTP-реквизиты и адрес Syslog.
 
 Для локальной разработки можно собрать образ вручную и временно подключить тестовый reverse proxy. Production stack всегда использует GHCR.
 
@@ -47,7 +47,7 @@ Production Compose намеренно использует только `ghcr.io
 1. В `Трассировки → SYSLOG` укажите `PUBLIC_HOST`, UDP-порт `514`, включите нужные категории. Для длительного мониторинга Eltex рекомендует уровень `1`; `99` используйте только контролируемо.
 2. В CDR включите строку имён полей и полный набор полей. Укажите FTP `PUBLIC_HOST:21`, выданные логин/пароль и каталог `/`.
 3. Настройте NTP и корректный timezone на шлюзе. Значение timezone также задаётся в карточке устройства.
-4. Ограничьте доступ к портам `514/udp`, `21/tcp` и `50000-50100/tcp` management-сетью SMG.
+4. Ограничьте доступ к портам `514/udp`, `21/tcp` и `50000-50100/tcp` management-сетью SMG. Host port `514/udp` должен быть свободен от rsyslog/syslog-ng.
 
 ## Проверка
 

@@ -42,16 +42,28 @@ type SyslogBreakdown = {
   category: string; parseStatus: string; parserVersion: string; headerFormat: string
   sourcePort: number; count: number; lastReceivedAt: string
 }
+type IngestRuntime = {
+  acceptedDatagrams: number; rejectedDatagrams: number; spoolWriteErrors: number
+  handoffErrors: number; handedOff: number
+}
+type IngressStatus = {
+  updatedAt: string
+  runtime: IngestRuntime
+  spoolDepth: number
+  quarantineDepth: number
+}
 type SyslogDiagnostics = {
   version: string
   parserVersion: string
-  runtime: { acceptedDatagrams: number; rejectedDatagrams: number; spoolWriteErrors: number }
+  runtime: IngestRuntime
   spoolDepth: number
   quarantineDepth: number
   natsStreamMessages: number
   natsConsumerPending: number
   breakdown: SyslogBreakdown[]
   appliedMigrations: string[]
+  ingressAvailable: boolean
+  ingress: IngressStatus
 }
 type CallRow = {
   recordId: string
@@ -401,12 +413,21 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
   return <details className="diagnostic-panel">
     <summary>
       Диагностика Syslog · Collector {value.version} · parser {value.parserVersion} ·
-      порт 10003: {trace.toLocaleString('ru-RU')} · spool: {value.spoolDepth.toLocaleString('ru-RU')}
+      порт 10003: {trace.toLocaleString('ru-RU')} · ingress:
+      {value.ingressAvailable ? value.ingress.runtime.acceptedDatagrams.toLocaleString('ru-RU') : ' недоступен'}
     </summary>
     <div className="diagnostic-facts">
-      <span>Принято после запуска: <strong>{value.runtime.acceptedDatagrams.toLocaleString('ru-RU')}</strong></span>
-      <span>Отклонено: <strong>{value.runtime.rejectedDatagrams.toLocaleString('ru-RU')}</strong></span>
-      <span>Ошибок spool: <strong>{value.runtime.spoolWriteErrors.toLocaleString('ru-RU')}</strong></span>
+      <span>Ingress принято: <strong>{value.ingressAvailable
+        ? value.ingress.runtime.acceptedDatagrams.toLocaleString('ru-RU') : '—'}</strong></span>
+      <span>Ingress передано: <strong>{value.ingressAvailable
+        ? value.ingress.runtime.handedOff.toLocaleString('ru-RU') : '—'}</strong></span>
+      <span>Ingress spool: <strong>{value.ingressAvailable
+        ? value.ingress.spoolDepth.toLocaleString('ru-RU') : '—'}</strong></span>
+      <span>Ошибок handoff: <strong>{value.ingressAvailable
+        ? value.ingress.runtime.handoffErrors.toLocaleString('ru-RU') : '—'}</strong></span>
+      <span>App принято: <strong>{value.runtime.acceptedDatagrams.toLocaleString('ru-RU')}</strong></span>
+      <span>App отклонено: <strong>{value.runtime.rejectedDatagrams.toLocaleString('ru-RU')}</strong></span>
+      <span>App spool: <strong>{value.spoolDepth.toLocaleString('ru-RU')}</strong></span>
       <span>NATS stream: <strong>{value.natsStreamMessages.toLocaleString('ru-RU')}</strong></span>
       <span>NATS pending: <strong>{value.natsConsumerPending.toLocaleString('ru-RU')}</strong></span>
       <span>Quarantine: <strong>{value.quarantineDepth.toLocaleString('ru-RU')}</strong></span>

@@ -6,9 +6,11 @@
 
 ```mermaid
 flowchart LR
-    SMG[SMG-1016M] -->|Syslog UDP| Receiver[Collector receiver]
+    SMG[SMG-1016M] -->|Syslog UDP| Ingress[Host-network ingress]
     SMG -->|CDR FTP| FTP[SFTPGo]
-    Receiver --> Spool[Durable local spool]
+    Ingress --> IngressSpool[Ingress durable spool]
+    IngressSpool -->|Unix socket with ACK| Receiver[Collector receiver]
+    Receiver --> Spool[App durable spool]
     Spool --> NATS[NATS JetStream]
     NATS --> Parser[Versioned parser]
     FTP --> Watcher[CDR watcher]
@@ -23,10 +25,11 @@ flowchart LR
 
 ## Компоненты
 
-- `collector`: один stateless image; HTTP API, UDP receiver, Syslog worker и CDR watcher запускаются как независимые goroutines с общим graceful shutdown.
+- `collector-ingress`: тот же stateless image в роли `ingress`; host-network UDP receiver фиксирует реальный source IP/port в отдельном `ingress.db` и передаёт подтверждёнными batch через локальный Unix socket.
+- `collector`: image в роли `app`; HTTP API, device validation, Syslog worker и CDR watcher запускаются как независимые goroutines с общим graceful shutdown. Сервис остаётся в Docker-сетях `default` и `proxy`.
 - `PostgreSQL`: control plane — users/sessions, devices, ingest file ledger, export jobs и audit.
 - `ClickHouse`: append-oriented raw Syslog, CDR, RADIUS facts, call-event links и агрегаты.
-- `durable spool`: локальная BoltDB-очередь; datagram фиксируется на диске до попытки публикации и переживает недоступность/restart NATS; повреждённые envelopes атомарно переносятся в quarantine bucket.
+- `durable spool`: две независимые BoltDB-очереди. `ingress.db` удерживает datagram до ACK после device validation и записи в `syslog.db`; `syslog.db` удерживает envelope до JetStream publish. Файлы не открываются двумя процессами одновременно; повреждённые envelopes атомарно переносятся в quarantine bucket.
 - `NATS JetStream`: disk-backed work queue между spool publisher и parser; без time-based eviction, duplicate window 72 часа, лимит 20 GiB и `discard=new`, чтобы переполнение оставляло данные в local spool. Некорректные envelopes сохраняются в отдельном `SYSLOG_DLQ`.
 - `MinIO`: неизменяемые исходные CDR. Архивация Syslog в MinIO пока не реализована; canonical raw-копия хранится в ClickHouse.
 - `SFTPGo`: FTP endpoint, динамическая отдельная учётная запись и home каждого SMG.
@@ -34,7 +37,7 @@ flowchart LR
 
 ## Границы надёжности
 
-UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в process. Запись в local spool повторяется до успеха; сообщение не удаляется до JetStream acknowledgement. `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.
+UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в ingress process. После этого datagram удаляется из ingress spool только после ACK основного Collector, а из app spool — только после JetStream acknowledgement. Один `event_id` проходит через оба spool; повторная передача безопасно перезаписывает BoltDB key, а `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 

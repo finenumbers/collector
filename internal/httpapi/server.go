@@ -32,15 +32,16 @@ import (
 const sessionCookie = "collector_session"
 
 type Server struct {
-	Config    config.Config
-	Store     *store.Store
-	Analytics *analytics.Client
-	FTP       *ftpclient.Provisioner
-	StaticDir string
-	Version   string
-	Metrics   *ingest.Metrics
-	Spool     *spool.Queue
-	NATS      *nats.Conn
+	Config            config.Config
+	Store             *store.Store
+	Analytics         *analytics.Client
+	FTP               *ftpclient.Provisioner
+	StaticDir         string
+	Version           string
+	Metrics           *ingest.Metrics
+	Spool             *spool.Queue
+	NATS              *nats.Conn
+	IngressStatusPath string
 }
 
 type contextKey string
@@ -371,12 +372,16 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 			}
 		}
 	}
+	ingressStatus, ingressStatusErr := ingest.ReadIngressStatus(s.IngressStatusPath)
+	ingressAvailable := ingressStatusErr == nil &&
+		time.Since(ingressStatus.UpdatedAt) < 5*time.Second
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"version": s.Version, "parserVersion": analytics.SyslogParserVersion,
 		"runtime": s.Metrics.Snapshot(), "spoolDepth": spoolDepth,
 		"quarantineDepth": quarantineDepth, "natsStreamMessages": natsStreamMessages,
 		"natsConsumerPending": natsConsumerPending, "breakdown": diagnostics.Breakdown,
 		"appliedMigrations": diagnostics.AppliedMigrations,
+		"ingress":           ingressStatus, "ingressAvailable": ingressAvailable,
 	})
 }
 

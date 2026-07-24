@@ -40,98 +40,9 @@ func RunDeviceRevisionRebuilds(
 			}
 		}
 		for _, initial := range jobs {
-			job := initial
-			config, configErr := control.DeviceTimeConfig(ctx, job.DeviceID)
-			if configErr != nil {
-				return configErr
-			}
-			if uint64(config.TimezoneRevision) != job.Revision {
-				if err := client.SupersedeDeviceRevision(
-					ctx, job, "newer device timezone revision exists",
-				); err != nil {
-					return err
-				}
-				continue
-			}
-			rows, err := client.NextDeviceRevisionSyslogBatch(ctx, job, 1_000)
-			if err != nil {
+			if err := processDeviceRevisionJob(ctx, client, control, continuations, initial); err != nil {
 				return err
 			}
-			if len(rows) != 0 {
-				location, locationErr := time.LoadLocation(job.Timezone)
-				if locationErr != nil {
-					return locationErr
-				}
-				events := make([]analytics.SyslogEvent, 0, len(rows))
-				for _, row := range rows {
-					event := ParseSyslogInLocation(RawSyslog{
-						EventID: row.EventID, DeviceID: row.DeviceID,
-						ReceivedAt: row.ReceivedAt, SourceIP: row.SourceIP.String(),
-						SourcePort: row.SourcePort, Payload: row.Payload,
-						Timezone: job.Timezone, TimezoneRevision: job.Revision,
-					}, location)
-					events = append(events, event)
-				}
-				continuations.Assemble(events)
-				if err := client.InsertSyslogFactsBatch(ctx, events); err != nil {
-					return err
-				}
-				if err := client.ProcessSyslogShadowDerivedBatch(ctx, events); err != nil {
-					return err
-				}
-				if err := client.AdvanceDeviceRevisionSyslog(ctx, job, rows); err != nil {
-					return err
-				}
-				continue
-			}
-			var cdrDone bool
-			job, cdrDone, err = client.RebuildCDRTimeChunk(ctx, job, 1_000)
-			if err != nil {
-				return err
-			}
-			if !cdrDone {
-				continue
-			}
-			if job.Status == "building" {
-				if err := control.ActivateDeviceTimezoneRevision(
-					ctx, job.DeviceID, int64(job.Revision),
-				); err != nil {
-					if errors.Is(err, store.ErrNotFound) {
-						if supersedeErr := client.SupersedeDeviceRevision(
-							ctx, job, "newer device timezone revision exists",
-						); supersedeErr != nil {
-							return supersedeErr
-						}
-						continue
-					}
-					return err
-				}
-				if err := client.BeginDeviceRevisionCutover(ctx, job); err != nil {
-					return err
-				}
-				continue
-			}
-			if job.CutoverSealed == 0 {
-				if time.Since(job.UpdatedAt) < 6*time.Second {
-					continue
-				}
-				job, _, err = client.RefreshDeviceRevisionHighWatermarks(ctx, job)
-				if err != nil {
-					return err
-				}
-				continue
-			}
-			job, err = client.MarkDeviceRevisionReady(ctx, job)
-			if err != nil {
-				return err
-			}
-			if err := client.ActivateDeviceRevision(ctx, job); err != nil {
-				return err
-			}
-			slog.Info("device derived revision activated",
-				"device", job.DeviceID, "revision", job.Revision,
-				"timezone", job.Timezone, "syslog", job.Processed,
-				"cdr", job.CDRProcessed, "antifraud", job.LifecycleCount)
 		}
 		select {
 		case <-ctx.Done():
@@ -139,6 +50,86 @@ func RunDeviceRevisionRebuilds(
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+	return nil
+}
+
+func processDeviceRevisionJob(
+	ctx context.Context, client *analytics.Client, control *store.Store,
+	continuations *ContinuationAssembler, job analytics.DeviceRevisionJob,
+) error {
+	release := control.LockDeviceWrites(job.DeviceID)
+	defer release()
+	config, err := control.DeviceTimeConfig(ctx, job.DeviceID)
+	if errors.Is(err, store.ErrDeviceDeleting) || errors.Is(err, store.ErrNotFound) {
+		return client.SupersedeDeviceRevision(ctx, job, "device is being deleted")
+	}
+	if err != nil {
+		return err
+	}
+	if uint64(config.TimezoneRevision) != job.Revision {
+		return client.SupersedeDeviceRevision(ctx, job, "newer device timezone revision exists")
+	}
+	rows, err := client.NextDeviceRevisionSyslogBatch(ctx, job, 1_000)
+	if err != nil {
+		return err
+	}
+	if len(rows) != 0 {
+		location, err := time.LoadLocation(job.Timezone)
+		if err != nil {
+			return err
+		}
+		events := make([]analytics.SyslogEvent, 0, len(rows))
+		for _, row := range rows {
+			events = append(events, ParseSyslogInLocation(RawSyslog{
+				EventID: row.EventID, DeviceID: row.DeviceID,
+				ReceivedAt: row.ReceivedAt, SourceIP: row.SourceIP.String(),
+				SourcePort: row.SourcePort, Payload: row.Payload,
+				Timezone: job.Timezone, TimezoneRevision: job.Revision,
+			}, location))
+		}
+		continuations.Assemble(events)
+		if err := client.InsertSyslogFactsBatch(ctx, events); err != nil {
+			return err
+		}
+		if err := client.ProcessSyslogShadowDerivedBatch(ctx, events); err != nil {
+			return err
+		}
+		return client.AdvanceDeviceRevisionSyslog(ctx, job, rows)
+	}
+	var cdrDone bool
+	job, cdrDone, err = client.RebuildCDRTimeChunk(ctx, job, 1_000)
+	if err != nil || !cdrDone {
+		return err
+	}
+	if job.Status == "building" {
+		if err := control.ActivateDeviceTimezoneRevision(ctx, job.DeviceID, int64(job.Revision)); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return client.SupersedeDeviceRevision(
+					ctx, job, "newer device timezone revision exists",
+				)
+			}
+			return err
+		}
+		return client.BeginDeviceRevisionCutover(ctx, job)
+	}
+	if job.CutoverSealed == 0 {
+		if time.Since(job.UpdatedAt) < 6*time.Second {
+			return nil
+		}
+		_, _, err = client.RefreshDeviceRevisionHighWatermarks(ctx, job)
+		return err
+	}
+	job, err = client.MarkDeviceRevisionReady(ctx, job)
+	if err != nil {
+		return err
+	}
+	if err := client.ActivateDeviceRevision(ctx, job); err != nil {
+		return err
+	}
+	slog.Info("device derived revision activated",
+		"device", job.DeviceID, "revision", job.Revision,
+		"timezone", job.Timezone, "syslog", job.Processed,
+		"cdr", job.CDRProcessed, "antifraud", job.LifecycleCount)
 	return nil
 }
 

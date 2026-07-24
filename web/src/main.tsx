@@ -5,8 +5,11 @@ import {
   LogOut, Network, PhoneCall, Radio, Search, Server, Settings, ShieldCheck,
 } from 'lucide-react'
 import './styles.css'
+import { canManageUsers, purgeConfirmationReady, purgeRetryLabel } from './settings'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
+type ManagedUser = User & { active: boolean; createdAt: string }
+type SystemInfo = { version: string; status: string; user: User; services: Record<string, boolean> }
 type Device = {
   id: string
   name: string
@@ -27,6 +30,8 @@ type Device = {
   generatedPassword?: string
   enabled: boolean
   cdrColumns: string[]
+  purgeState?: 'active' | 'deleting' | 'purge_failed'
+  purgeError?: string
 }
 type EventRow = {
   eventId: string
@@ -176,21 +181,40 @@ type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 
 let csrfToken = ''
 const PAGE_SIZE = 100
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    credentials: 'same-origin',
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
-      ...init?.headers,
-    },
-  })
-  if (response.status === 204) return undefined as T
-  const body = await response.json().catch(() => ({})) as { error?: string }
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
-  return body as T
+async function api<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const { timeoutMs, ...requestInit } = init || {}
+  const controller = timeoutMs ? new AbortController() : undefined
+  const timer = timeoutMs
+    ? window.setTimeout(() => controller?.abort(), timeoutMs)
+    : undefined
+  try {
+    const response = await fetch(`/api${path}`, {
+      credentials: 'same-origin',
+      ...requestInit,
+      signal: controller?.signal ?? requestInit.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        ...requestInit.headers,
+      },
+    })
+    if (response.status === 204) return undefined as T
+    const body = await response.json().catch(() => ({})) as { error?: string }
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+    return body as T
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer)
+  }
 }
+
+const purgePhases = [
+  'Блокировка приёма Syslog/CDR…',
+  'Очистка ingress и FTP…',
+  'Очистка spool и NATS…',
+  'Удаление ClickHouse…',
+  'Удаление MinIO и CDR volume…',
+  'Финальная проверка PostgreSQL…',
+]
 
 function App() {
   const [bootstrapped, setBootstrapped] = useState<boolean | null>(null)
@@ -289,6 +313,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [showCreate, setShowCreate] = useState(false)
   const [editingDevice, setEditingDevice] = useState<Device | null>(null)
   const [credentials, setCredentials] = useState<Device | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
   const [error, setError] = useState('')
 
   const loadDevices = useCallback(() => api<{ items: Device[] }>('/devices').then(({ items }) => {
@@ -315,8 +340,14 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         {devices.map((device) => <button key={device.id}
           className={`device-button ${device.id === activeDevice ? 'active' : ''}`}
           onClick={() => { setActiveDevice(device.id); setDataset('calls') }}>
-          <span className={`status-dot ${device.enabled ? 'online' : ''}`} />
-          <span><strong>{device.name}</strong><small>{device.syslogSourceIp}</small></span>
+          <span className={`status-dot ${device.enabled && device.purgeState !== 'purge_failed' ? 'online' : ''}`} />
+          <span>
+            <strong>{device.name}</strong>
+            <small>
+              {device.purgeState === 'purge_failed' ? 'Ошибка удаления' :
+                device.purgeState === 'deleting' ? 'Удаление…' : device.syslogSourceIp}
+            </small>
+          </span>
         </button>)}
         {user.role === 'admin' && <button className="add-device" onClick={() => setShowCreate(true)}>
           <CirclePlus size={15} /> Добавить SMG
@@ -324,7 +355,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       </div>
       {selected && <DeviceNavigation active={dataset} onChange={setDataset} />}
       <div className="sidebar-footer">
-        <button><Settings size={15} /> Настройки</button>
+        <button onClick={() => setShowSettings(true)}><Settings size={15} /> Настройки</button>
         <div className="user-line"><span><strong>{user.username}</strong><small>{user.role}</small></span>
           <button title="Выйти" onClick={onLogout}><LogOut size={15} /></button></div>
       </div>
@@ -336,8 +367,16 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           {selected && <span>{selected.model} · {selected.firmware} · {selected.timezone}</span>}
         </div>
         {selected && <div className="header-health">
-          <span><i className="status-dot online" /> Приём активен</span>
+          <span><i className={`status-dot ${selected.enabled && selected.purgeState !== 'purge_failed' ? 'online' : ''}`} />
+            {selected.purgeState === 'purge_failed' ? 'Удаление не завершено' :
+              selected.purgeState === 'deleting' ? 'Идёт удаление' :
+                selected.enabled ? 'Приём активен' : 'Приём выключен'}
+          </span>
           <span>{selected.antifraudEnabled ? `АнтиФрод: ${selected.antifraudMode}` : 'Без АнтиФрод'}</span>
+          {user.role === 'admin' && selected.purgeState === 'purge_failed' &&
+            <button className="danger" onClick={() => setEditingDevice(selected)}>
+              Повторить удаление
+            </button>}
           {user.role === 'admin' && <button className="secondary"
             onClick={() => setEditingDevice(selected)}>Настройки SMG</button>}
         </div>}
@@ -354,11 +393,17 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       setActiveDevice(device.id)
     }} />}
     {editingDevice && <EditDeviceDialog device={editingDevice}
+      initialDeleting={editingDevice.purgeState === 'purge_failed'}
       onClose={() => setEditingDevice(null)} onSaved={(device) => {
         setDevices((current) => current.map((item) => item.id === device.id ? device : item))
         setEditingDevice(null)
+      }} onDeleted={() => {
+        setEditingDevice(null)
+        setActiveDevice('')
+        void loadDevices()
       }} />}
     {credentials && <CredentialsDialog device={credentials} onClose={() => setCredentials(null)} />}
+    {showSettings && <SystemSettingsDialog user={user} onClose={() => setShowSettings(false)} />}
   </div>
 }
 
@@ -892,10 +937,12 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
   </Modal>
 }
 
-function EditDeviceDialog({ device, onClose, onSaved }: {
+function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting = false }: {
   device: Device
   onClose: () => void
   onSaved: (device: Device) => void
+  onDeleted: () => void
+  initialDeleting?: boolean
 }) {
   const [form, setForm] = useState({
     name: device.name, firmware: device.firmware, timezone: device.timezone,
@@ -904,10 +951,20 @@ function EditDeviceDialog({ device, onClose, onSaved }: {
     antifraudMode: device.antifraudMode, enabled: device.enabled,
     cdrColumnsText: (device.cdrColumns || []).join('; '),
   })
-  const [error, setError] = useState('')
+  const [error, setError] = useState(device.purgeError || '')
   const [busy, setBusy] = useState(false)
+  const [deleting, setDeleting] = useState(initialDeleting || device.purgeState === 'purge_failed')
+  const [deleteName, setDeleteName] = useState('')
+  const [phaseIndex, setPhaseIndex] = useState(0)
   const update = (field: string, value: string | boolean) =>
     setForm((current) => ({ ...current, [field]: value }))
+  useEffect(() => {
+    if (!busy || !deleting) return
+    const timer = window.setInterval(() => {
+      setPhaseIndex((current) => Math.min(current + 1, purgePhases.length - 1))
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [busy, deleting])
   async function submit(event: FormEvent) {
     event.preventDefault()
     setBusy(true)
@@ -924,6 +981,52 @@ function EditDeviceDialog({ device, onClose, onSaved }: {
     } finally {
       setBusy(false)
     }
+  }
+  async function purgeDevice() {
+    if (deleteName !== device.name) return
+    setPhaseIndex(0)
+    setBusy(true)
+    setError('')
+    try {
+      await api<void>(`/devices/${device.id}`, {
+        method: 'DELETE',
+        timeoutMs: 16 * 60 * 1000,
+      })
+      onDeleted()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка полного удаления')
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (deleting) {
+    return <Modal title={`Полное удаление ${device.name}`} onClose={busy ? () => undefined : onClose}>
+      <div className="danger-panel" data-testid="purge-dialog">
+        <strong>Операция необратима.</strong>
+        <p>Будут синхронно удалены Syslog, CDR, RADIUS/АнтиФрод, связи,
+          архив MinIO, FTP-файлы, очереди, ревизии и аудит этого SMG.</p>
+        <label>Введите точное имя SMG для подтверждения
+          <input autoFocus value={deleteName} onChange={(event) => setDeleteName(event.target.value)}
+            disabled={busy} data-testid="purge-confirm-name" />
+        </label>
+        {busy && <div className="purge-progress" data-testid="purge-phase">
+          {purgePhases[phaseIndex]} Не закрывайте окно.
+        </div>}
+        {error && <div className="form-error">{error}</div>}
+        <div className="dialog-actions">
+          <button className="secondary" disabled={busy}
+            onClick={() => device.purgeState === 'purge_failed' ? onClose() : setDeleting(false)}>
+            {device.purgeState === 'purge_failed' ? 'Закрыть' : 'Назад'}
+          </button>
+          <button className="danger"
+            disabled={!purgeConfirmationReady(device.name, deleteName, busy)}
+            data-testid="purge-confirm"
+            onClick={() => void purgeDevice()}>
+            {busy ? 'Полное удаление…' : purgeRetryLabel(device.purgeState)}
+          </button>
+        </div>
+      </div>
+    </Modal>
   }
   return <Modal title={`Настройки ${device.name}`} onClose={onClose}>
     <form className="device-form" onSubmit={submit}>
@@ -954,11 +1057,154 @@ function EditDeviceDialog({ device, onClose, onSaved }: {
           onChange={(e) => update('enabled', e.target.checked)} /> Приём данных включён</label>
       </div>
       {error && <div className="form-error">{error}</div>}
-      <div className="dialog-actions"><button type="button" className="secondary"
+      <div className="dialog-actions">
+        <button type="button" className="danger ghost" disabled={busy}
+          onClick={() => setDeleting(true)}>Удалить SMG…</button>
+        <button type="button" className="secondary"
         onClick={onClose}>Отмена</button>
         <button className="primary" disabled={busy}>{busy ? 'Сохранение…' : 'Сохранить'}</button></div>
     </form>
   </Modal>
+}
+
+function SystemSettingsDialog({ user, onClose }: { user: User; onClose: () => void }) {
+  const [info, setInfo] = useState<SystemInfo | null>(null)
+  const [users, setUsers] = useState<ManagedUser[]>([])
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [form, setForm] = useState({ username: '', password: '', role: 'viewer' })
+  const load = useCallback(async () => {
+    try {
+      setInfo(await api<SystemInfo>('/system/info'))
+      if (user.role === 'admin') {
+        const response = await api<{ items: ManagedUser[] }>('/system/users')
+        setUsers(response.items || [])
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка загрузки настроек')
+    }
+  }, [user.role])
+  useEffect(() => {
+    void api<SystemInfo>('/system/info').then(setInfo)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : 'Ошибка загрузки настроек'))
+    if (user.role === 'admin') {
+      void api<{ items: ManagedUser[] }>('/system/users')
+        .then((response) => setUsers(response.items || []))
+        .catch((reason) => setError(reason instanceof Error ? reason.message : 'Ошибка загрузки пользователей'))
+    }
+  }, [user.role])
+  async function create(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      await api('/system/users', { method: 'POST', body: JSON.stringify(form) })
+      setForm({ username: '', password: '', role: 'viewer' })
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка создания пользователя')
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function update(managed: ManagedUser, patch: Partial<ManagedUser>, password = '') {
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await api<ManagedUser>(`/system/users/${managed.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          role: patch.role ?? managed.role,
+          active: patch.active ?? managed.active,
+          password,
+        }),
+      })
+      setUsers((current) => current.map((item) => item.id === updated.id ? updated : item))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка изменения пользователя')
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function remove(managed: ManagedUser) {
+    if (managed.active || managed.id === user.id) return
+    setBusy(true)
+    setError('')
+    try {
+      await api<void>(`/system/users/${managed.id}`, { method: 'DELETE' })
+      setUsers((current) => current.filter((item) => item.id !== managed.id))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка удаления пользователя')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <Modal title="Системные настройки" onClose={onClose}>
+    <div className="system-settings">
+      <section className="settings-summary">
+        <div><small>Collector</small><strong>{info?.version || '…'}</strong></div>
+        <div><small>Состояние API</small><strong className="healthy">{info?.status || 'проверка'}</strong></div>
+        <div><small>Пользователь</small><strong>{user.username} · {user.role}</strong></div>
+      </section>
+      {info && <div className="service-health">
+        {Object.entries(info.services).map(([name, healthy]) =>
+          <span key={name} className={healthy ? 'healthy' : 'service-error'}>
+            <i className={`status-dot ${healthy ? 'online' : ''}`} /> {name}
+          </span>)}
+      </div>}
+      {canManageUsers(user.role) && <section data-testid="user-admin">
+        <h3>Пользователи</h3>
+        <div className="user-admin-list">
+          {users.map((managed) => <div className="user-admin-row" key={managed.id}>
+            <span><strong>{managed.username}</strong><small>{managed.active ? ' активен' : ' отключён'}</small></span>
+            <select value={managed.role} disabled={busy}
+              onChange={(event) => void update(managed, {
+                role: event.target.value as ManagedUser['role'],
+              })}>
+              <option value="admin">admin</option>
+              <option value="analyst">analyst</option>
+              <option value="viewer">viewer</option>
+            </select>
+            <button className="secondary" disabled={busy || managed.id === user.id}
+              onClick={() => void update(managed, { active: !managed.active })}>
+              {managed.active ? 'Отключить' : 'Включить'}
+            </button>
+            <UserPasswordReset disabled={busy}
+              onReset={(password) => update(managed, {}, password)} />
+            <button className="danger ghost" disabled={busy || managed.active || managed.id === user.id}
+              title={managed.active ? 'Сначала отключите пользователя' : 'Удалить пользователя'}
+              onClick={() => void remove(managed)}>Удалить</button>
+          </div>)}
+        </div>
+        <form className="new-user-form" onSubmit={create}>
+          <input required placeholder="Логин" value={form.username}
+            onChange={(event) => setForm({ ...form, username: event.target.value })} />
+          <input required minLength={12} type="password" placeholder="Пароль (не менее 12 символов)"
+            value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
+          <select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value })}>
+            <option value="viewer">viewer</option><option value="analyst">analyst</option>
+            <option value="admin">admin</option>
+          </select>
+          <button className="primary" disabled={busy}>Добавить</button>
+        </form>
+      </section>}
+      {error && <div className="form-error">{error}</div>}
+      <div className="dialog-actions"><button className="primary" onClick={onClose}>Закрыть</button></div>
+    </div>
+  </Modal>
+}
+
+function UserPasswordReset({ disabled, onReset }: {
+  disabled: boolean
+  onReset: (password: string) => Promise<void>
+}) {
+  const [password, setPassword] = useState('')
+  return <span className="password-reset">
+    <input type="password" minLength={12} placeholder="Новый пароль" value={password}
+      disabled={disabled} onChange={(event) => setPassword(event.target.value)} />
+    <button className="secondary" disabled={disabled || password.length < 12}
+      onClick={() => void onReset(password).then(() => setPassword(''))}>Сменить</button>
+  </span>
 }
 
 function CredentialsDialog({ device, onClose }: { device: Device; onClose: () => void }) {

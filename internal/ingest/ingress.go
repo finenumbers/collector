@@ -62,11 +62,17 @@ func (r *IngressReceiver) Run(ctx context.Context) error {
 	var flushAt time.Time
 	flush := func() error {
 		for len(pending) > 0 {
-			count := uint64(len(pending))
-			if err := r.Spool.EnqueueBatch(pending); err == nil {
+			accepted, err := r.Spool.EnqueueBatchWithSourceFence(pending, func(payload []byte) string {
+				var datagram IngressDatagram
+				if json.Unmarshal(payload, &datagram) != nil {
+					return ""
+				}
+				return datagram.SourceIP
+			})
+			if err == nil {
 				pending = pending[:0]
 				flushAt = time.Time{}
-				r.Metrics.RecordAcceptedN(count)
+				r.Metrics.RecordAcceptedN(accepted)
 				return nil
 			} else {
 				r.Metrics.RecordSpoolError()

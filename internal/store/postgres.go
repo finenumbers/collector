@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,17 +23,35 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound       = errors.New("not found")
+	ErrDeviceDeleting = errors.New("device is being deleted")
+)
 
 type Store struct {
 	DB                  *pgxpool.Pool
 	deviceCacheRevision atomic.Uint64
+	deviceLocks         sync.Map
 }
 
 type User struct {
 	ID       uuid.UUID `json:"id"`
 	Username string    `json:"username"`
 	Role     string    `json:"role"`
+}
+
+type ManagedUser struct {
+	ID        uuid.UUID `json:"id"`
+	Username  string    `json:"username"`
+	Role      string    `json:"role"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type UserUpdate struct {
+	Role     string `json:"role"`
+	Active   bool   `json:"active"`
+	Password string `json:"password"`
 }
 
 type Device struct {
@@ -54,6 +73,8 @@ type Device struct {
 	FTPHome                string          `json:"ftpHome"`
 	CDRColumns             json.RawMessage `json:"cdrColumns"`
 	Enabled                bool            `json:"enabled"`
+	PurgeState             string          `json:"purgeState"`
+	PurgeError             string          `json:"purgeError,omitempty"`
 	CreatedAt              time.Time       `json:"createdAt"`
 	GeneratedPassword      string          `json:"generatedPassword,omitempty"`
 }
@@ -245,11 +266,193 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	return err
 }
 
+func (s *Store) ListUsers(ctx context.Context) ([]ManagedUser, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id,username,role,active,created_at
+		FROM users ORDER BY username`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []ManagedUser
+	for rows.Next() {
+		var user ManagedUser
+		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &user.Active, &user.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) CreateUser(
+	ctx context.Context, username, password, role string, actor User, remoteIP string,
+) (ManagedUser, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || len(password) < 12 || !validRole(role) {
+		return ManagedUser{}, errors.New("username, valid role and password of at least 12 characters are required")
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		return ManagedUser{}, err
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return ManagedUser{}, err
+	}
+	defer tx.Rollback(ctx)
+	var user ManagedUser
+	err = tx.QueryRow(ctx, `INSERT INTO users(username,password_hash,role)
+		VALUES($1,$2,$3) RETURNING id,username,role,active,created_at`,
+		username, hash, role).Scan(&user.ID, &user.Username, &user.Role, &user.Active, &user.CreatedAt)
+	if err != nil {
+		return ManagedUser{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_log
+		(actor_id,action,resource_type,resource_id,remote_ip,details)
+		VALUES($1,'user_create','user',$2,$3,$4)`,
+		actor.ID, user.ID.String(), nullableIP(remoteIP),
+		map[string]string{"username": user.Username, "role": user.Role}); err != nil {
+		return ManagedUser{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ManagedUser{}, err
+	}
+	return user, nil
+}
+
+func (s *Store) UpdateUser(
+	ctx context.Context, id uuid.UUID, input UserUpdate, actor User, remoteIP string,
+) (ManagedUser, error) {
+	if !validRole(input.Role) {
+		return ManagedUser{}, errors.New("invalid role")
+	}
+	if id == actor.ID && !input.Active {
+		return ManagedUser{}, errors.New("cannot deactivate the current user")
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return ManagedUser{}, err
+	}
+	defer tx.Rollback(ctx)
+	var oldRole string
+	var oldActive bool
+	if err := tx.QueryRow(ctx, `SELECT role,active FROM users WHERE id=$1 FOR UPDATE`, id).
+		Scan(&oldRole, &oldActive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ManagedUser{}, ErrNotFound
+		}
+		return ManagedUser{}, err
+	}
+	if oldRole == "admin" && oldActive && (input.Role != "admin" || !input.Active) {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('collector-active-admins'))`); err != nil {
+			return ManagedUser{}, err
+		}
+		var otherAdmins int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users
+			WHERE id<>$1 AND role='admin' AND active`, id).Scan(&otherAdmins); err != nil {
+			return ManagedUser{}, err
+		}
+		if otherAdmins == 0 {
+			return ManagedUser{}, errors.New("cannot remove the last active administrator")
+		}
+	}
+	var user ManagedUser
+	if input.Password == "" {
+		err = tx.QueryRow(ctx, `UPDATE users SET role=$2,active=$3,updated_at=now()
+			WHERE id=$1 RETURNING id,username,role,active,created_at`,
+			id, input.Role, input.Active).
+			Scan(&user.ID, &user.Username, &user.Role, &user.Active, &user.CreatedAt)
+	} else {
+		if len(input.Password) < 12 {
+			return ManagedUser{}, errors.New("password must contain at least 12 characters")
+		}
+		hash, hashErr := hashPassword(input.Password)
+		if hashErr != nil {
+			return ManagedUser{}, hashErr
+		}
+		err = tx.QueryRow(ctx, `UPDATE users
+			SET role=$2,active=$3,password_hash=$4,failed_attempts=0,locked_until=NULL,updated_at=now()
+			WHERE id=$1 RETURNING id,username,role,active,created_at`,
+			id, input.Role, input.Active, hash).
+			Scan(&user.ID, &user.Username, &user.Role, &user.Active, &user.CreatedAt)
+	}
+	if err != nil {
+		return ManagedUser{}, err
+	}
+	if !user.Active || input.Password != "" {
+		if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE user_id=$1`, id); err != nil {
+			return ManagedUser{}, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_log
+		(actor_id,action,resource_type,resource_id,remote_ip,details)
+		VALUES($1,'user_update','user',$2,$3,$4)`,
+		actor.ID, id.String(), nullableIP(remoteIP),
+		map[string]any{"role": user.Role, "active": user.Active, "passwordChanged": input.Password != ""}); err != nil {
+		return ManagedUser{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ManagedUser{}, err
+	}
+	return user, nil
+}
+
+func (s *Store) DeleteUser(
+	ctx context.Context, id uuid.UUID, actor User, remoteIP string,
+) error {
+	if id == actor.ID {
+		return errors.New("cannot delete the current user")
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var username, role string
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT username,role,active FROM users WHERE id=$1 FOR UPDATE`, id).
+		Scan(&username, &role, &active); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if role == "admin" && active {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('collector-active-admins'))`); err != nil {
+			return err
+		}
+		var otherAdmins int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM users
+			WHERE id<>$1 AND role='admin' AND active`, id).Scan(&otherAdmins); err != nil {
+			return err
+		}
+		if otherAdmins == 0 {
+			return errors.New("cannot delete the last active administrator")
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_log
+		(actor_id,action,resource_type,resource_id,remote_ip,details)
+		VALUES($1,'user_delete','user',$2,$3,$4)`,
+		actor.ID, id.String(), nullableIP(remoteIP),
+		map[string]string{"username": username, "role": role}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func validRole(role string) bool {
+	return role == "admin" || role == "analyst" || role == "viewer"
+}
+
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.DB.Query(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
-		ftp_username,ftp_home,cdr_columns,enabled,created_at FROM devices ORDER BY name`)
+		ftp_username,ftp_home,cdr_columns,enabled,purge_state,purge_error,created_at
+		FROM devices ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +464,8 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt); err != nil {
+			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+			&device.PurgeError, &device.CreatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, device)
@@ -298,17 +502,33 @@ func (s *Store) DeviceCacheRevision() uint64 {
 	return s.deviceCacheRevision.Load()
 }
 
+func (s *Store) LockDeviceWrites(id uuid.UUID) func() {
+	value, _ := s.deviceLocks.LoadOrStore(id, &sync.RWMutex{})
+	lock := value.(*sync.RWMutex)
+	lock.RLock()
+	return lock.RUnlock
+}
+
+func (s *Store) LockDevicePurge(id uuid.UUID) func() {
+	value, _ := s.deviceLocks.LoadOrStore(id, &sync.RWMutex{})
+	lock := value.(*sync.RWMutex)
+	lock.Lock()
+	return lock.Unlock
+}
+
 func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
 	err := s.DB.QueryRow(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
-		ftp_username,ftp_home,cdr_columns,enabled,created_at FROM devices WHERE id=$1`, id).
+		ftp_username,ftp_home,cdr_columns,enabled,purge_state,purge_error,created_at
+		FROM devices WHERE id=$1`, id).
 		Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt)
+			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+			&device.PurgeError, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}
@@ -326,12 +546,16 @@ func (s *Store) DeviceTimezone(ctx context.Context, id uuid.UUID) (string, error
 
 func (s *Store) DeviceTimeConfig(ctx context.Context, id uuid.UUID) (DeviceTimeConfig, error) {
 	var config DeviceTimeConfig
+	var purgeState string
 	err := s.DB.QueryRow(ctx, `SELECT active_timezone,active_timezone_revision,
-		timezone,timezone_revision FROM devices WHERE id=$1`, id).
+		timezone,timezone_revision,purge_state FROM devices WHERE id=$1`, id).
 		Scan(&config.ActiveTimezone, &config.ActiveTimezoneRevision,
-			&config.Timezone, &config.TimezoneRevision)
+			&config.Timezone, &config.TimezoneRevision, &purgeState)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DeviceTimeConfig{}, ErrNotFound
+	}
+	if err == nil && purgeState != "active" {
+		return DeviceTimeConfig{}, ErrDeviceDeleting
 	}
 	return config, err
 }
@@ -416,7 +640,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
 		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
-		 cdr_columns,enabled,created_at`,
+		 cdr_columns,enabled,purge_state,purge_error,created_at`,
 		id, strings.TrimSpace(input.Name), input.Model, input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign, input.AntifraudEnabled,
 		input.AntifraudMode, ftpUsername, ftpHome, columns,
@@ -424,7 +648,8 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt)
+		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+		&device.PurgeError, &device.CreatedAt)
 	if err != nil {
 		return Device{}, err
 	}
@@ -477,11 +702,11 @@ func (s *Store) UpdateDevice(
 		timezone=$4,cdr_source_timezone=$4,management_ip=NULLIF($5,'')::inet,
 		syslog_source_ip=$6,device_sign=$7,antifraud_enabled=$8,antifraud_mode=$9,
 		enabled=$10,cdr_columns=$11
-		WHERE id=$1
+		WHERE id=$1 AND purge_state='active'
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
 			active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
 			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
-			cdr_columns,enabled,created_at`,
+			cdr_columns,enabled,purge_state,purge_error,created_at`,
 		id, strings.TrimSpace(input.Name), input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
 		input.AntifraudEnabled, input.AntifraudMode, input.Enabled, columns,
@@ -489,7 +714,8 @@ func (s *Store) UpdateDevice(
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt)
+		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+		&device.PurgeError, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}
@@ -535,6 +761,65 @@ func (s *Store) DeleteDevice(ctx context.Context, id uuid.UUID, actor User, remo
 		return err
 	}
 	s.deviceCacheRevision.Add(1)
+	return nil
+}
+
+func (s *Store) BeginDevicePurge(ctx context.Context, id uuid.UUID) (Device, error) {
+	tag, err := s.DB.Exec(ctx, `UPDATE devices
+		SET enabled=false,purge_state='deleting',purge_error='',purge_updated_at=now()
+		WHERE id=$1`, id)
+	if err != nil {
+		return Device{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return Device{}, ErrNotFound
+	}
+	s.deviceCacheRevision.Add(1)
+	return s.Device(ctx, id)
+}
+
+func (s *Store) FailDevicePurge(ctx context.Context, id uuid.UUID, phase string, purgeErr error) error {
+	message := "unknown purge error"
+	if purgeErr != nil {
+		message = purgeErr.Error()
+	}
+	if phase != "" {
+		message = phase + ": " + message
+	}
+	_, err := s.DB.Exec(ctx, `UPDATE devices
+		SET purge_state='purge_failed',purge_error=$2,purge_updated_at=now()
+		WHERE id=$1`, id, message)
+	return err
+}
+
+func (s *Store) FinalizeDevicePurge(ctx context.Context, id uuid.UUID) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM ingest_files WHERE device_id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM export_jobs WHERE device_id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM audit_log
+		WHERE resource_type='device' AND resource_id=$1`, id.String()); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM devices WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.deviceCacheRevision.Add(1)
+	s.deviceLocks.Delete(id)
 	return nil
 }
 

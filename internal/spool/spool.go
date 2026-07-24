@@ -14,6 +14,7 @@ var (
 	bucketName             = []byte("syslog")
 	quarantineBucketName   = []byte("syslog_quarantine")
 	quarantineMetadataName = []byte("syslog_quarantine_metadata")
+	blockedSourcesName     = []byte("blocked_sources")
 )
 
 type Queue struct {
@@ -43,7 +44,9 @@ func Open(path string) (*Queue, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketName, quarantineBucketName, quarantineMetadataName} {
+		for _, name := range [][]byte{
+			bucketName, quarantineBucketName, quarantineMetadataName, blockedSourcesName,
+		} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -54,6 +57,29 @@ func Open(path string) (*Queue, error) {
 		return nil, err
 	}
 	return &Queue{db: db}, nil
+}
+
+func (q *Queue) EnqueueBatchWithSourceFence(
+	entries []Entry, sourceIP func([]byte) string,
+) (uint64, error) {
+	var accepted uint64
+	err := q.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketName)
+		blocked := tx.Bucket(blockedSourcesName)
+		for _, entry := range entries {
+			source := sourceIP(entry.Payload)
+			if source != "" && blocked.Get([]byte(source)) != nil {
+				continue
+			}
+			key := []byte(fmt.Sprintf("%020d/%s", entry.ReceivedAt.UnixNano(), entry.EventID))
+			if err := bucket.Put(key, entry.Payload); err != nil {
+				return err
+			}
+			accepted++
+		}
+		return nil
+	})
+	return accepted, err
 }
 
 func (q *Queue) Quarantine(key, payload []byte, reason string) error {
@@ -116,6 +142,62 @@ func (q *Queue) Delete(keys [][]byte) error {
 			}
 		}
 		return nil
+	})
+}
+
+func (q *Queue) DeleteMatching(match func([]byte) bool) (uint64, error) {
+	if match == nil {
+		return 0, nil
+	}
+	var deleted uint64
+	err := q.db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketName, quarantineBucketName} {
+			bucket := tx.Bucket(name)
+			cursor := bucket.Cursor()
+			for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+				if !match(value) {
+					continue
+				}
+				if err := cursor.Delete(); err != nil {
+					return err
+				}
+				_ = tx.Bucket(quarantineMetadataName).Delete(key)
+				deleted++
+			}
+		}
+		return nil
+	})
+	return deleted, err
+}
+
+func (q *Queue) BlockSourceAndDelete(source string, match func([]byte) bool) (uint64, error) {
+	var deleted uint64
+	err := q.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(blockedSourcesName).Put([]byte(source), []byte{1}); err != nil {
+			return err
+		}
+		for _, name := range [][]byte{bucketName, quarantineBucketName} {
+			bucket := tx.Bucket(name)
+			cursor := bucket.Cursor()
+			for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+				if !match(value) {
+					continue
+				}
+				if err := cursor.Delete(); err != nil {
+					return err
+				}
+				_ = tx.Bucket(quarantineMetadataName).Delete(key)
+				deleted++
+			}
+		}
+		return nil
+	})
+	return deleted, err
+}
+
+func (q *Queue) UnblockSource(source string) error {
+	return q.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(blockedSourcesName).Delete([]byte(source))
 	})
 }
 

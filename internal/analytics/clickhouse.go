@@ -823,3 +823,80 @@ func (c *Client) InvalidateDeviceDerivedData(ctx context.Context, deviceID uuid.
 	c.antifraudMu.Unlock()
 	return nil
 }
+
+func (c *Client) PurgeDeviceData(ctx context.Context, deviceID uuid.UUID) error {
+	rows, err := c.Conn.Query(ctx, `SELECT name
+		FROM system.tables
+		WHERE database='collector'
+		  AND name IN (
+			SELECT DISTINCT table
+			FROM system.columns
+			WHERE database='collector' AND name='device_id'
+		  )
+		  AND (
+			engine LIKE '%MergeTree%'
+			OR engine = 'MaterializedView'
+		  )`)
+	if err != nil {
+		return err
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			rows.Close()
+			return err
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	priority := map[string]int{
+		"correlation_dirty_buckets": 0, "device_derived_revisions": 1,
+		"call_assignments": 2, "correlation_bucket_runs": 3,
+		"raw_syslog": 100, "cdr_records": 101,
+	}
+	sort.Slice(tables, func(left, right int) bool {
+		leftPriority, leftSet := priority[tables[left]]
+		rightPriority, rightSet := priority[tables[right]]
+		if !leftSet {
+			leftPriority = 50
+		}
+		if !rightSet {
+			rightPriority = 50
+		}
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		return tables[left] < tables[right]
+	})
+	for _, table := range tables {
+		if strings.ContainsAny(table, "`\x00") {
+			return fmt.Errorf("unsafe ClickHouse table name %q", table)
+		}
+		query := fmt.Sprintf(
+			"ALTER TABLE collector.`%s` DELETE WHERE device_id=? SETTINGS mutations_sync=1",
+			table,
+		)
+		if err := c.Conn.Exec(ctx, query, deviceID); err != nil {
+			return fmt.Errorf("purge ClickHouse table %s: %w", table, err)
+		}
+		var remaining uint64
+		verify := fmt.Sprintf("SELECT count() FROM collector.`%s` WHERE device_id=?", table)
+		if err := c.Conn.QueryRow(ctx, verify, deviceID).Scan(&remaining); err != nil {
+			return err
+		}
+		if remaining != 0 {
+			return fmt.Errorf("ClickHouse table %s still has %d device rows", table, remaining)
+		}
+	}
+	c.antifraudMu.Lock()
+	for transactionID, transaction := range c.antifraudActive {
+		if transaction.DeviceID == deviceID {
+			delete(c.antifraudActive, transactionID)
+		}
+	}
+	c.antifraudMu.Unlock()
+	return nil
+}

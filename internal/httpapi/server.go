@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"collector/internal/analytics"
+	"collector/internal/archive"
 	"collector/internal/config"
 	ftpclient "collector/internal/ftp"
 	"collector/internal/ingest"
@@ -36,6 +37,7 @@ type Server struct {
 	Store             *store.Store
 	Analytics         *analytics.Client
 	FTP               *ftpclient.Provisioner
+	Archive           *archive.Archive
 	StaticDir         string
 	Version           string
 	Metrics           *ingest.Metrics
@@ -63,6 +65,11 @@ func (s *Server) Handler() http.Handler {
 			private.Use(s.authenticate)
 			private.Get("/auth/me", s.me)
 			private.Post("/auth/logout", s.logout)
+			private.Get("/system/info", s.systemInfo)
+			private.With(s.requireAdmin).Get("/system/users", s.listUsers)
+			private.With(s.requireAdmin).Post("/system/users", s.createUser)
+			private.With(s.requireAdmin).Patch("/system/users/{userID}", s.updateUser)
+			private.With(s.requireAdmin).Delete("/system/users/{userID}", s.deleteUser)
 			private.Get("/devices", s.listDevices)
 			private.With(s.requireAdmin).Post("/devices", s.createDevice)
 			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
@@ -202,6 +209,103 @@ func (s *Server) listDevices(writer http.ResponseWriter, request *http.Request) 
 	writeJSON(writer, http.StatusOK, map[string]any{"items": devices})
 }
 
+func (s *Server) systemInfo(writer http.ResponseWriter, request *http.Request) {
+	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	defer cancel()
+	services := map[string]bool{"api": true}
+	services["postgres"] = s.Store.DB.Ping(ctx) == nil
+	services["clickhouse"] = s.Analytics.Conn.Ping(ctx) == nil
+	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
+	if s.Archive != nil {
+		exists, err := s.Archive.Client.BucketExists(ctx, s.Archive.Bucket)
+		services["minio"] = err == nil && exists
+	} else {
+		services["minio"] = false
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"version":  s.Version,
+		"status":   "ready",
+		"user":     currentSession(request).User,
+		"services": services,
+	})
+}
+
+func (s *Server) listUsers(writer http.ResponseWriter, request *http.Request) {
+	users, err := s.Store.ListUsers(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to list users")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": users})
+}
+
+func (s *Server) createUser(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	session := currentSession(request)
+	user, err := s.Store.CreateUser(
+		request.Context(), input.Username, input.Password, input.Role,
+		session.User, request.RemoteAddr,
+	)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusCreated, user)
+}
+
+func (s *Server) updateUser(writer http.ResponseWriter, request *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(request, "userID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	var input store.UserUpdate
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	session := currentSession(request)
+	user, err := s.Store.UpdateUser(
+		request.Context(), id, input, session.User, request.RemoteAddr,
+	)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, user)
+}
+
+func (s *Server) deleteUser(writer http.ResponseWriter, request *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(request, "userID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	session := currentSession(request)
+	err = s.Store.DeleteUser(request.Context(), id, session.User, request.RemoteAddr)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request) {
 	var input store.NewDevice
 	if err := decodeJSON(request, &input); err != nil {
@@ -212,6 +316,13 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 	device, err := s.Store.CreateDevice(request.Context(), input, session.User, request.RemoteAddr)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := ingest.UnblockIngressSource(
+		request.Context(), s.Config.IngressControlPath, device.SyslogSourceIP,
+	); err != nil {
+		_ = s.Store.DeleteDevice(request.Context(), device.ID, session.User, request.RemoteAddr)
+		writeError(writer, http.StatusBadGateway, "unable to enable source-preserving Syslog ingress")
 		return
 	}
 	if s.FTP != nil {
@@ -240,6 +351,15 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadRequest, "invalid device id")
 		return
 	}
+	previous, err := s.Store.Device(request.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load device")
+		return
+	}
 	var input store.DeviceUpdate
 	if err := decodeJSON(request, &input); err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
@@ -255,6 +375,20 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 	}
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if previous.SyslogSourceIP != device.SyslogSourceIP {
+		if _, err := ingest.PurgeIngressSource(
+			request.Context(), s.Config.IngressControlPath, previous.SyslogSourceIP,
+		); err != nil {
+			writeError(writer, http.StatusBadGateway, "device saved; old Syslog source could not be fenced")
+			return
+		}
+	}
+	if err := ingest.UnblockIngressSource(
+		request.Context(), s.Config.IngressControlPath, device.SyslogSourceIP,
+	); err != nil {
+		writeError(writer, http.StatusBadGateway, "device saved; Syslog source could not be enabled")
 		return
 	}
 	if device.TimezoneRevision != device.ActiveTimezoneRevision {
@@ -277,31 +411,82 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadRequest, "invalid device id")
 		return
 	}
-	session := currentSession(request)
-	devices, err := s.Store.ListDevices(request.Context())
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to find device")
-		return
+	// Client disconnect must not cancel an already started erase; only the
+	// server-side deadline bounds the synchronous purge.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if controller := http.NewResponseController(writer); controller != nil {
+		_ = controller.SetWriteDeadline(time.Now().Add(16 * time.Minute))
 	}
-	var username string
-	for _, device := range devices {
-		if device.ID == id {
-			username = device.FTPUsername
-			break
-		}
-	}
-	if username == "" {
+	release := s.Store.LockDevicePurge(id)
+	defer release()
+	device, err := s.Store.BeginDevicePurge(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(writer, http.StatusNotFound, "device not found")
 		return
 	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to fence device ingest")
+		return
+	}
+	fail := func(phase string, purgeErr error) {
+		_ = s.Store.FailDevicePurge(context.Background(), id, phase, purgeErr)
+		slog.Error("device purge failed", "device", id, "phase", phase, "error", purgeErr)
+		writeError(writer, http.StatusInternalServerError, phase+": "+purgeErr.Error())
+	}
+	if _, err := ingest.PurgeIngressSource(ctx, s.Config.IngressControlPath, device.SyslogSourceIP); err != nil {
+		fail("ingress", fmt.Errorf("unable to purge ingress queue: %w", err))
+		return
+	}
 	if s.FTP != nil {
-		if err := s.FTP.DeleteUser(request.Context(), username); err != nil {
-			writeError(writer, http.StatusBadGateway, "unable to remove FTP account")
+		if err := s.FTP.DeleteUser(ctx, device.FTPUsername); err != nil {
+			fail("ftp", fmt.Errorf("unable to remove FTP account: %w", err))
 			return
 		}
 	}
-	if err := s.Store.DeleteDevice(request.Context(), id, session.User, request.RemoteAddr); err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to delete device")
+	if s.Spool != nil {
+		if _, err := s.Spool.DeleteMatching(func(payload []byte) bool {
+			var raw ingest.RawSyslog
+			return json.Unmarshal(payload, &raw) == nil && raw.DeviceID == id
+		}); err != nil {
+			fail("spool", fmt.Errorf("unable to purge Syslog spool: %w", err))
+			return
+		}
+	}
+	if err := ingest.PurgeDeviceNATS(ctx, s.NATS, id); err != nil {
+		fail("nats", fmt.Errorf("unable to purge NATS messages: %w", err))
+		return
+	}
+	// The worker fetch timeout is one second. Let already fetched messages observe
+	// the durable deleting tombstone and terminate before analytics mutations.
+	select {
+	case <-ctx.Done():
+		fail("drain", ctx.Err())
+		return
+	case <-time.After(2 * time.Second):
+	}
+	if err := s.Analytics.PurgeDeviceData(ctx, id); err != nil {
+		fail("clickhouse", err)
+		return
+	}
+	if s.Archive != nil {
+		if err := s.Archive.DeletePrefix(ctx, "cdr/"+id.String()+"/"); err != nil {
+			fail("minio", fmt.Errorf("unable to purge CDR archive: %w", err))
+			return
+		}
+	}
+	if err := os.RemoveAll(filepath.Join("/data/cdr", id.String())); err != nil {
+		fail("cdr-volume", fmt.Errorf("unable to purge CDR files: %w", err))
+		return
+	}
+	// A second synchronous sweep closes races with correlation/rebuild work that
+	// started before the deleting fence was visible.
+	if err := s.Analytics.PurgeDeviceData(ctx, id); err != nil {
+		fail("clickhouse-resweep", err)
+		return
+	}
+	if err := s.Store.FinalizeDevicePurge(ctx, id); err != nil {
+		fail("postgres", fmt.Errorf("unable to purge PostgreSQL device data: %w", err))
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -149,6 +150,39 @@ func EnsureStreams(nc *nats.Conn) error {
 		Discard:    nats.DiscardNew,
 		Duplicates: 72 * time.Hour,
 	})
+}
+
+func PurgeDeviceNATS(ctx context.Context, nc *nats.Conn, deviceID uuid.UUID) error {
+	if nc == nil {
+		return nil
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		return err
+	}
+	for _, stream := range []string{"SYSLOG", "SYSLOG_DLQ"} {
+		info, err := js.StreamInfo(stream, nats.Context(ctx))
+		if err != nil {
+			return err
+		}
+		for sequence := info.State.FirstSeq; sequence <= info.State.LastSeq && sequence != 0; sequence++ {
+			message, err := js.GetMsg(stream, sequence, nats.Context(ctx))
+			if errors.Is(err, nats.ErrMsgNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			var raw RawSyslog
+			if json.Unmarshal(message.Data, &raw) != nil || raw.DeviceID != deviceID {
+				continue
+			}
+			if err := js.DeleteMsg(stream, sequence, nats.Context(ctx)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func ensureStream(js nats.JetStreamContext, config *nats.StreamConfig) error {
@@ -341,6 +375,10 @@ type DeviceTimeConfigResolver interface {
 	DeviceTimeConfig(context.Context, uuid.UUID) (store.DeviceTimeConfig, error)
 }
 
+type deviceWriteLocker interface {
+	LockDeviceWrites(uuid.UUID) func()
+}
+
 func RunSyslogWorker(
 	ctx context.Context,
 	nc *nats.Conn,
@@ -412,34 +450,87 @@ func RunSyslogWorker(
 		for index := range parsed {
 			parsed[index].event = events[index]
 		}
-		if err := client.InsertSyslogBatch(ctx, events); err != nil {
-			slog.Error("syslog batch persistence failed", "count", len(events), "error", err)
-			for _, item := range parsed {
-				_ = item.message.NakWithDelay(5 * time.Second)
+		retry := func() bool {
+			release := lockSyslogDevices(timeResolver, events)
+			defer release()
+			activeParsed := make([]parsedMessage, 0, len(parsed))
+			activeEvents := make([]analytics.SyslogEvent, 0, len(events))
+			for index, item := range parsed {
+				if timeResolver != nil {
+					if _, configErr := timeResolver.DeviceTimeConfig(ctx, item.event.DeviceID); configErr != nil {
+						if errors.Is(configErr, store.ErrDeviceDeleting) ||
+							errors.Is(configErr, store.ErrNotFound) {
+							_ = item.message.Term()
+							continue
+						}
+						_ = item.message.NakWithDelay(5 * time.Second)
+						continue
+					}
+				}
+				activeParsed = append(activeParsed, item)
+				activeEvents = append(activeEvents, events[index])
 			}
-			continue
-		}
-		successful := parsed
-		successfulEvents := events
-		if err := client.ProcessSyslogShadowDerivedBatch(ctx, successfulEvents); err != nil {
-			slog.Error("Syslog shadow lifecycle batch failed", "error", err)
-			for _, item := range successful {
-				_ = item.message.NakWithDelay(5 * time.Second)
+			if len(activeEvents) == 0 {
+				return false
 			}
-			continue
-		}
-		if err := client.EnqueueDirtySyslogBuckets(ctx, successfulEvents); err != nil {
-			slog.Error("Syslog dirty bucket enqueue failed", "error", err)
-			for _, item := range successful {
-				_ = item.message.NakWithDelay(5 * time.Second)
+			if err := client.InsertSyslogBatch(ctx, activeEvents); err != nil {
+				slog.Error("syslog batch persistence failed", "count", len(activeEvents), "error", err)
+				for _, item := range activeParsed {
+					_ = item.message.NakWithDelay(5 * time.Second)
+				}
+				return true
 			}
+			if err := client.ProcessSyslogShadowDerivedBatch(ctx, activeEvents); err != nil {
+				slog.Error("Syslog shadow lifecycle batch failed", "error", err)
+				for _, item := range activeParsed {
+					_ = item.message.NakWithDelay(5 * time.Second)
+				}
+				return true
+			}
+			if err := client.EnqueueDirtySyslogBuckets(ctx, activeEvents); err != nil {
+				slog.Error("Syslog dirty bucket enqueue failed", "error", err)
+				for _, item := range activeParsed {
+					_ = item.message.NakWithDelay(5 * time.Second)
+				}
+				return true
+			}
+			for _, item := range activeParsed {
+				_ = item.message.Ack()
+			}
+			return false
+		}()
+		if retry {
 			continue
-		}
-		for _, item := range successful {
-			_ = item.message.Ack()
 		}
 	}
 	return nil
+}
+
+func lockSyslogDevices(resolver DeviceTimeConfigResolver, events []analytics.SyslogEvent) func() {
+	locker, ok := resolver.(deviceWriteLocker)
+	if !ok {
+		return func() {}
+	}
+	unique := make(map[uuid.UUID]struct{}, len(events))
+	for _, event := range events {
+		unique[event.DeviceID] = struct{}{}
+	}
+	ids := make([]uuid.UUID, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(left, right int) bool {
+		return ids[left].String() < ids[right].String()
+	})
+	releases := make([]func(), 0, len(ids))
+	for _, id := range ids {
+		releases = append(releases, locker.LockDeviceWrites(id))
+	}
+	return func() {
+		for index := len(releases) - 1; index >= 0; index-- {
+			releases[index]()
+		}
+	}
 }
 
 func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {

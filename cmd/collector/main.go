@@ -93,6 +93,7 @@ func main() {
 		Handler: (&httpapi.Server{
 			Config: cfg, Store: control, Analytics: warehouse,
 			FTP:               ftpclient.NewProvisioner(cfg.SFTPGoURL, cfg.SFTPGoAdmin, cfg.SFTPGoPassword),
+			Archive:           rawArchive,
 			StaticDir:         "/app/web",
 			Version:           version,
 			Metrics:           ingestMetrics,
@@ -102,8 +103,9 @@ func main() {
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      2 * time.Minute,
-		IdleTimeout:       2 * time.Minute,
+		// Synchronous SMG purge can wait on ClickHouse mutations for several minutes.
+		WriteTimeout:   16 * time.Minute,
+		IdleTimeout:    2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
 	}
 
@@ -150,11 +152,22 @@ func main() {
 				slog.Error("dirty correlation queue read failed", "error", err)
 			} else {
 				for _, bucket := range buckets {
+					release := control.LockDeviceWrites(bucket.DeviceID)
+					if _, configErr := control.DeviceTimeConfig(ctx, bucket.DeviceID); configErr != nil {
+						release()
+						if !errors.Is(configErr, store.ErrDeviceDeleting) &&
+							!errors.Is(configErr, store.ErrNotFound) {
+							slog.Error("dirty correlation device lookup failed",
+								"device", bucket.DeviceID, "error", configErr)
+						}
+						continue
+					}
 					if err := warehouse.ReconcileDirtyBucket(ctx, bucket); err != nil {
 						slog.Error("dirty correlation bucket failed",
 							"device", bucket.DeviceID, "revision", bucket.Revision,
 							"bucket", bucket.Bucket, "error", err)
 					}
+					release()
 				}
 			}
 			select {
@@ -199,7 +212,7 @@ func runIngress(ctx context.Context, cfg config.Config) error {
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	errs := make(chan error, 4)
+	errs := make(chan error, 5)
 	var workers sync.WaitGroup
 	start := func(run func() error) {
 		workers.Add(1)
@@ -218,6 +231,9 @@ func runIngress(ctx context.Context, cfg config.Config) error {
 	})
 	start(func() error {
 		return ingest.RunIngressStatusWriter(runCtx, cfg.IngressStatusPath, queue, metrics)
+	})
+	start(func() error {
+		return ingest.RunIngressPurgeControl(runCtx, cfg.IngressControlPath, queue)
 	})
 	start(func() error {
 		slog.Info("Syslog ingress health server listening", "address", cfg.IngressHealthAddr)

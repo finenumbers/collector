@@ -67,7 +67,7 @@ func (w *CDRWatcher) scan(ctx context.Context) error {
 			continue
 		}
 		device, err := w.Store.Device(ctx, deviceID)
-		if err != nil || !device.Enabled {
+		if err != nil || !device.Enabled || device.PurgeState != "active" {
 			continue
 		}
 		files, err := os.ReadDir(filepath.Join(w.Root, entry.Name()))
@@ -93,6 +93,19 @@ func (w *CDRWatcher) scan(ctx context.Context) error {
 }
 
 func (w *CDRWatcher) process(ctx context.Context, device store.Device, path string, info os.FileInfo) error {
+	release := w.Store.LockDeviceWrites(device.ID)
+	defer release()
+	current, err := w.Store.Device(ctx, device.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !current.Enabled || current.PurgeState != "active" {
+		return nil
+	}
+	device = current
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return err

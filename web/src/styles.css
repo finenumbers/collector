@@ -162,6 +162,27 @@ tbody tr { cursor: pointer; }
 .credentials dt { color: var(--muted); }
 .credentials .secret { color: #8a5500; user-select: all; }
 .modal > .dialog-actions { padding: 0 14px 14px; }
+.danger { color: #fff; background: #b42318; border-color: #b42318; }
+.danger:disabled { opacity: .55; }
+.danger.ghost { margin-right: auto; color: #b42318; background: #fff; border-color: #e0a09a; }
+.danger-panel, .system-settings { padding: 14px; }
+.danger-panel p { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.danger-panel label { display: flex; flex-direction: column; gap: 5px; }
+.purge-progress { margin-top: 10px; padding: 9px; color: #8a5500; background: #fff6df; border: 1px solid #e8cd8c; }
+.settings-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+.settings-summary div { display: flex; flex-direction: column; gap: 4px; padding: 9px; border: 1px solid var(--line); }
+.settings-summary small, .user-admin-row small { color: var(--muted); }
+.healthy { color: #087a55; }
+.service-error { color: #b42318; }
+.service-health { display: flex; gap: 12px; margin: -7px 0 16px; font-size: 11px; }
+.service-health span { display: inline-flex; align-items: center; gap: 4px; }
+.system-settings h3 { margin: 6px 0 8px; font-size: 13px; }
+.user-admin-list { display: flex; flex-direction: column; gap: 6px; }
+.user-admin-row { display: grid; grid-template-columns: 1fr 90px 82px 190px 72px; align-items: center; gap: 5px; }
+.user-admin-row > span:first-child { display: flex; flex-direction: column; }
+.password-reset { display: flex; gap: 4px; }
+.password-reset input { min-width: 0; width: 120px; }
+.new-user-form { display: grid; grid-template-columns: 1fr 1.6fr 100px auto; gap: 6px; margin-top: 10px; }
 
 .drawer { position: fixed; z-index: 15; top: 48px; right: 0; bottom: 0; width: min(560px, calc(100vw - 226px));
   overflow: auto; background: #fff; border-left: 1px solid #c7d0dc; box-shadow: -12px 0 32px rgb(31 41 55 / 10%); }

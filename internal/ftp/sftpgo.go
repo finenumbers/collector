@@ -98,6 +98,9 @@ func (p *Provisioner) request(ctx context.Context, method, path, token string, b
 		return err
 	}
 	defer response.Body.Close()
+	if method == http.MethodDelete && response.StatusCode == http.StatusNotFound {
+		return nil
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		content, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return fmt.Errorf("SFTPGo %s %s: %s: %s", method, path, response.Status, strings.TrimSpace(string(content)))

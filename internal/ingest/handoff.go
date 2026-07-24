@@ -155,6 +155,113 @@ func RunHandoffReceiver(
 	}
 }
 
+type ingressPurgeRequest struct {
+	SourceIP string `json:"sourceIp"`
+	Action   string `json:"action"`
+}
+
+type ingressPurgeResponse struct {
+	Deleted uint64 `json:"deleted"`
+	Error   string `json:"error,omitempty"`
+}
+
+func RunIngressPurgeControl(ctx context.Context, socketPath string, queue *spool.Queue) error {
+	_ = os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		var request ingressPurgeRequest
+		if err := json.NewDecoder(io.LimitReader(connection, 4096)).Decode(&request); err != nil {
+			_ = json.NewEncoder(connection).Encode(ingressPurgeResponse{Error: err.Error()})
+			connection.Close()
+			continue
+		}
+		var deleted uint64
+		var purgeErr error
+		if request.Action == "unblock" {
+			purgeErr = queue.UnblockSource(request.SourceIP)
+		} else {
+			deleted, purgeErr = queue.BlockSourceAndDelete(request.SourceIP, func(payload []byte) bool {
+				var datagram IngressDatagram
+				return json.Unmarshal(payload, &datagram) == nil && datagram.SourceIP == request.SourceIP
+			})
+		}
+		response := ingressPurgeResponse{Deleted: deleted}
+		if purgeErr != nil {
+			response.Error = purgeErr.Error()
+		}
+		_ = json.NewEncoder(connection).Encode(response)
+		connection.Close()
+	}
+}
+
+func PurgeIngressSource(ctx context.Context, socketPath, sourceIP string) (uint64, error) {
+	dialer := net.Dialer{}
+	connection, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return 0, err
+	}
+	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	if err := json.NewEncoder(connection).Encode(ingressPurgeRequest{
+		SourceIP: sourceIP, Action: "block",
+	}); err != nil {
+		return 0, err
+	}
+	var response ingressPurgeResponse
+	if err := json.NewDecoder(io.LimitReader(connection, 4096)).Decode(&response); err != nil {
+		return 0, err
+	}
+	if response.Error != "" {
+		return response.Deleted, errors.New(response.Error)
+	}
+	return response.Deleted, nil
+}
+
+func UnblockIngressSource(ctx context.Context, socketPath, sourceIP string) error {
+	dialer := net.Dialer{}
+	connection, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	if err := json.NewEncoder(connection).Encode(ingressPurgeRequest{
+		SourceIP: sourceIP, Action: "unblock",
+	}); err != nil {
+		return err
+	}
+	var response ingressPurgeResponse
+	if err := json.NewDecoder(io.LimitReader(connection, 4096)).Decode(&response); err != nil {
+		return err
+	}
+	if response.Error != "" {
+		return errors.New(response.Error)
+	}
+	return nil
+}
+
 func handleHandoffConnection(
 	ctx context.Context,
 	connection *net.UnixConn,

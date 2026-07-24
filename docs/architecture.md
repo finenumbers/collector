@@ -77,7 +77,10 @@ Acct-Session-Id/SIP Call-ID/GCR и composite matching выполняются в�
 - FTP login/home генерируется отдельно для каждого `device_id`.
 - `device_id` входит во все order keys, correlation keys и API paths.
 - Для каждого включённого SMG фоновый bootstrap гарантирует активную derived revision.
-- Удаление устройства удаляет control-plane конфигурацию и FTP principal; аналитические данные требуют отдельной retention/purge процедуры.
+- Полное удаление SMG синхронно стирает PostgreSQL (включая device audit), ClickHouse,
+  MinIO `cdr/{device_id}/`, CDR volume, app/ingress spool и device-scoped NATS сообщения.
+  Перед стиранием устройство переходит в `purge_state=deleting`, отключает ingest и ставит
+  write fence; при сбое остаётся `purge_failed` для безопасного повтора.
 
 ## Масштабирование
 

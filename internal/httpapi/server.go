@@ -463,7 +463,7 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 	ingressStatus, ingressStatusErr := ingest.ReadIngressStatus(s.IngressStatusPath)
 	ingressAvailable := ingressStatusErr == nil &&
 		time.Since(ingressStatus.UpdatedAt) < 5*time.Second
-	writeJSON(writer, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"version": s.Version, "parserVersion": analytics.SyslogParserVersion,
 		"runtime": s.Metrics.Snapshot(), "spoolDepth": spoolDepth,
 		"quarantineDepth": quarantineDepth, "natsStreamMessages": natsStreamMessages,
@@ -479,7 +479,25 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 		"correlationComposite": diagnostics.CorrelationComposite,
 		"correlationAmbiguous": diagnostics.CorrelationAmbiguous,
 		"ingress":              ingressStatus, "ingressAvailable": ingressAvailable,
-	})
+	}
+	addRevisionDiagnostics(response, diagnostics)
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func addRevisionDiagnostics(response map[string]any, diagnostics analytics.SyslogDiagnostics) {
+	response["activeRevision"] = diagnostics.ActiveRevision
+	response["buildingRevision"] = diagnostics.BuildingRevision
+	response["revisionTimezone"] = diagnostics.RevisionTimezone
+	response["revisionStatus"] = diagnostics.RevisionStatus
+	response["replayProcessed"] = diagnostics.ReplayProcessed
+	response["replayTotal"] = diagnostics.ReplayTotal
+	response["cdrReplayProcessed"] = diagnostics.CDRReplayProcessed
+	response["cdrReplayTotal"] = diagnostics.CDRReplayTotal
+	response["missingCdrInterpretations"] = diagnostics.MissingCDRTimes
+	response["radiusRawFragments"] = diagnostics.RadiusRawFragments
+	response["lifecycleDerived"] = diagnostics.LifecycleDerived
+	response["correlationTotal"] = diagnostics.CorrelationTotal
+	response["correlationOrphan"] = diagnostics.CorrelationOrphan
 }
 
 func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request) {

@@ -542,18 +542,19 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
       <span>Active / building revision: <strong>{value.activeRevision || '—'} / {value.buildingRevision || '—'}</strong></span>
       <span>Revision timezone / status: <strong>{value.revisionTimezone || '—'} / {value.revisionStatus || '—'}</strong></span>
-      <span>Replay Syslog: <strong>{value.replayProcessed.toLocaleString('ru-RU')} / {value.replayTotal.toLocaleString('ru-RU')}</strong></span>
-      <span>Replay CDR: <strong>{value.cdrReplayProcessed.toLocaleString('ru-RU')} / {value.cdrReplayTotal.toLocaleString('ru-RU')}</strong></span>
-      <span>CDR без time fact: <strong>{value.missingCdrInterpretations.toLocaleString('ru-RU')}</strong></span>
-      <span>RADIUS raw / lifecycle: <strong>{value.radiusRawFragments.toLocaleString('ru-RU')} / {value.lifecycleDerived.toLocaleString('ru-RU')}</strong></span>
+      <span>Replay Syslog: <strong>{formatCount(value.replayProcessed)} / {formatCount(value.replayTotal)}</strong></span>
+      <span>Replay CDR: <strong>{formatCount(value.cdrReplayProcessed)} / {formatCount(value.cdrReplayTotal)}</strong></span>
+      <span>CDR без time fact: <strong>{formatCount(value.missingCdrInterpretations)}</strong></span>
+      <span>RADIUS raw / lifecycle: <strong>{formatCount(value.radiusRawFragments)} / {formatCount(value.lifecycleDerived)}</strong></span>
       <span>AntiFraud complete: <strong>{value.antifraudComplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud incomplete: <strong>{value.antifraudIncomplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud без CDR: <strong>{value.antifraudOrphan.toLocaleString('ru-RU')}</strong></span>
       <span>Exact links: <strong>{value.correlationExact.toLocaleString('ru-RU')}</strong></span>
       <span>Composite links: <strong>{value.correlationComposite.toLocaleString('ru-RU')}</strong></span>
       <span>Ambiguous: <strong>{value.correlationAmbiguous.toLocaleString('ru-RU')}</strong></span>
-      <span>Coverage invariant: <strong>{value.correlationExact + value.correlationComposite +
-        value.correlationAmbiguous + value.correlationOrphan} / {value.correlationTotal}</strong></span>
+      <span>Coverage invariant: <strong>{(value.correlationExact || 0) +
+        (value.correlationComposite || 0) + (value.correlationAmbiguous || 0) +
+        (value.correlationOrphan || 0)} / {value.correlationTotal || 0}</strong></span>
       <span>Миграции: <strong>{value.appliedMigrations.join(', ') || '—'}</strong></span>
     </div>
     <div className="diagnostic-breakdown">
@@ -909,6 +910,10 @@ function Centered({ children }: { children: React.ReactNode }) {
 
 function activeDeviceTimezone(device: Device) {
   return device.activeTimezone || device.timezone
+}
+
+function formatCount(value?: number) {
+  return Number.isFinite(value) ? Number(value).toLocaleString('ru-RU') : '0'
 }
 
 function formatTime(value?: string, timezone = 'UTC') {

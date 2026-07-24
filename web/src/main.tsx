@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Activity, AlertTriangle, CirclePlus, Database, FileClock,
@@ -580,7 +580,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedAntifraud} />
           : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
-            onSelect={setSelectedEvent} />}
+            dataset={dataset} onSelect={setSelectedEvent} />}
       {showRadiusEmpty && <RadiusEmptyState />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
@@ -885,19 +885,119 @@ function groupCallTimeline(items: TimelineRow[]) {
     .filter((group) => group.items.length > 0)
 }
 
-function EventsTable({ rows, timezone, onSelect }: {
+const threadedDatasets = new Set<Dataset>([
+  'syslog_all', 'call_trace', 'radius', 'sip', 'isup', 'ip_connections', 'q931',
+])
+
+function isTechnicalFragment(row: EventRow): boolean {
+  const attrs = row.attributes || {}
+  if (attrs.empty_body === 'true') return true
+  const kind = attrs.fragment_kind || ''
+  return kind === 'hex' || kind === 'digest' || kind === 'empty'
+}
+
+function eventThreadKey(row: EventRow): string {
+  const ctx = row.attributes?.call_context
+  if (ctx) return `call:${ctx}`
+  const parent = row.attributes?.parent_event_id
+  if (parent) return `parent:${parent}`
+  return `event:${row.eventId}`
+}
+
+function buildEventThreads(rows: EventRow[], hideTech: boolean) {
+  const order: string[] = []
+  const buckets = new Map<string, EventRow[]>()
+  for (const row of rows) {
+    if (hideTech && isTechnicalFragment(row)) continue
+    const key = eventThreadKey(row)
+    if (!buckets.has(key)) {
+      order.push(key)
+      buckets.set(key, [])
+    }
+    buckets.get(key)!.push(row)
+  }
+  return order.map((id) => {
+    const items = buckets.get(id) || []
+    const summary = items.find((item) => item.attributes?.trace_continuation !== 'true') || items[0]
+    const fragments = items.filter((item) => item.eventId !== summary.eventId)
+    return { id, summary, fragments, total: items.length }
+  })
+}
+
+function EventsTable({ rows, timezone, dataset, onSelect }: {
   rows: EventRow[]
   timezone: string
+  dataset: Dataset
   onSelect: (row: EventRow) => void
 }) {
-  return <table><thead><tr><th>Получено</th><th>Раздел</th><th>Компонент</th>
-    <th>Сообщение</th><th>Статус</th><th>Атрибуты</th></tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.eventId} onClick={() => onSelect(row)}>
-      <td className="mono">{formatTime(row.eventTime || row.receivedAt, timezone)}</td><td><span className="tag">{row.category}</span></td>
-      <td className="mono">{row.component || '—'}</td><td className="message-cell">{row.message}</td>
-      <td><span className={`parse-status ${row.parseStatus}`}>{row.parseStatus}</span></td>
-      <td className="mono">{Object.entries(row.attributes || {}).map(([key, value]) => `${key}=${value}`).join(' · ') || '—'}</td>
-    </tr>)}</tbody></table>
+  const threaded = threadedDatasets.has(dataset)
+  const [hideTech, setHideTech] = useState(true)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const threads = useMemo(
+    () => (threaded ? buildEventThreads(rows, hideTech) : null),
+    [hideTech, rows, threaded],
+  )
+  const hiddenTech = threaded ? rows.filter(isTechnicalFragment).length : 0
+  return <>
+    {threaded && <div className="thread-toolbar">
+      <label className="thread-filter">
+        <input type="checkbox" checked={hideTech} onChange={(e) => setHideTech(e.target.checked)} />
+        Скрыть технические фрагменты
+        {hiddenTech > 0 ? ` (${hiddenTech})` : ''}
+      </label>
+      <span className="muted">{threads?.length || 0} блоков · {rows.length} строк</span>
+    </div>}
+    <table><thead><tr><th>Получено</th><th>Раздел</th><th>Компонент</th>
+      <th>Сообщение</th><th>Статус</th><th>Атрибуты</th></tr></thead>
+      <tbody>
+        {!threaded && rows.map((row) => <EventTableRow key={row.eventId} row={row}
+          timezone={timezone} onSelect={onSelect} />)}
+        {threaded && threads?.map((thread) => {
+          const open = expanded[thread.id] ?? false
+          const hasChildren = thread.fragments.length > 0
+          return <Fragment key={thread.id}>
+            <tr className={hasChildren ? 'thread-summary' : undefined}
+              onClick={() => onSelect(thread.summary)}>
+              <td className="mono">{formatTime(thread.summary.eventTime || thread.summary.receivedAt, timezone)}</td>
+              <td><span className="tag">{thread.summary.category}</span></td>
+              <td className="mono">{thread.summary.component || '—'}</td>
+              <td className="message-cell">
+                {hasChildren && <button type="button" className="thread-toggle"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    setExpanded((current) => ({ ...current, [thread.id]: !open }))
+                  }}>{open ? '▾' : '▸'} {thread.total}</button>}
+                <span>{thread.summary.message || '—'}</span>
+              </td>
+              <td><span className={`parse-status ${thread.summary.parseStatus}`}>{thread.summary.parseStatus}</span></td>
+              <td className="mono">{formatEventAttrs(thread.summary)}</td>
+            </tr>
+            {open && thread.fragments.map((row) => <EventTableRow key={row.eventId} row={row}
+              timezone={timezone} onSelect={onSelect} nested />)}
+          </Fragment>
+        })}
+      </tbody></table>
+  </>
+}
+
+function formatEventAttrs(row: EventRow) {
+  return Object.entries(row.attributes || {}).map(([key, value]) => `${key}=${value}`).join(' · ') || '—'
+}
+
+function EventTableRow({ row, timezone, onSelect, nested }: {
+  row: EventRow
+  timezone: string
+  onSelect: (row: EventRow) => void
+  nested?: boolean
+}) {
+  return <tr className={nested ? 'thread-child' : undefined} onClick={() => onSelect(row)}>
+    <td className="mono">{formatTime(row.eventTime || row.receivedAt, timezone)}</td>
+    <td><span className="tag">{row.category}</span></td>
+    <td className="mono">{row.component || '—'}</td>
+    <td className={`message-cell ${nested ? 'thread-fragment' : ''}`}>{row.message || '—'}</td>
+    <td><span className={`parse-status ${row.parseStatus}`}>{row.parseStatus}</span></td>
+    <td className="mono">{formatEventAttrs(row)}</td>
+  </tr>
 }
 
 function EventDrawer({ event, timezone, onClose }: {

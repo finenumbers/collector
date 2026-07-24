@@ -123,6 +123,16 @@ tbody tr { cursor: pointer; }
 .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 9.5px; }
 .right { text-align: right; }
 .message-cell { min-width: 320px; }
+.thread-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 6px 9px; border-bottom: 1px solid var(--line); background: #f8fafc; font-size: 11px; color: var(--muted); }
+.thread-filter { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 11px; }
+.thread-filter input { margin: 0; }
+.thread-toggle { margin-right: 6px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 2px;
+  background: #fff; color: var(--muted); font-size: 10px; font-family: "SFMono-Regular", Consolas, monospace; }
+.thread-summary td { background: #f7f9fc; }
+.thread-child td { background: #fcfdff; }
+.thread-fragment { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 9.5px;
+  white-space: pre; }
 .tag, .parse-status { display: inline-block; padding: 2px 5px; border-radius: 2px; background: #e9edf3; color: #475467; }
 .parse-status.parsed { color: #146c43; background: #e3f5eb; }
 .parse-status.partial { color: #975a00; background: #fff2d6; }

@@ -102,8 +102,8 @@ read rows/CPU и correlation coverage
 - Ingress не стартует с `address already in use`: освободите `${SYSLOG_PORT:-514}/udp` на Docker-хосте; не возвращайте bridge port mapping.
 - ClickHouse недоступен: JetStream удерживает Syslog; CDR-файл остаётся в volume и raw archive/ledger.
 - Unknown растёт после firmware upgrade: не удаляйте raw, зафиксируйте firmware и добавьте golden fixtures/versioned parser.
-- После bump `SyslogParserVersion` (например `smg-3.410-v8`): дождитесь лога
+- После bump `SyslogParserVersion` (например `smg-3.410-v9`): дождитесь лога
   `historical Syslog reprocess completed` с новой `parser_version`; в UI diagnostics
   `parserVersion` должен совпасть; раздел «Нераспознанное» по ранее известному корпусу
-  должен опустеть (`cdr`/`alarm-led`/`SNMP`/`last message repeated` уходят в
-  `system_journal`/`alarms`).
+  должен опустеть; `SIP. … IAM-` не должен попадать в SS7/ISUP; списки Syslog
+  группируются по `call_context`.

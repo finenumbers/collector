@@ -524,3 +524,153 @@ func TestUnrecognizedCorpus20260724HasNoUnknownOrPartial(t *testing.T) {
 		t.Fatalf("corpus size = %d, want 43", total)
 	}
 }
+
+func TestClassifySIPWithIAMStaysSIP(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 13, 3, 39, 0, time.UTC),
+		SourceIP:   "5.227.161.181",
+		Payload: []byte(
+			`<14> <smg1016m>  20:03:39.762663  [INFO] [C027A1F] SIP. TX. Callref 061d.   IAM- Initial Address Message`,
+		),
+	})
+	if event.Category != "sip" || event.Component != "SIP" {
+		t.Fatalf("SIP+IAM leaked out of sip: %#v", event)
+	}
+}
+
+func TestClassifySIPTSeizeWithSS7CategoryStaysSIP(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 13, 3, 39, 0, time.UTC),
+		SourceIP:   "5.227.161.181",
+		Payload: []byte(
+			`<14> <smg1016m>  20:03:39.608002  [INFO] [C027A1F] SIPT[32]. Seize  - calling SS7 category: '0A' (10) (from incoming port)`,
+		),
+	})
+	if event.Category != "sip" || !strings.HasPrefix(strings.ToUpper(event.Component), "SIPT[") {
+		t.Fatalf("SIPT seize leaked to %q component=%q", event.Category, event.Component)
+	}
+}
+
+func TestRadiusServerRejectedComponentNormalized(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 13, 2, 40, 0, time.UTC),
+		SourceIP:   "5.227.161.181",
+		Payload: []byte(
+			`<14> <smg1016m>  20:02:40.960163  [INFO] [C027A1E] 		 RADIUS server rejected: :0 (replied 0)`,
+		),
+	})
+	if event.Category != "radius" || event.Component != "RADIUS" {
+		t.Fatalf("rejected line not normalized: %#v", event)
+	}
+	if !strings.Contains(event.Message, "server rejected") {
+		t.Fatalf("message lost rejected wording: %q", event.Message)
+	}
+}
+
+func TestEmptyCallBodyMarked(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 13, 3, 39, 0, time.UTC),
+		SourceIP:   "5.227.161.181",
+		Payload:    []byte(`<14> <smg1016m>  20:03:39.765516  [INFO] [C027A1F] `),
+	})
+	if event.Attributes["empty_body"] != "true" || event.Attributes["call_context"] != "C027A1F" {
+		t.Fatalf("empty body not marked: %#v", event.Attributes)
+	}
+}
+
+func TestFragmentLinkerGroupsSIPDetailAndRadiusAVP(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 24, 13, 3, 39, 762663000, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  20:03:39.762663  [INFO] [C027A1F] SIP. TX. Callref 061d.   IAM- Initial Address Message`,
+			),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(1 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  20:03:39.762663  [INFO] [C027A1F] 		# 	ISUP: used all the way`,
+			),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(2 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  20:03:39.764983  [INFO] [C027A1F] Port SIPT:061d. RADIUS: Request ID [063] process Antifraud-Auth-Request.`,
+			),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(3 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  20:03:39.765100  [INFO] [C027A1F] Cisco-AVPair                     = 'xpgk-request-type=number'`,
+			),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(4 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  20:03:39.765200  [INFO] [C027A1F] 		## a=ptime:20`,
+			),
+		}),
+	}
+	if events[0].Category != "sip" {
+		t.Fatalf("parent SIP category=%q", events[0].Category)
+	}
+	if events[1].Attributes["trace_continuation"] != "true" || events[1].Attributes["fragment_kind"] != "hash_detail" {
+		t.Fatalf("ISUP detail not marked fragment: %#v", events[1].Attributes)
+	}
+	if events[2].Category != "radius" {
+		t.Fatalf("Port SIPT RADIUS not radius: %#v", events[2])
+	}
+	if events[3].Attributes["fragment_kind"] != "avp" {
+		t.Fatalf("AVP not marked: %#v", events[3].Attributes)
+	}
+	if events[4].Attributes["fragment_kind"] != "sdp" {
+		t.Fatalf("SDP not marked: %#v", events[4].Attributes)
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[1].Category != "sip" || events[1].Attributes["parent_event_id"] != events[0].EventID.String() {
+		t.Fatalf("ISUP detail did not inherit SIP parent: %#v", events[1])
+	}
+	if events[3].Category != "radius" || events[3].Attributes["parent_event_id"] != events[2].EventID.String() {
+		t.Fatalf("AVP did not inherit RADIUS parent: %#v", events[3])
+	}
+	if events[4].Category != "sip" || events[4].Attributes["parent_event_id"] != events[0].EventID.String() {
+		t.Fatalf("SDP should inherit SIP signal parent: %#v", events[4])
+	}
+}
+
+func TestContinuationAssemblerKeepsSeparateCallContexts(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 24, 13, 0, 0, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:00:00.000000  [INFO] [C000001] SIP. invite`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(5 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:00:00.005000  [INFO] [C000002] SIP. invite`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(10 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:00:00.010000  [INFO] [C000001] 		# 	ISUP: used all the way`),
+		}),
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[2].Attributes["parent_event_id"] != events[0].EventID.String() {
+		t.Fatalf("call context C000001 linked to wrong parent: %#v", events[2].Attributes)
+	}
+}

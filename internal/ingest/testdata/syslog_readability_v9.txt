@@ -1,0 +1,9 @@
+# Golden samples from section exports (SIP+IAM, SIPT seize, RADIUS rejected, empty body, SDP, ISUP hash).
+<14> <smg1016m>  20:03:39.762663  [INFO] [C027A1F] SIP. TX. Callref 061d.   IAM- Initial Address Message
+<14> <smg1016m>  20:03:39.608002  [INFO] [C027A1F] SIPT[32]. Seize  - calling SS7 category: '0A' (10) (from incoming port)
+<14> <smg1016m>  20:02:40.960163  [INFO] [C027A1E] 		 RADIUS server rejected: :0 (replied 0)
+<14> <smg1016m>  20:03:39.765516  [INFO] [C027A1F] 
+<14> <smg1016m>  20:03:39.762663  [INFO] [C027A1F] 		# 	ISUP: used all the way
+<14> <smg1016m>  20:03:40.555930  [INFO] [C027A1F] 		## a=ptime:20
+<14> <smg1016m>  20:03:39.764983  [INFO] [C027A1F] Port SIPT:061d. RADIUS: Request ID [063] process Antifraud-Auth-Request.
+<14> <smg1016m>  20:03:39.765100  [INFO] [C027A1F] Cisco-AVPair                     = 'xpgk-request-type=number'

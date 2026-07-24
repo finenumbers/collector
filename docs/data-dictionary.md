@@ -76,11 +76,18 @@ quarantine. Исходная пара `имя → значение` всегда
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Parser `smg-3.410-v8` (имя историческое; правила Syslog общие для схем прошивки
-`3.23.2` и `3.410`) распознаёт самостоятельные Eltex trace-continuations `# requestID`,
-`# trunkID`, `# Keep alive type`, `# cause` и номерные строки. При однозначном
-device-scoped контексте они наследуют категорию родителя; иначе сохраняются как
-`call_trace`, а не как ошибочно угаданный RADIUS/SIP.
+Parser `smg-3.410-v9` (имя историческое; правила Syslog общие для схем прошивки
+`3.23.2` и `3.410`) использует **component-first** классификацию: `SIP` / `SIPT[…]` /
+`Port SIPT` остаются в `sip` даже при тексте `IAM-`/`ISUP`/`SS7` (SIP-I/SIP-T). Keyword
+`ISUP`/`IAM-` применяется только когда SIP-компонент не распознан.
+
+Фрагменты SMG (отдельные UDP datagram’ы) помечаются `trace_continuation` +
+`fragment_kind` (`typed_hash`, `hash_detail`, `sdp`, `codec`, `avp`, `hex`, `digest`,
+`rc_fragment`, `indented`, `empty`). `ContinuationAssembler` индексирует parents по
+`device_id + call_context` (и отдельный radius-burst без context); AVP/hex/digest
+наследуют только RADIUS-родителя. Raw payload не склеивается: 1 datagram = 1 event.
+UI группирует списки разделов по `call_context` / `parent_event_id` и скрывает
+технические фрагменты (`empty_body`, hex/digest) по умолчанию.
 
 Категории:
 
@@ -112,9 +119,11 @@ Side-channels вне отдельных UI-тогглов (обязательн�
 - `alarm-led`, SNMP trap с `alarm-id` / `* TRAP *` → `alarms`; прочий SNMP → `system_journal`;
 - RFC3164 `last message repeated N times` → `parsed`, category `system_journal`,
   attributes `repeat_suppressed=true`, `repeat_count=N` (без stateful link на предыдущее
-  сообщение в v8).
+  сообщение).
+- `RADIUS server rejected: …` → component нормализуется в `RADIUS` (не длинная фраза).
+- Пустое тело после `[Cxxxxxxx]` → `empty_body=true` (скрывается в UI как технический фрагмент).
 
-Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Component не извлекается из двоеточия внутри timestamp (`HH:MM:SS`). Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
+Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Component извлекается только из allowlist Eltex-имён (`SIP`, `RADIUS`, `ALARM`, `mspc`, `Port SIPT`, `SIPT[…]`, …); двоеточие внутри timestamp (`HH:MM:SS`) и ложные component вроде `MAC_ext` не режут message. Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
 
 Уровни Eltex `0–99` являются детализацией трассировки, а не RFC severity.
 

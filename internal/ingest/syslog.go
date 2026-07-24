@@ -27,35 +27,51 @@ const (
 )
 
 var (
-	priPattern        = regexp.MustCompile(`^<([0-9]{1,3})>`)
-	eltexHostPattern  = regexp.MustCompile(`^<([^<>\s]{1,128})>\s+`)
-	tracePattern      = regexp.MustCompile(`(?i)^(?:[A-Z][a-z]{2}\s+\d+\s+)?(\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\s+(?:\[([A-Z][A-Z0-9 _-]*)\]\s*)?(.*)$`)
-	rfc3164Pattern    = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([0-9]{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
-	rfc3164App        = regexp.MustCompile(`^([A-Za-z0-9_.-]+)(?:\[([0-9]+)\])?:\s*(.*)$`)
-	callContext       = regexp.MustCompile(`^\[([A-Za-z0-9_-]+)\]\s*(.*)$`)
-	callContextAny    = regexp.MustCompile(`\[(C[A-Za-z0-9_-]+)\]`)
-	componentPattern  = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_./ -]{0,127}?)(?::|\.)\s*(.*)$`)
+	priPattern       = regexp.MustCompile(`^<([0-9]{1,3})>`)
+	eltexHostPattern = regexp.MustCompile(`^<([^<>\s]{1,128})>\s+`)
+	tracePattern     = regexp.MustCompile(`(?i)^(?:[A-Z][a-z]{2}\s+\d+\s+)?(\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\s+(?:\[([A-Z][A-Z0-9 _-]*)\]\s*)?(.*)$`)
+	rfc3164Pattern   = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([0-9]{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
+	rfc3164App       = regexp.MustCompile(`^([A-Za-z0-9_.-]+)(?:\[([0-9]+)\])?:\s*(.*)$`)
+	callContext      = regexp.MustCompile(`^\[([A-Za-z0-9_-]+)\]\s*(.*)$`)
+	callContextAny   = regexp.MustCompile(`\[(C[A-Za-z0-9_-]+)\]`)
+	componentPattern = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_./ -]{0,127}?)(?::|\.)\s*(.*)$`)
 	// After a false component split on HH:MM:SS, remainder looks like "MM:SS ..." / "MM:SS.ffffff ...".
-	componentTimeRest = regexp.MustCompile(`^\d{2}:\d{2}(?:\.\d{1,6})?(?:\s|$)`)
-	repeatedMessage   = regexp.MustCompile(`(?i)^last message repeated (\d+) times$`)
-	radiusPair        = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
-	radiusSession     = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
-	radiusVSAPair     = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
-	radiusPacket      = regexp.MustCompile(`(?i)\b(Access-Request|Access-Accept|Access-Reject|Accounting-Request|Accounting-Response)\b`)
-	radiusAttribute   = regexp.MustCompile(`(?i)^(?:User-Name|User-Password|Calling-Station-Id|Called-Station-Id|Acct-Session-Id|NAS-Port|NAS-Port-Type|Framed-IP-Address|Event-Timestamp|Acct-Delay-Time|Acct-Session-Time|Cisco-AVPair|Eltex-AVPair|h323-[A-Za-z0-9-]+)\s*(?:\([0-9]+\))?\s*[=:]`)
-	radiusRequestID   = regexp.MustCompile(`(?i)\b(?:Request|Packet)\s+ID\s*\[?([0-9]{1,3})\]?`)
-	radiusServer      = regexp.MustCompile(`(?i)\b(?:server|address)\s*[=:]?\s*((?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?)`)
-	radiusLatency     = regexp.MustCompile(`(?i)\b(?:in|latency\s*[=:]?)\s*([0-9]+)\s*ms\b`)
-	radiusRetry       = regexp.MustCompile(`(?i)\bretr(?:y|ies)\s*[=:]?\s*([0-9]+)\b`)
-	q850CausePattern  = regexp.MustCompile(`(?i)\b(?:Q\.?850|disconnect-cause|release-cause)\s*[=:]\s*([0-9]{1,3})`)
-	sipCallIDPattern  = regexp.MustCompile(`(?i)\bCall-ID\s*[=:]\s*["']?([^'"\s,;]+)`)
-	globalCallPattern = regexp.MustCompile(`(?i)\b(?:Global[- ]Callref|GCR)\s*[=:]\s*["']?([^'"\s,;]+)`)
-	systemAppPattern  = regexp.MustCompile(`(?i)\b(?:webapp|webspp)(?:\[[0-9]+\])?:\s*(?:WEBS|SEC)\s*:`)
-	systemBodyPattern = regexp.MustCompile(`(?i)^\s*(?:WEBS|SEC)\s*:`)
-	alarmPattern      = regexp.MustCompile(`(?i)(?:^|[\s:;,])ALARMS?(?:$|[\s:;,])|АВАР`)
-	callPattern       = regexp.MustCompile(`(?i)(?:^|[\s:;,])CALL(?:$|[\s:;,])|(?:^|[\s:;,])PORT\s+[0-9]`)
-	traceContinuation = regexp.MustCompile(`(?i)^#+\s*(requestID|trunkID|Keep\s+alive\s+type|cause|connected\s+number|number)\b\s*[:=]?\s*['"]?([^'"]*)`)
+	componentTimeRest  = regexp.MustCompile(`^\d{2}:\d{2}(?:\.\d{1,6})?(?:\s|$)`)
+	portSIPTPattern    = regexp.MustCompile(`(?i)^(Port\s+SIPT)\s*:\s*(.*)$`)
+	siptBracketPattern = regexp.MustCompile(`(?i)^(SIPT?\[[0-9A-Fa-f]+\])\.\s*(.*)$`)
+	radiusRejectedPat  = regexp.MustCompile(`(?i)^RADIUS\s+server\s+rejected:\s*(.*)$`)
+	connComponentPat   = regexp.MustCompile(`(?i)^(Conn\[[0-9A-Fa-f]+\])\s*:\s*(.*)$`)
+	siptInMessage      = regexp.MustCompile(`(?i)\bSIPT?\[[0-9A-Fa-f]+\]`)
+	repeatedMessage    = regexp.MustCompile(`(?i)^last message repeated (\d+) times$`)
+	radiusPair         = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
+	radiusSession      = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
+	radiusVSAPair      = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
+	radiusPacket       = regexp.MustCompile(`(?i)\b(Access-Request|Access-Accept|Access-Reject|Accounting-Request|Accounting-Response)\b`)
+	radiusAttribute    = regexp.MustCompile(`(?i)^(?:User-Name|User-Password|Calling-Station-Id|Called-Station-Id|Acct-Session-Id|NAS-Port|NAS-Port-Type|Framed-IP-Address|Event-Timestamp|Acct-Delay-Time|Acct-Session-Time|Cisco-AVPair|Eltex-AVPair|h323-[A-Za-z0-9-]+)\s*(?:\([0-9]+\))?\s*[=:]`)
+	avpLinePattern     = regexp.MustCompile(`(?i)^[A-Za-z][A-Za-z0-9-]+\s*=\s*`)
+	radiusRequestID    = regexp.MustCompile(`(?i)\b(?:Request|Packet)\s+ID\s*\[?([0-9]{1,3})\]?`)
+	radiusServer       = regexp.MustCompile(`(?i)\b(?:server|address)\s*[=:]?\s*((?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?)`)
+	radiusLatency      = regexp.MustCompile(`(?i)\b(?:in|latency\s*[=:]?)\s*([0-9]+)\s*ms\b`)
+	radiusRetry        = regexp.MustCompile(`(?i)\bretr(?:y|ies)\s*[=:]?\s*([0-9]+)\b`)
+	q850CausePattern   = regexp.MustCompile(`(?i)\b(?:Q\.?850|disconnect-cause|release-cause)\s*[=:]\s*([0-9]{1,3})`)
+	sipCallIDPattern   = regexp.MustCompile(`(?i)\bCall-ID\s*[=:]\s*["']?([^'"\s,;]+)`)
+	globalCallPattern  = regexp.MustCompile(`(?i)\b(?:Global[- ]Callref|GCR)\s*[=:]\s*["']?([^'"\s,;]+)`)
+	systemAppPattern   = regexp.MustCompile(`(?i)\b(?:webapp|webspp)(?:\[[0-9]+\])?:\s*(?:WEBS|SEC)\s*:`)
+	systemBodyPattern  = regexp.MustCompile(`(?i)^\s*(?:WEBS|SEC)\s*:`)
+	alarmPattern       = regexp.MustCompile(`(?i)(?:^|[\s:;,])ALARMS?(?:$|[\s:;,])|АВАР`)
+	callPattern        = regexp.MustCompile(`(?i)(?:^|[\s:;,])CALL(?:$|[\s:;,])|(?:^|[\s:;,])PORT\s+[0-9]`)
+	traceContinuation  = regexp.MustCompile(`(?i)^#+\s*(requestID|trunkID|Keep\s+alive\s+type|cause|connected\s+number|number)\b\s*[:=]?\s*['"]?([^'"]*)`)
+	codecLinePattern   = regexp.MustCompile(`(?i)^a\[[0-9]+\]:`)
+	hexOnlyPattern     = regexp.MustCompile(`(?i)^[0-9a-f]{8,}$`)
+	digestLabelPat     = regexp.MustCompile(`(?i)^(Reply|Calculated|Calculating)\s+digest\b`)
 )
+
+var allowedComponents = map[string]struct{}{
+	"SIP": {}, "SIPT": {}, "RADIUS": {}, "RC": {}, "ALARM": {}, "ALARMS": {},
+	"ALARM-LED": {}, "SNMP": {}, "CDR": {}, "MSPC": {}, "MSP": {}, "WEBS": {}, "SEC": {},
+	"SS7": {}, "ISUP": {}, "SS7/ISUP": {}, "H323": {}, "RTP": {}, "RTCP": {}, "RTP-CREATE": {},
+	"HW": {}, "IVR": {}, "IPNET": {}, "AAA": {}, "AUTH": {},
+}
 
 type RawSyslog struct {
 	EventID          uuid.UUID `json:"eventId"`
@@ -78,11 +94,27 @@ type continuationParent struct {
 }
 
 type ContinuationAssembler struct {
-	parents map[uuid.UUID]continuationParent
+	byCallSignal map[string]continuationParent
+	byCallRadius map[string]continuationParent
+	radiusBurst  map[uuid.UUID]continuationParent
 }
 
 func NewContinuationAssembler() *ContinuationAssembler {
-	return &ContinuationAssembler{parents: make(map[uuid.UUID]continuationParent)}
+	return &ContinuationAssembler{
+		byCallSignal: make(map[string]continuationParent),
+		byCallRadius: make(map[string]continuationParent),
+		radiusBurst:  make(map[uuid.UUID]continuationParent),
+	}
+}
+
+func continuationCallKey(deviceID uuid.UUID, callContext string) string {
+	return deviceID.String() + "|" + callContext
+}
+
+func parentFresh(parent continuationParent, event *analytics.SyslogEvent, sourceIP string, window time.Duration) bool {
+	return parent.sourceIP == sourceIP &&
+		!event.ReceivedAt.Before(parent.receivedAt) &&
+		event.ReceivedAt.Sub(parent.receivedAt) <= window
 }
 
 func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
@@ -91,25 +123,61 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 	}
 	for index := range events {
 		event := &events[index]
+		sourceIP := ""
+		if event.SourceIP != nil {
+			sourceIP = event.SourceIP.String()
+		}
+		callContext := event.Attributes["call_context"]
 		if event.Attributes["trace_continuation"] != "true" {
-			a.parents[event.DeviceID] = continuationParent{
+			parent := continuationParent{
 				eventID: event.EventID, receivedAt: event.ReceivedAt,
-				sourceIP: event.SourceIP.String(), category: event.Category,
-				component: event.Component, callContext: event.Attributes["call_context"],
+				sourceIP: sourceIP, category: event.Category,
+				component: event.Component, callContext: callContext,
+			}
+			if callContext != "" {
+				key := continuationCallKey(event.DeviceID, callContext)
+				if event.Category == "radius" {
+					a.byCallRadius[key] = parent
+				} else {
+					a.byCallSignal[key] = parent
+				}
+			}
+			if event.Category == "radius" {
+				a.radiusBurst[event.DeviceID] = parent
 			}
 			continue
 		}
-		parent, ok := a.parents[event.DeviceID]
-		if !ok || parent.sourceIP != event.SourceIP.String() ||
-			event.ReceivedAt.Before(parent.receivedAt) ||
-			event.ReceivedAt.Sub(parent.receivedAt) > 500*time.Millisecond {
-			continue
+		kind := event.Attributes["fragment_kind"]
+		radiusFragment := kind == "avp" || kind == "hex" || kind == "digest" || kind == "rc_fragment"
+		parent, ok := continuationParent{}, false
+		if callContext != "" {
+			key := continuationCallKey(event.DeviceID, callContext)
+			if radiusFragment {
+				parent, ok = a.byCallRadius[key]
+				if ok && !parentFresh(parent, event, sourceIP, 2*time.Second) {
+					ok = false
+				}
+			} else {
+				parent, ok = a.byCallSignal[key]
+				if ok && !parentFresh(parent, event, sourceIP, 2*time.Second) {
+					ok = false
+				}
+			}
 		}
-		eventContext := event.Attributes["call_context"]
-		sameCall := eventContext != "" && eventContext == parent.callContext
-		radiusBurst := eventContext == "" && parent.category == "radius" &&
-			event.ReceivedAt.Sub(parent.receivedAt) <= 100*time.Millisecond
-		if !sameCall && !radiusBurst {
+		if !ok && radiusFragment {
+			parent, ok = a.radiusBurst[event.DeviceID]
+			if !ok || parent.category != "radius" || !parentFresh(parent, event, sourceIP, 2*time.Second) {
+				ok = false
+			}
+		}
+		if !ok && callContext == "" && !radiusFragment {
+			parent, ok = a.radiusBurst[event.DeviceID]
+			if !ok || parent.category != "radius" ||
+				!parentFresh(parent, event, sourceIP, 100*time.Millisecond) {
+				ok = false
+			}
+		}
+		if !ok {
 			continue
 		}
 		event.Attributes["parent_event_id"] = parent.eventID.String()
@@ -605,13 +673,21 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 	}
 	if match := callContext.FindStringSubmatch(event.Message); match != nil {
 		event.Attributes["call_context"] = match[1]
-		event.Message = strings.TrimSpace(match[2])
+		// Keep leading indentation so fragment detection can see Eltex detail lines.
+		event.Message = strings.TrimRight(match[2], "\r\n")
 	}
 	if component, rest, ok := splitComponent(event.Message); ok {
 		event.Component = component
 		event.Message = rest
 	}
 	extractTraceContinuation(&event)
+	if strings.TrimSpace(event.Message) == "" && event.Attributes["call_context"] != "" {
+		event.Attributes["empty_body"] = "true"
+		if event.Attributes["trace_continuation"] == "" {
+			event.Attributes["trace_continuation"] = "true"
+			event.Attributes["fragment_kind"] = "empty"
+		}
+	}
 	event.Category = classify(event.Component, event.Attributes["application"], event.Message, string(raw.Payload))
 	if event.Category == "radius" {
 		extractRadiusAttributes(text, &event)
@@ -629,32 +705,42 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 func classify(component, application, message, payload string) string {
 	upperComponent := strings.ToUpper(strings.TrimSpace(component))
 	upperApplication := strings.ToUpper(strings.TrimSpace(application))
-	upperMessage := strings.ToUpper(message)
-	upper := strings.ToUpper(strings.Join([]string{component, application, message, payload}, " "))
-	isRadiusComponent := upperComponent == "RADIUS" || upperComponent == "RC" ||
-		strings.Contains(upperComponent, "RADIUS")
-	isSIPComponent := upperComponent == "SIP" || upperComponent == "SIPT" ||
-		strings.Contains(upperComponent, "PBXIPC-SIP")
+	upperMessage := strings.ToUpper(strings.TrimSpace(message))
+	upperBody := strings.ToUpper(strings.Join([]string{component, application, message}, " "))
+	sipComponent := isSIPComponentName(upperComponent) || siptInMessage.MatchString(component) ||
+		siptInMessage.MatchString(message)
+	radiusComponent := upperComponent == "RADIUS" || upperComponent == "RC" ||
+		strings.HasPrefix(upperComponent, "RADIUS ")
 	switch {
 	case upperApplication == "WEBAPP" || upperApplication == "WEBSPP" ||
 		upperApplication == "WEBS" || upperApplication == "SEC" ||
 		upperComponent == "WEBS" || upperComponent == "SEC" ||
 		systemAppPattern.MatchString(payload) || systemBodyPattern.MatchString(message):
 		return "system_journal"
-	case isRadiusComponent || radiusPacket.MatchString(message) ||
+	case sipComponent && (strings.Contains(upperMessage, "ANTIFRAUD") ||
+		strings.Contains(upperMessage, "RADIUS:") || strings.Contains(upperMessage, "RADIUS ")):
+		return "radius"
+	case sipComponent:
+		return "sip"
+	case radiusComponent || radiusPacket.MatchString(message) ||
 		strings.Contains(upperMessage, "ACCS-REQUEST") ||
 		strings.Contains(upperMessage, "ACCT-SESSION-ID") ||
 		strings.Contains(upperMessage, "XPGK-") ||
-		(upperComponent == "" && radiusAttribute.MatchString(strings.TrimSpace(message))) ||
-		(!isSIPComponent && strings.Contains(upperMessage, "ANTIFRAUD")):
+		radiusAttribute.MatchString(strings.TrimSpace(message)) ||
+		avpLinePattern.MatchString(strings.TrimSpace(message)) ||
+		strings.Contains(upperMessage, "ANTIFRAUD"):
 		return "radius"
-	case strings.Contains(upper, "SS7") || strings.Contains(upper, "ISUP") ||
-		strings.Contains(upper, "IAM-") || strings.Contains(upper, "RLC-"):
+	case upperComponent == "SS7" || upperComponent == "ISUP" || upperComponent == "SS7/ISUP" ||
+		strings.Contains(upperComponent, "SS7 ") || strings.HasPrefix(upperComponent, "SS7/"):
 		return "isup"
-	case strings.Contains(upper, "Q.931") || strings.Contains(upper, "Q931") || strings.Contains(upper, "DSS1"):
+	case !sipComponent && (strings.Contains(upperBody, "SS7") || strings.Contains(upperBody, "ISUP") ||
+		strings.Contains(upperBody, "IAM-") || strings.Contains(upperBody, "RLC-")):
+		return "isup"
+	case strings.Contains(upperBody, "Q.931") || strings.Contains(upperBody, "Q931") ||
+		strings.Contains(upperBody, "DSS1"):
 		return "q931"
-	case isSIPComponent || strings.Contains(upper, "SIP") ||
-		strings.Contains(upper, "INVITE") || strings.Contains(upper, "CALL-ID"):
+	case strings.Contains(upperBody, "SIP") || strings.Contains(upperMessage, "INVITE") ||
+		strings.Contains(upperMessage, "CALL-ID"):
 		return "sip"
 	case upperComponent == "H323" || strings.Contains(upperComponent, "H.323"):
 		return "h323"
@@ -663,10 +749,11 @@ func classify(component, application, message, payload string) string {
 		return "rtp"
 	case upperComponent == "HW" || strings.Contains(upperComponent, "HARDWARE"):
 		return "hardware"
-	case strings.Contains(upper, "IP-CONN") || strings.Contains(upper, "CONN["):
+	case strings.Contains(upperBody, "IP-CONN") || strings.Contains(upperBody, "CONN[") ||
+		strings.HasPrefix(upperComponent, "CONN["):
 		return "ip_connections"
 	case strings.Contains(upperComponent, "SM-VP") || strings.Contains(upperComponent, "SMVP") ||
-		strings.Contains(upperComponent, "MSP"):
+		strings.Contains(upperComponent, "MSP") || upperComponent == "MSPC":
 		return "ip_modules"
 	case upperComponent == "IVR" || strings.HasPrefix(upperComponent, "IVR/"):
 		return "ivr"
@@ -676,22 +763,24 @@ func classify(component, application, message, payload string) string {
 		return "system_journal"
 	case upperComponent == "ALARM" || upperComponent == "ALARMS" ||
 		upperComponent == "ALARM-LED" || strings.HasPrefix(upperComponent, "ALARM") ||
-		alarmPattern.MatchString(upper):
+		alarmPattern.MatchString(upperBody):
 		return "alarms"
 	case upperComponent == "SNMP":
-		if strings.Contains(upperMessage, "TRAP") || strings.Contains(upper, "ALARM-ID") {
+		if strings.Contains(upperMessage, "TRAP") || strings.Contains(upperBody, "ALARM-ID") {
 			return "alarms"
 		}
 		return "system_journal"
 	case strings.Contains(upperMessage, "LAST MESSAGE REPEATED"):
 		return "system_journal"
-	case strings.Contains(upper, "CONFIG") || strings.Contains(upper, "COMMAND") || strings.Contains(upper, "USERLOG"):
+	case strings.Contains(upperBody, "CONFIG") || strings.Contains(upperBody, "COMMAND") ||
+		strings.Contains(upperBody, "USERLOG"):
 		return "config_history"
-	case strings.Contains(upper, "AUTHLOG") || upperComponent == "AUTH":
+	case strings.Contains(upperBody, "AUTHLOG") || upperComponent == "AUTH":
 		return "auth_log"
-	case strings.HasPrefix(eventCallContext(payload), "C") || callPattern.MatchString(upper):
+	case strings.HasPrefix(eventCallContext(payload), "C") || callPattern.MatchString(upperBody):
 		return "call_trace"
-	case traceContinuation.MatchString(strings.TrimSpace(message)):
+	case strings.HasPrefix(strings.TrimSpace(message), "#") ||
+		codecLinePattern.MatchString(strings.TrimSpace(message)):
 		return "call_trace"
 	case upperApplication != "":
 		return "system_journal"
@@ -700,16 +789,60 @@ func classify(component, application, message, payload string) string {
 	}
 }
 
+func isSIPComponentName(upperComponent string) bool {
+	return upperComponent == "SIP" || upperComponent == "SIPT" ||
+		strings.HasPrefix(upperComponent, "PORT SIPT") ||
+		strings.HasPrefix(upperComponent, "SIPT[") ||
+		strings.HasPrefix(upperComponent, "SIP[") ||
+		strings.Contains(upperComponent, "PBXIPC-SIP")
+}
+
+func isAllowedComponent(component string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(component))
+	if _, ok := allowedComponents[upper]; ok {
+		return true
+	}
+	if strings.HasPrefix(upper, "PORT SIPT") || strings.HasPrefix(upper, "SIPT[") ||
+		strings.HasPrefix(upper, "SIP[") || strings.HasPrefix(upper, "CONN[") {
+		return true
+	}
+	if strings.HasPrefix(upper, "IVR/") || strings.HasPrefix(upper, "IPNET/") ||
+		strings.HasPrefix(upper, "SS7/") || strings.Contains(upper, "SM-VP") {
+		return true
+	}
+	return false
+}
+
 func splitComponent(message string) (component, rest string, ok bool) {
-	match := componentPattern.FindStringSubmatch(message)
+	trimmedLeft := strings.TrimLeft(message, " \t")
+	leading := message[:len(message)-len(trimmedLeft)]
+	if match := radiusRejectedPat.FindStringSubmatch(trimmedLeft); match != nil {
+		return "RADIUS", "server rejected: " + strings.TrimSpace(match[1]), true
+	}
+	if match := portSIPTPattern.FindStringSubmatch(trimmedLeft); match != nil {
+		return match[1], strings.TrimSpace(match[2]), true
+	}
+	if match := siptBracketPattern.FindStringSubmatch(trimmedLeft); match != nil {
+		return match[1], strings.TrimSpace(match[2]), true
+	}
+	if match := connComponentPat.FindStringSubmatch(trimmedLeft); match != nil {
+		return match[1], strings.TrimSpace(match[2]), true
+	}
+	match := componentPattern.FindStringSubmatch(trimmedLeft)
 	if match == nil {
 		return "", "", false
 	}
 	component = strings.TrimSpace(match[1])
 	rest = strings.TrimSpace(match[2])
-	// Reject splits on the colon inside HH:MM:SS (e.g. "Jul 24 19:32:34 ...").
 	if componentTimeRest.MatchString(rest) {
 		return "", "", false
+	}
+	if !isAllowedComponent(component) {
+		return "", "", false
+	}
+	if leading != "" && rest != "" {
+		// Preserve indent only for non-component detail; component lines are top-level.
+		_ = leading
 	}
 	return component, rest, true
 }
@@ -729,26 +862,52 @@ func parseRepeatedMessage(
 	return parseRFC3164Time(match[1], match[2], match[3], received, location), remainder, rep[1], true
 }
 
+func markTraceContinuation(event *analytics.SyslogEvent, kind string) {
+	event.Attributes["trace_continuation"] = "true"
+	event.Attributes["fragment_kind"] = kind
+}
+
 func extractTraceContinuation(event *analytics.SyslogEvent) {
-	match := traceContinuation.FindStringSubmatch(strings.TrimSpace(event.Message))
-	if match == nil {
+	rawMessage := event.Message
+	trimmed := strings.TrimSpace(rawMessage)
+	indented := trimmed != "" && len(rawMessage) > 0 &&
+		(rawMessage[0] == ' ' || rawMessage[0] == '\t')
+	if match := traceContinuation.FindStringSubmatch(trimmed); match != nil {
+		kind := strings.ToLower(strings.Join(strings.Fields(match[1]), "_"))
+		value := strings.TrimSpace(match[2])
+		markTraceContinuation(event, "typed_hash")
+		event.Attributes["continuation_type"] = kind
+		switch kind {
+		case "requestid":
+			event.Attributes["request_id"] = value
+		case "trunkid":
+			event.Attributes["trunk_id"] = value
+		case "keep_alive_type":
+			event.Attributes["keep_alive_type"] = value
+		case "cause":
+			event.Attributes["cause"] = value
+		case "connected_number", "number":
+			event.Attributes["number"] = value
+		}
 		return
 	}
-	kind := strings.ToLower(strings.Join(strings.Fields(match[1]), "_"))
-	value := strings.TrimSpace(match[2])
-	event.Attributes["trace_continuation"] = "true"
-	event.Attributes["continuation_type"] = kind
-	switch kind {
-	case "requestid":
-		event.Attributes["request_id"] = value
-	case "trunkid":
-		event.Attributes["trunk_id"] = value
-	case "keep_alive_type":
-		event.Attributes["keep_alive_type"] = value
-	case "cause":
-		event.Attributes["cause"] = value
-	case "connected_number", "number":
-		event.Attributes["number"] = value
+	switch {
+	case strings.HasPrefix(trimmed, "##"):
+		markTraceContinuation(event, "sdp")
+	case strings.HasPrefix(trimmed, "#"):
+		markTraceContinuation(event, "hash_detail")
+	case codecLinePattern.MatchString(trimmed):
+		markTraceContinuation(event, "codec")
+	case hexOnlyPattern.MatchString(strings.ReplaceAll(trimmed, " ", "")):
+		markTraceContinuation(event, "hex")
+	case digestLabelPat.MatchString(trimmed):
+		markTraceContinuation(event, "digest")
+	case radiusAttribute.MatchString(trimmed) || avpLinePattern.MatchString(trimmed):
+		markTraceContinuation(event, "avp")
+	case strings.EqualFold(event.Component, "rc"):
+		markTraceContinuation(event, "rc_fragment")
+	case indented:
+		markTraceContinuation(event, "indented")
 	}
 }
 

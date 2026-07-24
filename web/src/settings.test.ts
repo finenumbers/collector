@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  canManageUsers, canOpenSystemSettings, purgeConfirmationReady, purgeRetryLabel,
+  canManageUsers, canOpenSystemSettings, normalizeFirmwareScheme,
+  purgeConfirmationReady, purgeRetryLabel,
 } from './settings'
 
 describe('system settings RBAC', () => {
@@ -14,6 +15,16 @@ describe('system settings RBAC', () => {
     expect(canManageUsers('admin')).toBe(true)
     expect(canManageUsers('analyst')).toBe(false)
     expect(canManageUsers('viewer')).toBe(false)
+  })
+})
+
+describe('firmware processing schemes', () => {
+  it('maps legacy builds onto canonical schemes', () => {
+    expect(normalizeFirmwareScheme('3.23.2')).toBe('3.23.2')
+    expect(normalizeFirmwareScheme('3.410')).toBe('3.410')
+    expect(normalizeFirmwareScheme('3.410.0.7443')).toBe('3.410')
+    expect(normalizeFirmwareScheme('3.23.2.5834')).toBe('3.23.2')
+    expect(normalizeFirmwareScheme('')).toBe('3.23.2')
   })
 })
 

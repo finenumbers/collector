@@ -94,6 +94,58 @@ func TestCDRRequiresProfileWithoutHeader(t *testing.T) {
 	}
 }
 
+func TestCDRProfile3410PadsShortRows(t *testing.T) {
+	header := strings.Join(CDRProfileForFirmware("3.410"), ";") + ";"
+	// 51 data fields after Eltex omits the final empty Redirection type column.
+	dataFields := make([]string, 51)
+	dataFields[0] = "mts"
+	dataFields[1] = "2026-07-24 18:50:10.000"
+	dataFields[2] = ""
+	dataFields[3] = "2026-07-24 18:50:20.000"
+	dataFields[4] = "10"
+	dataFields[5] = "16"
+	dataFields[32] = "20260724185002-1"
+	sample := "SMG1016M. CDR. File started at '20260724185002'\n" +
+		header + "\n" + strings.Join(dataFields, ";") + "\n"
+	result, err := (CDRParser{
+		DeviceID: uuid.New(), FileID: uuid.New(), Location: time.UTC,
+		ExpectedHeader: CDRProfileForFirmware("3.410"),
+	}).Parse(strings.NewReader(sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("short 3.410 row should be padded, got errors: %v", result.Errors)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("got %d records, want 1", len(result.Records))
+	}
+	raw := result.Records[0].RawFields
+	if raw["time_in_queue"] != "" || raw["redirection_type"] != "" {
+		t.Fatalf("padded trailing fields: %#v", raw)
+	}
+	if _, ok := raw["time_in_queue"]; !ok {
+		t.Fatal("time_in_queue missing from raw fields")
+	}
+	if _, ok := raw["redirection_type"]; !ok {
+		t.Fatal("redirection_type missing from raw fields")
+	}
+}
+
+func TestResolveCDRHeaderPrefersOverride(t *testing.T) {
+	override := []string{"Device Sign", "Setup time"}
+	got := ResolveCDRHeader("3.410", override)
+	if len(got) != 2 || got[0] != "Device Sign" {
+		t.Fatalf("override not preferred: %#v", got)
+	}
+	if len(CDRProfileForFirmware("3.410")) != 52 {
+		t.Fatalf("3.410 profile want 52 columns, got %d", len(CDRProfileForFirmware("3.410")))
+	}
+	if len(CDRProfileForFirmware("3.23.2")) != 50 {
+		t.Fatalf("3.23.2 profile want 50 columns, got %d", len(CDRProfileForFirmware("3.23.2")))
+	}
+}
+
 func TestCDRRejectsAnotherDeviceSign(t *testing.T) {
 	const sample = `Device Sign;Setup time;Connect time;Disconnect time;Sequence number
 fixer;2026-07-24 12:00:00;;;20260724120000-1

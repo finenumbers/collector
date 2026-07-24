@@ -1,4 +1,9 @@
-# Словарь данных SMG-1016M 3.410
+# Словарь данных SMG-1016M
+
+Collector поддерживает две схемы обработки прошивки SMG-1016M: **`3.23.2`** и **`3.410`**.
+Поле `devices.firmware` хранит именно схему (не полный build-number). Syslog, RADIUS и
+АнтиФрод пока разбираются общим парсером для обеих схем; отличается встроенный профиль
+колонок CDR.
 
 ## Время
 
@@ -15,21 +20,26 @@ UTC RFC3339 и локальный RFC3339 с offset. UI не зависит от
 
 ## Нормативные источники
 
-- Eltex «SMG-1016M/2016/3016/3116. Руководство пользователя, ПО 3.410.0», разделы
-  Syslog 4.1.22.3/4.2.2.52, CDR 4.1.8.1.2–4.1.8.1.5 и AntiFraud;
+- Eltex «SMG-1016M/2016/3016/3116. Руководство пользователя» (ветки ПО 3.23 / 3.410),
+  разделы Syslog и CDR;
 - Eltex «Подключение шлюзов SMG к ИС АнтиФрод по протоколу RADIUS»;
 - официальный Eltex RADIUS dictionary.
 
-Документация описывает release 3.410.0, но не исчерпывающую грамматику debug-трасс
-конкретного build. Недокументированный payload не интерпретируется предположительно:
-он сохраняется и получает `unknown`/`partial`.
+Документация не даёт исчерпывающей грамматики debug-трасс конкретного build.
+Недокументированный payload не интерпретируется предположительно: он сохраняется и
+получает `unknown`/`partial`.
 
 ## CDR
 
-Парсер использует emitted field-name row. Если она отключена, применяется сохранённый
-в карточке устройства ordered profile. При настроенном `Device Sign` несовпадающий файл
-целиком помещается в quarantine и не может быть приписан другому SMG. Исходная пара
-`имя → значение` всегда остаётся в `raw_fields`.
+Парсер использует emitted field-name row. Если она отключена, применяется:
+
+1. ручной `cdr_columns` из карточки SMG (если задан);
+2. иначе встроенный профиль схемы `firmware` (`3.23.2` — 50 колонок до
+   `Called NAI original`; `3.410` — те же плюс `Time in queue` и `Redirection type`).
+
+Короткие data-строки (например 51 поле при заголовке 52) дополняются пустыми полями
+справа. При настроенном `Device Sign` несовпадающий файл целиком помещается в
+quarantine. Исходная пара `имя → значение` всегда остаётся в `raw_fields`.
 
 Основные группы:
 
@@ -39,7 +49,8 @@ UTC RFC3339 и локальный RFC3339 с offset. UI не зависит от
 - номера: incoming/outgoing CgPN/CdPN, redirecting number, numplan, NAI и original NAI;
 - протоколы: incoming/outgoing SIP Call-ID, SS7 CIC, SS7 category, Calling party category (RUS), Global Callref;
 - идентификаторы: `Sequence number`, `RADIUS Accounting-Session-Id`, `UniqueTag identifier`;
-- сервисные: redirect/pickup/transfer marks, call/IVR recording paths, rejecting RADIUS server.
+- сервисные: redirect/pickup/transfer marks, call/IVR recording paths, rejecting RADIUS server;
+- только схема `3.410`: `Time in queue`, `Redirection type`.
 
 Семантика:
 

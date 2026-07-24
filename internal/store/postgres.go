@@ -447,6 +447,41 @@ func validRole(role string) bool {
 	return role == "admin" || role == "analyst" || role == "viewer"
 }
 
+const (
+	FirmwareScheme3232 = "3.23.2"
+	FirmwareScheme3410 = "3.410"
+)
+
+// NormalizeFirmwareScheme maps legacy full builds onto the two supported
+// processing schemes. Unknown values fall back to the current 3.23.2 profile.
+func NormalizeFirmwareScheme(value string) string {
+	value = strings.TrimSpace(value)
+	switch value {
+	case FirmwareScheme3232, FirmwareScheme3410:
+		return value
+	}
+	if strings.HasPrefix(value, "3.410") {
+		return FirmwareScheme3410
+	}
+	return FirmwareScheme3232
+}
+
+// CanonicalFirmware accepts only the UI/API scheme identifiers.
+func CanonicalFirmware(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return FirmwareScheme3232, nil
+	}
+	if value == FirmwareScheme3232 || value == FirmwareScheme3410 {
+		return value, nil
+	}
+	return "", errors.New("firmware must be 3.23.2 or 3.410")
+}
+
+func normalizeDeviceFirmware(device *Device) {
+	device.Firmware = NormalizeFirmwareScheme(device.Firmware)
+}
+
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.DB.Query(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
@@ -468,6 +503,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 			&device.PurgeError, &device.CreatedAt); err != nil {
 			return nil, err
 		}
+		normalizeDeviceFirmware(&device)
 		result = append(result, device)
 	}
 	return result, rows.Err()
@@ -532,7 +568,11 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}
-	return device, err
+	if err != nil {
+		return Device{}, err
+	}
+	normalizeDeviceFirmware(&device)
+	return device, nil
 }
 
 func (s *Store) DeviceTimezone(ctx context.Context, id uuid.UUID) (string, error) {
@@ -705,9 +745,11 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	if input.Model == "" {
 		input.Model = "SMG-1016M"
 	}
-	if input.Firmware == "" {
-		input.Firmware = "3.410.0.7443"
+	firmware, err := CanonicalFirmware(input.Firmware)
+	if err != nil {
+		return Device{}, err
 	}
+	input.Firmware = firmware
 	if input.Timezone == "" {
 		input.Timezone = "Asia/Novosibirsk"
 	}
@@ -752,6 +794,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	if err != nil {
 		return Device{}, err
 	}
+	normalizeDeviceFirmware(&device)
 	details, _ := json.Marshal(map[string]any{"name": device.Name, "syslogSourceIp": device.SyslogSourceIP})
 	_, err = tx.Exec(ctx, `INSERT INTO audit_log(actor_id,action,resource_type,resource_id,remote_ip,details)
 		VALUES($1,'device_create','device',$2,$3,$4)`, actor.ID, id.String(), nullableIP(remoteIP), details)
@@ -784,9 +827,11 @@ func (s *Store) UpdateDevice(
 		}
 		input.ManagementIP = managementIP
 	}
-	if input.Firmware == "" {
-		return Device{}, errors.New("firmware is required")
+	firmware, err := CanonicalFirmware(input.Firmware)
+	if err != nil {
+		return Device{}, err
 	}
+	input.Firmware = firmware
 	columns, _ := json.Marshal(input.CDRColumns)
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
@@ -821,6 +866,7 @@ func (s *Store) UpdateDevice(
 	if err != nil {
 		return Device{}, err
 	}
+	normalizeDeviceFirmware(&device)
 	details, _ := json.Marshal(map[string]any{
 		"name": device.Name, "timezone": device.Timezone,
 		"syslogSourceIp": device.SyslogSourceIP, "enabled": device.Enabled,

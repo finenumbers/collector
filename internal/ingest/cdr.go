@@ -90,6 +90,7 @@ func (p CDRParser) Parse(reader io.Reader) (CDRResult, error) {
 			continue
 		}
 		row = trimTrailingEmpty(row)
+		row = padRowToHeader(row, len(normalized))
 		if len(row) != len(normalized) {
 			result.Errors = append(result.Errors,
 				fmt.Errorf("row %d: got %d fields, expected %d", result.Rows, len(row), len(normalized)))
@@ -218,6 +219,17 @@ func trimTrailingEmpty(values []string) []string {
 		return values[:len(values)-1]
 	}
 	return values
+}
+
+// padRowToHeader appends empty trailing fields when Eltex omits unused columns
+// at the end of a data row (common for 3.410 Time in queue / Redirection type).
+func padRowToHeader(row []string, headerLen int) []string {
+	if len(row) >= headerLen {
+		return row
+	}
+	padded := make([]string, headerLen)
+	copy(padded, row)
+	return padded
 }
 
 func parseCDRTime(value string, location *time.Location) (*time.Time, error) {

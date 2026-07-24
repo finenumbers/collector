@@ -1,5 +1,13 @@
 export type Role = 'admin' | 'analyst' | 'viewer'
 
+export type FirmwareScheme = '3.23.2' | '3.410'
+
+export function normalizeFirmwareScheme(value?: string): FirmwareScheme {
+  const trimmed = (value || '').trim()
+  if (trimmed === '3.410' || trimmed.startsWith('3.410')) return '3.410'
+  return '3.23.2'
+}
+
 export function canManageUsers(role: Role | string): boolean {
   return role === 'admin'
 }

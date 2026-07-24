@@ -150,7 +150,8 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	_ = json.Unmarshal(device.CDRColumns, &columns)
 	result, err := (CDRParser{
 		DeviceID: device.ID, FileID: fileID, Location: location,
-		TimezoneRevision: uint64(device.ActiveTimezoneRevision), ExpectedHeader: columns,
+		TimezoneRevision:   uint64(device.ActiveTimezoneRevision),
+		ExpectedHeader:     ResolveCDRHeader(device.Firmware, columns),
 		ExpectedDeviceSign: device.DeviceSign,
 	}).Parse(bytes.NewReader(decoded))
 	if err != nil {

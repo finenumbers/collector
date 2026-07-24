@@ -5,7 +5,9 @@ import {
   LogOut, Network, PhoneCall, Radio, Search, Server, Settings, ShieldCheck,
 } from 'lucide-react'
 import './styles.css'
-import { canManageUsers, purgeConfirmationReady, purgeRetryLabel } from './settings'
+import {
+  canManageUsers, normalizeFirmwareScheme, purgeConfirmationReady, purgeRetryLabel,
+} from './settings'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
 type ManagedUser = User & { active: boolean; createdAt: string }
@@ -925,7 +927,7 @@ function EventDrawer({ event, timezone, onClose }: {
 
 function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (device: Device) => void }) {
   const [form, setForm] = useState({
-    name: '', model: 'SMG-1016M', firmware: '3.410.0.7443', timezone: 'Asia/Novosibirsk',
+    name: '', model: 'SMG-1016M', firmware: '3.23.2', timezone: 'Asia/Novosibirsk',
     managementIp: '', syslogSourceIp: '', deviceSign: '', antifraudEnabled: true, antifraudMode: 'Custom',
     cdrColumnsText: '',
   })
@@ -956,7 +958,11 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
         <label>Device Sign<input value={form.deviceSign} onChange={(e) => update('deviceSign', e.target.value)} /></label>
         <label>IP управления<input placeholder="10.0.0.10" value={form.managementIp} onChange={(e) => update('managementIp', e.target.value)} /></label>
         <label>IP-источник Syslog<input required placeholder="10.0.0.10" value={form.syslogSourceIp} onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
-        <label>Прошивка<input required value={form.firmware} onChange={(e) => update('firmware', e.target.value)} /></label>
+        <label>Прошивка<select required value={form.firmware}
+          onChange={(e) => update('firmware', e.target.value)}>
+          <option value="3.23.2">3.23.2</option>
+          <option value="3.410">3.410</option>
+        </select></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
         <label className="full-width">Профиль колонок CDR (для файлов без заголовка)
@@ -985,7 +991,7 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
   initialDeleting?: boolean
 }) {
   const [form, setForm] = useState({
-    name: device.name, firmware: device.firmware, timezone: device.timezone,
+    name: device.name, firmware: normalizeFirmwareScheme(device.firmware), timezone: device.timezone,
     managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp,
     deviceSign: device.deviceSign, antifraudEnabled: device.antifraudEnabled,
     antifraudMode: device.antifraudMode, enabled: device.enabled,
@@ -1079,8 +1085,11 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
           onChange={(e) => update('managementIp', e.target.value)} /></label>
         <label>IP-источник Syslog<input required value={form.syslogSourceIp}
           onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
-        <label>Прошивка<input required value={form.firmware}
-          onChange={(e) => update('firmware', e.target.value)} /></label>
+        <label>Прошивка<select required value={normalizeFirmwareScheme(form.firmware)}
+          onChange={(e) => update('firmware', e.target.value)}>
+          <option value="3.23.2">3.23.2</option>
+          <option value="3.410">3.410</option>
+        </select></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
         <label className="full-width">Профиль колонок CDR (для файлов без заголовка)

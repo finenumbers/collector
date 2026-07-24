@@ -206,7 +206,7 @@ func (c *Client) listCurrentCallsPage(
 				coalesce(
 					parseDateTime64BestEffortOrNull(
 						coalesce(nullIf(raw_fields['setup_time'],''),nullIf(raw_fields['setup'],'')),
-						6,'UTC'),
+						6,?),
 					ingested_at) AS source_sort_time
 			FROM collector.cdr_records
 			WHERE device_id=?
@@ -216,7 +216,7 @@ func (c *Client) listCurrentCallsPage(
 			SELECT record_id AS page_record_id,source_sort_time AS sort_time
 			FROM source AS c
 			WHERE 1`
-	args := []any{deviceID}
+	args := []any{timezone, deviceID}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(c.incoming_cgpn,?)>0
 			OR positionCaseInsensitive(c.outgoing_cgpn,?)>0
@@ -455,8 +455,26 @@ func (c *Client) currentCallTimeline(
 		}
 		result = append(result, timeline...)
 	}
+	result = deduplicateTimeline(result)
 	sortTimeline(result)
 	return result, nil
+}
+
+func deduplicateTimeline(rows []TimelineRow) []TimelineRow {
+	result := make([]TimelineRow, 0, len(rows))
+	index := make(map[uuid.UUID]int, len(rows))
+	for _, row := range rows {
+		if position, ok := index[row.EventID]; ok {
+			if row.Confidence > result[position].Confidence {
+				result[position].Confidence = row.Confidence
+				result[position].Method = row.Method
+			}
+			continue
+		}
+		index[row.EventID] = len(result)
+		result = append(result, row)
+	}
+	return result
 }
 
 func (c *Client) currentAntifraudTimeline(

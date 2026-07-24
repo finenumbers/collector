@@ -38,17 +38,9 @@ type DeviceRevisionJob struct {
 
 func (c *Client) ScheduleDeviceRebuild(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, timezone string,
-	cdrSourceTimezones ...string,
 ) error {
 	if _, err := time.LoadLocation(timezone); err != nil {
 		return fmt.Errorf("invalid device timezone %q: %w", timezone, err)
-	}
-	cdrSourceTimezone := "UTC"
-	if len(cdrSourceTimezones) != 0 && cdrSourceTimezones[0] != "" {
-		cdrSourceTimezone = cdrSourceTimezones[0]
-	}
-	if _, err := time.LoadLocation(cdrSourceTimezone); err != nil {
-		return fmt.Errorf("invalid CDR source timezone %q: %w", cdrSourceTimezone, err)
 	}
 	var existingStatus string
 	err := c.Conn.QueryRow(ctx, `SELECT status
@@ -81,7 +73,7 @@ func (c *Client) ScheduleDeviceRebuild(
 	job.DeviceID = deviceID
 	job.Revision = revision
 	job.Timezone = timezone
-	job.CDRSourceTimezone = cdrSourceTimezone
+	job.CDRSourceTimezone = timezone
 	job.Status = "building"
 	job.HighWatermark = syslogHigh
 	job.CDRHighWatermark = cdrHigh

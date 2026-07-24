@@ -224,7 +224,6 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 	}
 	if err := s.Analytics.ScheduleDeviceRebuild(
 		request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
-		device.CDRSourceTimezone,
 	); err != nil {
 		slog.Error("unable to initialize device derived revision",
 			"device", device.ID, "error", err)
@@ -261,7 +260,6 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 	if device.TimezoneRevision != device.ActiveTimezoneRevision {
 		if err := s.Analytics.ScheduleDeviceRebuild(
 			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
-			device.CDRSourceTimezone,
 		); err != nil {
 			slog.Error("unable to schedule device timezone revision",
 				"device", device.ID, "revision", device.TimezoneRevision, "error", err)
@@ -583,12 +581,12 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusInternalServerError, "unable to export calls")
 			return
 		}
-		headers := []any{"Установка UTC", "Входящий маршрут", "Исходящий маршрут", "Номер A вход", "Номер A выход",
+		headers := []any{"Установка", "Входящий маршрут", "Исходящий маршрут", "Номер A вход", "Номер A выход",
 			"Номер B вход", "Номер B выход", "Длительность, мс", "Q.850", "Результат", "Acct-Session-Id", "UniqueTag"}
 		_ = stream.SetRow("A1", headers)
 		for index, row := range rows {
 			values := []any{
-				formatTimeInLocation(row.SetupTime, time.UTC),
+				formatTimeInLocation(row.SetupTime, location),
 				row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
 				row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS, row.ReleaseCause,
 				row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag}

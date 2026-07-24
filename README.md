@@ -19,8 +19,9 @@
   Acct-Session-Id, exact SIP Call-ID/GCR и детерминированный composite matching:
   одна AntiFraud-операция получает максимум один CDR, один вызов может содержать
   несколько RADIUS/AntiFraud-операций; неоднозначность не auto-link;
-- timestamp исходного CDR SMG интерпретируется как UTC, а Syslog wall clock — в IANA
-  timezone устройства; UI/API явно показывают canonical UTC и локальное время SMG;
+- IANA timezone каждого SMG — единое правило для CDR и Syslog wall clock этого
+  устройства; UI/API/XLSX показывают время конкретного SMG независимо от браузера
+  и timezone сервера Collector;
 - timezone revision и derived facts пересобираются пакетно в shadow-слое; активная
   история остаётся видимой до проверки coverage и атомарного переключения;
 - lifecycle и correlation выполняются по durable dirty day buckets без

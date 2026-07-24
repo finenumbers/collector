@@ -25,7 +25,6 @@ func RunDeviceRevisionRebuilds(
 		}
 		if err := client.ScheduleDeviceRebuild(
 			ctx, device.ID, uint64(device.TimezoneRevision), device.Timezone,
-			device.CDRSourceTimezone,
 		); err != nil {
 			return err
 		}
@@ -45,6 +44,18 @@ func RunDeviceRevisionRebuilds(
 		}
 		for _, initial := range jobs {
 			job := initial
+			config, configErr := control.DeviceTimeConfig(ctx, job.DeviceID)
+			if configErr != nil {
+				return configErr
+			}
+			if uint64(config.TimezoneRevision) != job.Revision {
+				if err := client.SupersedeDeviceRevision(
+					ctx, job, "newer device timezone revision exists",
+				); err != nil {
+					return err
+				}
+				continue
+			}
 			rows, err := client.NextDeviceRevisionSyslogBatch(ctx, job, 1_000)
 			if err != nil {
 				return err

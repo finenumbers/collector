@@ -503,7 +503,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
-      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} onSelect={setSelectedCall} /> :
+      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]}
+        timezone={activeDeviceTimezone(device)} onSelect={setSelectedCall} /> :
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedAntifraud} />
@@ -701,16 +702,17 @@ function AntifraudDrawer({ device, row, onClose }: {
   </div>
 }
 
-function CallsTable({ rows, onSelect }: {
+function CallsTable({ rows, timezone, onSelect }: {
   rows: CallRow[]
+  timezone: string
   onSelect: (row: CallRow) => void
 }) {
   return <table><thead><tr>
-    <th>Установка UTC</th><th>Входящий маршрут</th><th>Исходящий маршрут</th><th>Номер A: вход</th>
+    <th>Установка</th><th>Входящий маршрут</th><th>Исходящий маршрут</th><th>Номер A: вход</th>
     <th>Номер A: выход</th><th>Номер B: вход</th><th>Номер B: выход</th><th>Длит.</th>
     <th>Q.850</th><th>Результат</th><th>Acct-Session-Id</th><th>UniqueTag</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId} onClick={() => onSelect(row)}>
-    <td className="mono">{formatTime(row.setupTime, 'UTC')}</td>
+    <td className="mono">{formatTime(row.setupTime, timezone)}</td>
     <td>{row.incomingDescription || '—'}</td><td>{row.outgoingDescription || '—'}</td>
     <td className="mono">{row.incomingCgpn || '—'}</td><td className="mono">{row.outgoingCgpn || '—'}</td>
     <td className="mono">{row.incomingCdpn || '—'}</td><td className="mono">{row.outgoingCdpn || '—'}</td>
@@ -726,23 +728,62 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
     api<{ items: TimelineRow[] }>(`/devices/${device.id}/calls/${call.recordId}/timeline`)
       .then(({ items }) => setTimeline(items || []))
   }, [device.id, call.recordId])
+  const groups = groupCallTimeline(timeline)
+  const timezone = activeDeviceTimezone(device)
   return <div className="drawer">
     <div className="drawer-header"><div><h3>Карточка вызова</h3><span className="mono">{call.recordId}</span></div>
       <button onClick={onClose}>×</button></div>
     <div className="call-facts">
-      <span><small>Установка UTC / SMG local</small><strong>{formatTime(call.setupTime, 'UTC')} / {call.setupTimeLocal || formatTime(call.setupTime, activeDeviceTimezone(device))}</strong></span>
+      <span><small>Установка · {timezone}</small><strong>{formatTime(call.setupTime, timezone)}</strong></span>
       <span><small>Длительность</small><strong>{call.durationMs == null ? '—' : `${(call.durationMs / 1000).toFixed(3)} c`}</strong></span>
       <span><small>Q.850</small><strong>{call.releaseCause ?? '—'} · {call.releaseInfo || '—'}</strong></span>
       <span><small>Acct-Session-Id</small><strong className="mono">{call.radiusSessionId || '—'}</strong></span>
     </div>
     <h4>Связанные события АнтиФрод и Syslog</h4>
-    <div className="timeline">{timeline.length === 0 && <p>Связанные события пока не найдены.</p>}
-      {timeline.map((event) => <div className="timeline-item" key={event.eventId}>
-        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, activeDeviceTimezone(device))}</time><strong>{event.category} · {event.component || 'SMG'}</strong>
-          <p>{event.message}</p><small>{event.method} · confidence {event.confidence.toFixed(2)}</small></div>
-      </div>)}
-    </div>
+    {timeline.length === 0 && <div className="timeline"><p>Связанные события пока не найдены.</p></div>}
+    <div className="timeline-groups">{groups.map((group) => <section
+      className="timeline-group" key={group.id}>
+      <h5><span>{group.label}</span><b>{group.items.length}</b></h5>
+      <div className="timeline">{group.items.map((event) => <div
+        className="timeline-item" key={event.eventId}>
+        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, timezone)}</time>
+          <strong>{event.component || 'SMG'}</strong>
+          <p>{event.message}</p><small>{event.method} · confidence {event.confidence.toFixed(2)}</small>
+        </div>
+      </div>)}</div>
+    </section>)}</div>
   </div>
+}
+
+const timelineGroupOrder = [
+  ['antifraud', 'АнтиФрод'],
+  ['radius', 'RADIUS'],
+  ['call_trace', 'Обработка вызова'],
+  ['sip', 'SIP'],
+  ['isup', 'SS7 / ISUP'],
+  ['q931', 'Q.931'],
+  ['h323', 'H.323'],
+  ['rtp', 'RTP / RTCP'],
+  ['alarms', 'Аварии'],
+  ['other', 'Прочие Syslog'],
+] as const
+
+function groupCallTimeline(items: TimelineRow[]) {
+  const groups = new Map<string, TimelineRow[]>()
+  for (const item of items) {
+    let group = item.category
+    if (item.category === 'radius') {
+      const requestType = (item.attributes?.xpgk_request_type || '').toLowerCase()
+      group = item.attributes?.is_antifraud === 'true' ||
+        ['number', 'save_call', 'check_call'].includes(requestType) ? 'antifraud' : 'radius'
+    } else if (!timelineGroupOrder.some(([id]) => id === item.category)) {
+      group = 'other'
+    }
+    groups.set(group, [...(groups.get(group) || []), item])
+  }
+  return timelineGroupOrder
+    .map(([id, label]) => ({ id, label, items: groups.get(id) || [] }))
+    .filter((group) => group.items.length > 0)
 }
 
 function EventsTable({ rows, timezone, onSelect }: {

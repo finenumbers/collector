@@ -526,8 +526,8 @@ func TestChunkedRevisionReplayUsesDurableCursor(t *testing.T) {
 		Scan(&rebuiltSetup, &rebuiltSource); err != nil {
 		t.Fatal(err)
 	}
-	wantSetup := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
-	if !rebuiltSetup.Equal(wantSetup) || rebuiltSource != "UTC" {
+	wantSetup := time.Date(2026, 7, 24, 5, 0, 0, 0, time.UTC)
+	if !rebuiltSetup.Equal(wantSetup) || rebuiltSource != "Asia/Novosibirsk" {
 		t.Fatalf("CDR source time shifted during rebuild: %v/%s", rebuiltSetup, rebuiltSource)
 	}
 	job.Status = "cutover"

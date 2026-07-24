@@ -394,9 +394,9 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	var device Device
 	err = tx.QueryRow(ctx, `INSERT INTO devices
 		(id,name,model,firmware,timezone,active_timezone,timezone_revision,
-		 active_timezone_revision,management_ip,syslog_source_ip,device_sign,
+		 active_timezone_revision,cdr_source_timezone,management_ip,syslog_source_ip,device_sign,
 		 antifraud_enabled,antifraud_mode,ftp_username,ftp_home,cdr_columns)
-		VALUES($1,$2,$3,$4,$5,$5,1,1,NULLIF($6,'')::inet,$7,$8,$9,$10,$11,$12,$13)
+		VALUES($1,$2,$3,$4,$5,$5,1,1,$5,NULLIF($6,'')::inet,$7,$8,$9,$10,$11,$12,$13)
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,management_ip::text,syslog_source_ip::text,
 		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
@@ -450,7 +450,7 @@ func (s *Store) UpdateDevice(
 		name=$2,firmware=$3,
 		timezone_revision=CASE WHEN timezone IS DISTINCT FROM $4 THEN timezone_revision+1
 			ELSE timezone_revision END,
-		timezone=$4,management_ip=NULLIF($5,'')::inet,
+		timezone=$4,cdr_source_timezone=$4,management_ip=NULLIF($5,'')::inet,
 		syslog_source_ip=$6,device_sign=$7,antifraud_enabled=$8,antifraud_mode=$9,
 		enabled=$10
 		WHERE id=$1

@@ -56,11 +56,11 @@ attributes. Durable rebuild последовательно читает raw по
 `antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и
 остаётся read model до проверки counts и короткой catch-up фазы.
 
-Eltex/RFC3164 wall clock интерпретируется в активной IANA timezone устройства, а timestamp
-исходного CDR SMG — как UTC. Оба потока переводятся в canonical UTC instant; raw wall
-clock, source timezone и offset сохраняются отдельно. Смена interpretation schema/timezone
-создаёт shadow revision. После snapshot replay выполняется ограниченный cutover с
-фиксированным watermark, затем ClickHouse публикует новый read model.
+Eltex/RFC3164 и CDR wall clock конкретного SMG интерпретируются в одной активной IANA
+timezone этого устройства. Оба потока переводятся во внутренний canonical UTC instant;
+raw wall clock, source timezone и offset сохраняются отдельно, а UI показывает время SMG.
+Смена timezone создаёт shadow revision. После snapshot replay выполняется ограниченный
+cutover с фиксированным watermark, затем ClickHouse публикует новый read model.
 
 Batch RADIUS assembler переносит Acct-Session-Id из любого fragment и ограничивает
 повторное использование call context временным occurrence. Новые Syslog/CDR факты

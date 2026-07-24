@@ -86,12 +86,12 @@ unknown source Syslog, unknown parser rate, persistent reprocess backlog, AntiFr
 orphan/incomplete rate, CDR ingest age, disk >75/85%, ClickHouse insert errors,
 SFTPGo unavailable, backup age.
 
-IANA timezone редактируется в настройках конкретного SMG и применяется к Syslog wall
-clock; CDR source timestamp SMG интерпретируется как UTC. Сохранение создаёт новую shadow
-revision и не удаляет текущие строки. UI продолжает использовать active revision, пока
-background rebuild пакетно пересобирает facts/lifecycle. Cutover фиксирует конечный
-watermark и не требует остановки Syslog. Контролируйте replay counts, revision alignment,
-ClickHouse read rows/CPU и correlation coverage
+IANA timezone редактируется в настройках конкретного SMG и одинаково применяется к CDR
+и Syslog wall clock этого устройства. Сохранение создаёт новую shadow revision и не
+удаляет текущие строки. UI продолжает использовать active revision, пока background
+rebuild пакетно пересобирает facts/lifecycle. Cutover фиксирует конечный watermark и не
+требует остановки Syslog. Контролируйте replay counts, revision alignment, ClickHouse
+read rows/CPU и correlation coverage
 `exact/composite/ambiguous/orphan`.
 
 ## Инциденты

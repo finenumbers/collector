@@ -1,4 +1,4 @@
-FROM node:24-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /src/web
 COPY web/package*.json ./
 RUN npm ci

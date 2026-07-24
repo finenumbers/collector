@@ -1,0 +1,155 @@
+name: smg-collector
+
+services:
+  volume-init:
+    image: busybox:1.37
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /srv/cdr /data/spool && chown -R 1000:1000 /srv/cdr /data/spool"]
+    volumes:
+      - cdr_data:/srv/cdr
+      - spool_data:/data/spool
+    restart: "no"
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: collector
+      POSTGRES_USER: collector
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U collector -d collector"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.6-alpine
+    environment:
+      CLICKHOUSE_DB: collector
+      CLICKHOUSE_USER: collector
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "collector", "--password", "${CLICKHOUSE_PASSWORD}", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: collector
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  sftpgo:
+    image: drakkan/sftpgo:v2.6-alpine
+    user: "1000:1000"
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    environment:
+      SFTPGO_DEFAULT_ADMIN_USERNAME: collector
+      SFTPGO_DEFAULT_ADMIN_PASSWORD: ${SFTPGO_ADMIN_PASSWORD:?SFTPGO_ADMIN_PASSWORD is required}
+      SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN: "true"
+      SFTPGO_HTTPD__BINDINGS__0__PORT: "8080"
+      SFTPGO_FTPD__BINDINGS__0__PORT: "2121"
+      SFTPGO_FTPD__PASSIVE_PORT_RANGE__START: "50000"
+      SFTPGO_FTPD__PASSIVE_PORT_RANGE__END: "50100"
+      SFTPGO_FTPD__BINDINGS__0__FORCE_PASSIVE_IP: ${PUBLIC_HOST:-}
+    ports:
+      - "${FTP_PORT:-21}:2121"
+      - "50000-50100:50000-50100"
+    volumes:
+      - sftpgo_data:/var/lib/sftpgo
+      - cdr_data:/srv/cdr
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  collector:
+    image: ghcr.io/finenumbers/collector:${COLLECTOR_VERSION:-latest}
+    pull_policy: always
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      sftpgo: { condition: service_healthy }
+    environment:
+      ENVIRONMENT: production
+      HTTP_ADDR: ":8080"
+      SYSLOG_ADDR: ":1514"
+      DATABASE_URL: postgres://collector:${POSTGRES_PASSWORD}@postgres:5432/collector?sslmode=disable
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: collector
+      CLICKHOUSE_USER: collector
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      NATS_URL: nats://nats:4222
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: collector
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SFTPGO_URL: http://sftpgo:8080
+      SFTPGO_ADMIN: collector
+      SFTPGO_ADMIN_PASSWORD: ${SFTPGO_ADMIN_PASSWORD}
+      SECURE_COOKIES: ${SECURE_COOKIES:-true}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${SYSLOG_PORT:-514}:1514/udp"
+    volumes:
+      - cdr_data:/data/cdr
+      - spool_data:/data/spool
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    networks:
+      default:
+      proxy:
+        aliases:
+          - smg-collector
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  nats_data:
+  minio_data:
+  sftpgo_data:
+  cdr_data:
+  spool_data:
+
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}

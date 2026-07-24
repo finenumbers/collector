@@ -165,6 +165,16 @@ type DeviceTimezoneResolver interface {
 	DeviceTimezone(context.Context, uuid.UUID) (string, error)
 }
 
+type deviceTimeConfigResolver interface {
+	DeviceTimeConfig(context.Context, uuid.UUID) (store.DeviceTimeConfig, error)
+}
+
+type deviceReprocessConfig struct {
+	timezone string
+	revision uint64
+	skip     bool
+}
+
 func RunHistoricalSyslogReprocess(
 	ctx context.Context, client *analytics.Client, resolver DeviceTimezoneResolver,
 ) error {
@@ -185,7 +195,7 @@ func RunHistoricalSyslogReprocessOnce(
 	ctx context.Context, client *analytics.Client, resolver DeviceTimezoneResolver,
 ) error {
 	var processed uint64
-	timezones := make(map[uuid.UUID]string)
+	configs := make(map[uuid.UUID]deviceReprocessConfig)
 	continuations := NewContinuationAssembler()
 	for ctx.Err() == nil {
 		rows, err := client.NextSyslogReplayBatch(ctx, analytics.SyslogParserVersion, 500)
@@ -197,54 +207,104 @@ func RunHistoricalSyslogReprocessOnce(
 				"parser_version", analytics.SyslogParserVersion, "events", processed)
 			return nil
 		}
-		completed := make([]uuid.UUID, 0, len(rows))
 		events := make([]analytics.SyslogEvent, 0, len(rows))
+		skipped := make([]analytics.SyslogEvent, 0)
 		for _, row := range rows {
-			timezone := row.SourceTimezone
-			if resolver != nil {
-				if cached, ok := timezones[row.DeviceID]; ok {
-					timezone = cached
-				} else {
-					resolved, resolveErr := resolver.DeviceTimezone(ctx, row.DeviceID)
-					if resolveErr != nil {
-						return resolveErr
-					}
-					timezone = resolved
-					timezones[row.DeviceID] = timezone
-				}
+			config, resolveErr := resolveDeviceReprocessConfig(ctx, resolver, configs, row)
+			if resolveErr != nil {
+				return resolveErr
 			}
-			if timezone == "" {
-				timezone = "UTC"
+			if config.skip {
+				skipped = append(skipped, analytics.SyslogEvent{
+					EventID: row.EventID, DeviceID: row.DeviceID,
+				})
+				continue
 			}
-			location, locationErr := time.LoadLocation(timezone)
+			location, locationErr := time.LoadLocation(config.timezone)
 			if locationErr != nil {
 				return locationErr
 			}
 			event := ParseSyslogInLocation(RawSyslog{
 				EventID: row.EventID, DeviceID: row.DeviceID, ReceivedAt: row.ReceivedAt,
 				SourceIP: row.SourceIP.String(), SourcePort: row.SourcePort, Payload: row.Payload,
-				Timezone: timezone,
+				Timezone: config.timezone, TimezoneRevision: config.revision,
 			}, location)
 			if err := client.ProcessSyslogDerived(ctx, event); err != nil {
 				return err
 			}
 			events = append(events, event)
-			completed = append(completed, row.EventID)
 		}
 		continuations.Assemble(events)
 		if err := client.InsertSyslogInterpretationsBatch(ctx, events); err != nil {
 			return err
 		}
+		ledger := append(events, skipped...)
 		if err := client.MarkSyslogReprocessedBatch(
-			ctx, events, analytics.SyslogParserVersion,
+			ctx, ledger, analytics.SyslogParserVersion,
 		); err != nil {
 			return err
 		}
-		processed += uint64(len(completed))
+		processed += uint64(len(ledger))
 		if processed%5000 == 0 {
 			slog.Info("historical Syslog reprocess progress",
 				"parser_version", analytics.SyslogParserVersion, "events", processed)
 		}
 	}
 	return ctx.Err()
+}
+
+func resolveDeviceReprocessConfig(
+	ctx context.Context,
+	resolver DeviceTimezoneResolver,
+	cache map[uuid.UUID]deviceReprocessConfig,
+	row analytics.ReplaySyslogRow,
+) (deviceReprocessConfig, error) {
+	if cached, ok := cache[row.DeviceID]; ok {
+		return cached, nil
+	}
+	config := deviceReprocessConfig{timezone: row.SourceTimezone, revision: 1}
+	if config.timezone == "" {
+		config.timezone = "UTC"
+	}
+	if configResolver, ok := resolver.(deviceTimeConfigResolver); ok {
+		deviceConfig, err := configResolver.DeviceTimeConfig(ctx, row.DeviceID)
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrDeviceDeleting) {
+			config.skip = true
+			cache[row.DeviceID] = config
+			return config, nil
+		}
+		if err != nil {
+			return deviceReprocessConfig{}, err
+		}
+		config.timezone = deviceConfig.ActiveTimezone
+		if config.timezone == "" {
+			config.timezone = deviceConfig.Timezone
+		}
+		if config.timezone == "" {
+			config.timezone = "UTC"
+		}
+		if deviceConfig.ActiveTimezoneRevision > 0 {
+			config.revision = uint64(deviceConfig.ActiveTimezoneRevision)
+		} else if deviceConfig.TimezoneRevision > 0 {
+			config.revision = uint64(deviceConfig.TimezoneRevision)
+		}
+		cache[row.DeviceID] = config
+		return config, nil
+	}
+	if resolver != nil {
+		resolved, err := resolver.DeviceTimezone(ctx, row.DeviceID)
+		if errors.Is(err, store.ErrNotFound) {
+			config.skip = true
+			cache[row.DeviceID] = config
+			return config, nil
+		}
+		if err != nil {
+			return deviceReprocessConfig{}, err
+		}
+		if resolved != "" {
+			config.timezone = resolved
+		}
+	}
+	cache[row.DeviceID] = config
+	return config, nil
 }

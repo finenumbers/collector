@@ -35,6 +35,9 @@ var (
 	callContext       = regexp.MustCompile(`^\[([A-Za-z0-9_-]+)\]\s*(.*)$`)
 	callContextAny    = regexp.MustCompile(`\[(C[A-Za-z0-9_-]+)\]`)
 	componentPattern  = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_./ -]{0,127}?)(?::|\.)\s*(.*)$`)
+	// After a false component split on HH:MM:SS, remainder looks like "MM:SS ..." / "MM:SS.ffffff ...".
+	componentTimeRest = regexp.MustCompile(`^\d{2}:\d{2}(?:\.\d{1,6})?(?:\s|$)`)
+	repeatedMessage   = regexp.MustCompile(`(?i)^last message repeated (\d+) times$`)
 	radiusPair        = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
 	radiusSession     = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
 	radiusVSAPair     = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
@@ -589,6 +592,13 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 			event.Attributes["process_id"] = processID
 		}
 		event.ParseStatus = "parsed"
+	} else if timestamp, message, count, ok := parseRepeatedMessage(text, raw.ReceivedAt, location); ok {
+		event.HeaderFormat = "rfc3164"
+		event.EventTime = timestamp
+		event.Message = message
+		event.Attributes["repeat_suppressed"] = "true"
+		event.Attributes["repeat_count"] = count
+		event.ParseStatus = "parsed"
 	} else {
 		event.Message = text
 		event.Attributes["parse_warning"] = "unrecognized_envelope"
@@ -597,9 +607,9 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		event.Attributes["call_context"] = match[1]
 		event.Message = strings.TrimSpace(match[2])
 	}
-	if match := componentPattern.FindStringSubmatch(event.Message); match != nil {
-		event.Component = strings.TrimSpace(match[1])
-		event.Message = strings.TrimSpace(match[2])
+	if component, rest, ok := splitComponent(event.Message); ok {
+		event.Component = component
+		event.Message = rest
 	}
 	extractTraceContinuation(&event)
 	event.Category = classify(event.Component, event.Attributes["application"], event.Message, string(raw.Payload))
@@ -662,8 +672,19 @@ func classify(component, application, message, payload string) string {
 		return "ivr"
 	case upperComponent == "IPNET" || strings.HasPrefix(upperComponent, "IPNET/"):
 		return "ip_network"
-	case upperComponent == "ALARM" || upperComponent == "ALARMS" || alarmPattern.MatchString(upper):
+	case upperComponent == "CDR":
+		return "system_journal"
+	case upperComponent == "ALARM" || upperComponent == "ALARMS" ||
+		upperComponent == "ALARM-LED" || strings.HasPrefix(upperComponent, "ALARM") ||
+		alarmPattern.MatchString(upper):
 		return "alarms"
+	case upperComponent == "SNMP":
+		if strings.Contains(upperMessage, "TRAP") || strings.Contains(upper, "ALARM-ID") {
+			return "alarms"
+		}
+		return "system_journal"
+	case strings.Contains(upperMessage, "LAST MESSAGE REPEATED"):
+		return "system_journal"
 	case strings.Contains(upper, "CONFIG") || strings.Contains(upper, "COMMAND") || strings.Contains(upper, "USERLOG"):
 		return "config_history"
 	case strings.Contains(upper, "AUTHLOG") || upperComponent == "AUTH":
@@ -677,6 +698,35 @@ func classify(component, application, message, payload string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func splitComponent(message string) (component, rest string, ok bool) {
+	match := componentPattern.FindStringSubmatch(message)
+	if match == nil {
+		return "", "", false
+	}
+	component = strings.TrimSpace(match[1])
+	rest = strings.TrimSpace(match[2])
+	// Reject splits on the colon inside HH:MM:SS (e.g. "Jul 24 19:32:34 ...").
+	if componentTimeRest.MatchString(rest) {
+		return "", "", false
+	}
+	return component, rest, true
+}
+
+func parseRepeatedMessage(
+	value string, received time.Time, location *time.Location,
+) (*time.Time, string, string, bool) {
+	match := rfc3164Pattern.FindStringSubmatch(value)
+	if match == nil {
+		return nil, "", "", false
+	}
+	remainder := strings.TrimSpace(match[4])
+	rep := repeatedMessage.FindStringSubmatch(remainder)
+	if rep == nil {
+		return nil, "", "", false
+	}
+	return parseRFC3164Time(match[1], match[2], match[3], received, location), remainder, rep[1], true
 }
 
 func extractTraceContinuation(event *analytics.SyslogEvent) {

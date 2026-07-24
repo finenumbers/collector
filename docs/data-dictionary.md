@@ -76,7 +76,8 @@ quarantine. Исходная пара `имя → значение` всегда
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Parser v7 распознаёт самостоятельные Eltex trace-continuations `# requestID`,
+Parser `smg-3.410-v8` (имя историческое; правила Syslog общие для схем прошивки
+`3.23.2` и `3.410`) распознаёт самостоятельные Eltex trace-continuations `# requestID`,
 `# trunkID`, `# Keep alive type`, `# cause` и номерные строки. При однозначном
 device-scoped контексте они наследуют категорию родителя; иначе сохраняются как
 `call_trace`, а не как ошибочно угаданный RADIUS/SIP.
@@ -88,7 +89,32 @@ device-scoped контексте они наследуют категорию р
 - отдельные журналы: `config_history`, `auth_log`, `system_journal`;
 - диагностические: `ip_connections`, `unknown`.
 
-Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
+### Маппинг UI Syslog SMG 3.23.2 → категории Collector
+
+Секции web-интерфейса SMG (§3.1.16.3) соответствуют категориям:
+
+| Секция SMG | Collector category |
+|---|---|
+| Traces → Аварии | `alarms` |
+| Traces → Вызовы | `call_trace` |
+| Traces → SS7-ISUP | `isup` |
+| Traces → SIP | `sip` |
+| Traces → Q.931 | `q931` |
+| Traces → IP-соединения | `ip_connections` |
+| Traces → IP-субмодули | `ip_modules` |
+| Traces → RADIUS | `radius` |
+| История изменения конфигурации | `config_history` |
+| Системный журнал / web access | `system_journal`, `auth_log` |
+
+Side-channels вне отдельных UI-тогглов (обязательны для пустого «Нераспознанного»):
+
+- component `cdr` (rotate/rename `billing.cdr`) → `system_journal`;
+- `alarm-led`, SNMP trap с `alarm-id` / `* TRAP *` → `alarms`; прочий SNMP → `system_journal`;
+- RFC3164 `last message repeated N times` → `parsed`, category `system_journal`,
+  attributes `repeat_suppressed=true`, `repeat_count=N` (без stateful link на предыдущее
+  сообщение в v8).
+
+Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Component не извлекается из двоеточия внутри timestamp (`HH:MM:SS`). Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
 
 Уровни Eltex `0–99` являются детализацией трассировки, а не RFC severity.
 

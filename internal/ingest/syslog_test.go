@@ -1,6 +1,10 @@
 package ingest
 
 import (
+	"bufio"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -426,5 +430,97 @@ func TestParseRFC3164SecurityAccessWithHostname(t *testing.T) {
 	}
 	if event.Attributes["application"] != "webapp" || event.Attributes["process_id"] != "590" {
 		t.Fatalf("webapp attributes not extracted: %#v", event.Attributes)
+	}
+}
+
+func TestParseLastMessageRepeated(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 12, 32, 34, 0, time.UTC),
+		SourceIP:   "5.227.161.181", SourcePort: 514,
+		Payload: []byte(`<38>Jul 24 19:32:34 last message repeated 7 times`),
+	})
+	if event.ParseStatus != "parsed" || event.Category != "system_journal" {
+		t.Fatalf("repeat not parsed: %#v", event)
+	}
+	if event.Component != "" {
+		t.Fatalf("timestamp must not become component: %q", event.Component)
+	}
+	if event.Attributes["repeat_suppressed"] != "true" || event.Attributes["repeat_count"] != "7" {
+		t.Fatalf("repeat attributes: %#v", event.Attributes)
+	}
+	if event.Attributes["parse_warning"] != "" {
+		t.Fatalf("unexpected parse_warning: %#v", event.Attributes)
+	}
+}
+
+func TestClassifyCDRRotateAndAlarmSideChannels(t *testing.T) {
+	received := time.Date(2026, 7, 24, 12, 33, 50, 0, time.UTC)
+	tests := []struct {
+		payload  string
+		category string
+		component string
+	}{
+		{
+			payload:   `<14> <smg1016m>  19:33:50.716037  [INFO]  cdr: start new file '/mnt/sda/cdrs/billing.cdr'`,
+			category:  "system_journal",
+			component: "cdr",
+		},
+		{
+			payload:   `<14> <smg1016m>  19:19:06.799809  [INFO]  alarm-led: set [green]<->[green] [0]`,
+			category:  "alarms",
+			component: "alarm-led",
+		},
+		{
+			payload:   `<14> <smg1016m>  19:19:06.732672  [INFO]  SNMP: add trap for send res [0]. * TRAP * [0016] alarm-id[12] state[0] params [0][0][0]`,
+			category:  "alarms",
+			component: "SNMP",
+		},
+	}
+	for _, test := range tests {
+		event := ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: received,
+			SourceIP: "5.227.161.181", Payload: []byte(test.payload),
+		})
+		if event.ParseStatus != "parsed" || event.Category != test.category ||
+			event.Component != test.component {
+			t.Fatalf("%q => status=%q category=%q component=%q, want parsed/%s/%s",
+				test.payload, event.ParseStatus, event.Category, event.Component,
+				test.category, test.component)
+		}
+	}
+}
+
+func TestUnrecognizedCorpus20260724HasNoUnknownOrPartial(t *testing.T) {
+	path := filepath.Join("testdata", "syslog_unrecognized_20260724.txt")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open corpus: %v", err)
+	}
+	defer file.Close()
+	received := time.Date(2026, 7, 24, 12, 30, 0, 0, time.UTC)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var total int
+	for scanner.Scan() {
+		payload := strings.TrimSpace(scanner.Text())
+		if payload == "" {
+			continue
+		}
+		total++
+		event := ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: received,
+			SourceIP: "5.227.161.181", SourcePort: 514, Payload: []byte(payload),
+		})
+		if event.ParseStatus == "partial" || event.Category == "unknown" {
+			t.Fatalf("corpus line %d still unrecognized: status=%q category=%q component=%q message=%q payload=%q",
+				total, event.ParseStatus, event.Category, event.Component, event.Message, payload)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan corpus: %v", err)
+	}
+	if total != 43 {
+		t.Fatalf("corpus size = %d, want 43", total)
 	}
 }

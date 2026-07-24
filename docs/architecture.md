@@ -50,9 +50,10 @@ UDP Syslog не имеет acknowledgement: packet может потерятьс
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 
-Parser version `smg-3.410-v7` разделяет envelope, component classification и typed
+Parser version `smg-3.410-v8` разделяет envelope, component classification и typed
 attributes, а отдельные Eltex `#` trace fragments связывает с однозначным родительским
-контекстом только внутри одного `device_id`. Durable rebuild последовательно читает raw по integer microsecond cursor,
+контекстом только внутри одного `device_id`. Правила Syslog общие для схем прошивки
+`3.23.2` и `3.410`. Durable rebuild последовательно читает raw по integer microsecond cursor,
 пакетно строит `syslog_facts`, `cdr_time_facts`, `radius_fragments` и
 `antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и
 остаётся read model до проверки counts и короткой catch-up фазы.

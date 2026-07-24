@@ -1,0 +1,43 @@
+<14> <smg1016m>  19:33:50.716336  [INFO]  cdr: started new file '/mnt/sda/cdrs/billing.cdr', time <2249962>
+<14> <smg1016m>  19:33:50.716037  [INFO]  cdr: start new file '/mnt/sda/cdrs/billing.cdr'
+<14> <smg1016m>  19:33:50.715683  [INFO]  cdr: rename file '/mnt/sda/cdrs/billing.cdr' into a new one '/mnt/sda/cdrs/20260724193350.cdr'
+<38>Jul 24 19:32:34 last message repeated 7 times
+<38>Jul 24 19:32:34 last message repeated 3 times
+<38>Jul 24 19:32:33 last message repeated 5 times
+<38>Jul 24 19:32:33 last message repeated 2 times
+<38>Jul 24 19:32:33 last message repeated 2 times
+<38>Jul 24 19:32:32 last message repeated 2 times
+<38>Jul 24 19:32:32 last message repeated 2 times
+<38>Jul 24 19:31:40 last message repeated 2 times
+<38>Jul 24 19:31:40 last message repeated 2 times
+<38>Jul 24 19:31:39 last message repeated 4 times
+<38>Jul 24 19:31:39 last message repeated 2 times
+<38>Jul 24 19:31:39 last message repeated 3 times
+<38>Jul 24 19:31:38 last message repeated 2 times
+<38>Jul 24 19:31:38 last message repeated 2 times
+<14> <smg1016m>  19:30:50.683056  [INFO]  cdr: started new file '/mnt/sda/cdrs/billing.cdr', time <2249782>
+<14> <smg1016m>  19:30:50.682752  [INFO]  cdr: start new file '/mnt/sda/cdrs/billing.cdr'
+<14> <smg1016m>  19:30:50.682387  [INFO]  cdr: rename file '/mnt/sda/cdrs/billing.cdr' into a new one '/mnt/sda/cdrs/20260724193050.cdr'
+<14> <smg1016m>  19:27:50.662294  [INFO]  cdr: started new file '/mnt/sda/cdrs/billing.cdr', time <2249602>
+<14> <smg1016m>  19:27:50.661991  [INFO]  cdr: start new file '/mnt/sda/cdrs/billing.cdr'
+<14> <smg1016m>  19:27:50.661629  [INFO]  cdr: rename file '/mnt/sda/cdrs/billing.cdr' into a new one '/mnt/sda/cdrs/20260724192750.cdr'
+<38>Jul 24 19:26:42 last message repeated 2 times
+<38>Jul 24 19:26:42 last message repeated 2 times
+<38>Jul 24 19:26:42 last message repeated 3 times
+<38>Jul 24 19:26:41 last message repeated 5 times
+<38>Jul 24 19:26:41 last message repeated 2 times
+<38>Jul 24 19:26:41 last message repeated 3 times
+<38>Jul 24 19:26:41 last message repeated 2 times
+<38>Jul 24 19:26:41 last message repeated 2 times
+<14> <smg1016m>  19:24:50.417880  [INFO]  cdr: started new file '/mnt/sda/cdrs/billing.cdr', time <2249422>
+<14> <smg1016m>  19:24:50.417577  [INFO]  cdr: start new file '/mnt/sda/cdrs/billing.cdr'
+<14> <smg1016m>  19:24:50.417222  [INFO]  cdr: rename file '/mnt/sda/cdrs/billing.cdr' into a new one '/mnt/sda/cdrs/20260724192450.cdr'
+<14> <smg1016m>  19:21:50.641442  [INFO]  cdr: started new file '/mnt/sda/cdrs/billing.cdr', time <2249242>
+<14> <smg1016m>  19:21:50.641139  [INFO]  cdr: start new file '/mnt/sda/cdrs/billing.cdr'
+<14> <smg1016m>  19:21:50.640777  [INFO]  cdr: rename file '/mnt/sda/cdrs/billing.cdr' into a new one '/mnt/sda/cdrs/20260724192150.cdr'
+<14> <smg1016m>  19:19:06.799809  [INFO]  alarm-led: set [green]<->[green] [0]
+<14> <smg1016m>  19:19:06.799661  [INFO]  alarm-led: updated GlobalAlarm [0x200c -> 0x0000]
+<14> <smg1016m>  19:19:06.732672  [INFO]  SNMP: add trap for send res [0]. * TRAP * [0016] alarm-id[12] state[0] params [0][0][0]
+<14> <smg1016m>  19:18:50.472312  [INFO]  cdr: started new file '/mnt/sda/cdrs/billing.cdr', time <2249062>
+<14> <smg1016m>  19:18:50.472010  [INFO]  cdr: start new file '/mnt/sda/cdrs/billing.cdr'
+<14> <smg1016m>  19:18:50.471632  [INFO]  cdr: rename file '/mnt/sda/cdrs/billing.cdr' into a new one '/mnt/sda/cdrs/20260724191850.cdr'

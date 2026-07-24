@@ -147,6 +147,19 @@ func main() {
 	}()
 	go func() {
 		for ctx.Err() == nil {
+			if err := ingest.RunHistoricalSyslogReprocess(ctx, warehouse, control); err != nil &&
+				!errors.Is(err, context.Canceled) {
+				slog.Error("historical Syslog reprocess failed; retrying", "error", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}()
+	go func() {
+		for ctx.Err() == nil {
 			buckets, err := warehouse.ListPendingCorrelationBuckets(ctx, 20)
 			if err != nil {
 				slog.Error("dirty correlation queue read failed", "error", err)

@@ -12,7 +12,7 @@ flowchart LR
     IngressSpool -->|Unix socket with ACK| Receiver[Collector receiver]
     Receiver --> Spool[App durable spool]
     Spool --> NATS[NATS JetStream]
-    NATS --> Parser[SMG 3.410 parser v6 + device timezone]
+    NATS --> Parser[SMG Syslog parser v11 + device timezone]
     Parser --> Functional[Typed functional events]
     Functional --> Radius[Batch RADIUS lifecycle assembler]
     Radius --> Dirty[Durable dirty day buckets]
@@ -50,9 +50,10 @@ UDP Syslog не имеет acknowledgement: packet может потерятьс
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 
-Parser version `smg-3.410-v9` разделяет envelope, component-first classification и typed
-attributes, а фрагменты (`#`/`##`/AVP/hex) связывает с родителем по
-`device_id + call_context` (RADIUS burst — отдельно). Правила Syslog общие для схем
+Parser version `smg-3.410-v11` разделяет envelope (включая `CONFIG` без wall-clock),
+component-first classification и typed attributes, а фрагменты
+(`#`/`##`/bare SDP/`SIPT Proc`/AVP/hex/host_ip) связывает с родителем по
+`device_id + call_context` (RADIUS/SIP burst — отдельно). Правила Syslog общие для схем
 прошивки `3.23.2` и `3.410`. Durable rebuild последовательно читает raw по integer microsecond cursor,
 пакетно строит `syslog_facts`, `cdr_time_facts`, `radius_fragments` и
 `antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и

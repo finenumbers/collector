@@ -72,22 +72,40 @@ quarantine. Исходная пара `имя → значение` всегда
 - source IP/port и transport;
 - неизменённый payload и SHA-256;
 - PRI/facility/severity, только если PRI реально присутствовал;
-- detected envelope (`eltex`, `rfc3164`, `rfc3164-or-pri`, далее `rfc5424`);
+- detected envelope (`eltex`, `eltex-trace`, `eltex-config`, `rfc3164`,
+  `rfc3164-or-pri`, далее `rfc5424`);
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Parser `smg-3.410-v9` (имя историческое; правила Syslog общие для схем прошивки
+Parser `smg-3.410-v11` (имя историческое; правила Syslog **общие** для схем прошивки
 `3.23.2` и `3.410`) использует **component-first** классификацию: `SIP` / `SIPT[…]` /
-`Port SIPT` остаются в `sip` даже при тексте `IAM-`/`ISUP`/`SS7` (SIP-I/SIP-T). Keyword
-`ISUP`/`IAM-` применяется только когда SIP-компонент не распознан.
+`SIPT Proc` / `Port SIPT` / `PBXIPC-SIP` остаются в `sip` даже при тексте
+`IAM-`/`ISUP`/`SS7` (SIP-I/SIP-T). Keyword `ISUP`/`IAM-` применяется только когда
+SIP-компонент не распознан.
+
+Envelope:
+
+- Eltex trace `HH:MM:SS[.frac] [LEVEL] …` → `eltex-trace`, `parsed`;
+- `CONFIG: …` сразу после `<hostname>` **без** timestamp → `eltex-config`, `parsed`,
+  category `config_history` (диалект 3.410);
+- RFC3164 / `last message repeated N times` — как раньше.
 
 Фрагменты SMG (отдельные UDP datagram’ы) помечаются `trace_continuation` +
-`fragment_kind` (`typed_hash`, `hash_detail`, `sdp`, `codec`, `avp`, `hex`, `digest`,
-`rc_fragment`, `indented`, `empty`). `ContinuationAssembler` индексирует parents по
-`device_id + call_context` (и отдельный radius-burst без context); AVP/hex/digest
-наследуют только RADIUS-родителя. Raw payload не склеивается: 1 datagram = 1 event.
-UI группирует списки разделов по `call_context` / `parent_event_id` и скрывает
-технические фрагменты (`empty_body`, hex/digest) по умолчанию.
+`fragment_kind` (`typed_hash`, `hash_detail`, `sdp`, `sdp_line`, `sdp_quote`, `codec`,
+`avp`, `hex`, `digest`, `rc_fragment`, `host_ip`, `indented`, `empty`).
+
+Диалект 3.410 (bare SDP без обёртки `##` 3.23.2):
+
+- строки `v=`/`o=`/`s=`/`t=`/`c=`/`m=`/`a=` → `sip`, `fragment_kind=sdp_line`;
+- обрывок `'` после `# SDP len (N): 'v=0` → `sip`, `fragment_kind=sdp_quote`;
+- `\t\t 95.163.183.222` (HostIPlist) → `sip`, `fragment_kind=host_ip`.
+
+`ContinuationAssembler` индексирует parents по `device_id + call_context` и отдельные
+radius/sip burst без context. AVP/hex/digest наследуют RADIUS-родителя; `host_ip`,
+bare SDP, `# cause`/`# requestID`/`# SDP` без `[C…]` — SIP-родителя (`sipBurst`, ≤2s).
+Raw payload не склеивается: 1 datagram = 1 event. UI группирует списки по
+`call_context` / `parent_event_id` и скрывает только `empty_body`/hex/digest
+(SDP-строки оффера **не** скрываются).
 
 Категории:
 
@@ -96,9 +114,11 @@ UI группирует списки разделов по `call_context` / `par
 - отдельные журналы: `config_history`, `auth_log`, `system_journal`;
 - диагностические: `ip_connections`, `unknown`.
 
-### Маппинг UI Syslog SMG 3.23.2 → категории Collector
+### Маппинг UI Syslog SMG 3.23.2 / 3.410 → категории Collector
 
-Секции web-интерфейса SMG (§3.1.16.3) соответствуют категориям:
+Секции web-интерфейса SMG соответствуют категориям. В 3.410 добавлен отдельный тоггл
+**«SIP-адаптер»** — отдельный dataset/nav в Collector **не** вводится: сообщения
+`PBXIPC-SIP.*` и bare SDP уже попадают в `sip`.
 
 | Секция SMG | Collector category |
 |---|---|
@@ -106,12 +126,13 @@ UI группирует списки разделов по `call_context` / `par
 | Traces → Вызовы | `call_trace` |
 | Traces → SS7-ISUP | `isup` |
 | Traces → SIP | `sip` |
+| Traces → SIP-адаптер (3.410) | `sip` (`PBXIPC-SIP`, SDP) |
 | Traces → Q.931 | `q931` |
 | Traces → IP-соединения | `ip_connections` |
 | Traces → IP-субмодули | `ip_modules` |
 | Traces → RADIUS | `radius` |
 | История изменения конфигурации | `config_history` |
-| Системный журнал / web access | `system_journal`, `auth_log` |
+| Системный журнал / web / действия с записями разговоров | `system_journal`, `auth_log` |
 
 Side-channels вне отдельных UI-тогглов (обязательны для пустого «Нераспознанного»):
 
@@ -122,8 +143,9 @@ Side-channels вне отдельных UI-тогглов (обязательн�
   сообщение).
 - `RADIUS server rejected: …` → component нормализуется в `RADIUS` (не длинная фраза).
 - Пустое тело после `[Cxxxxxxx]` → `empty_body=true` (скрывается в UI как технический фрагмент).
+- `SIPT Proc. …` с текстом `ISUP`/`SS7` → `sip` (component-first).
 
-Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Component извлекается только из allowlist Eltex-имён (`SIP`, `RADIUS`, `ALARM`, `mspc`, `Port SIPT`, `SIPT[…]`, …); двоеточие внутри timestamp (`HH:MM:SS`) и ложные component вроде `MAC_ext` не режут message. Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
+Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Component извлекается только из allowlist Eltex-имён (`SIP`, `RADIUS`, `ALARM`, `mspc`, `Port SIPT`, `SIPT[…]`, `SIPT Proc`, `CONFIG`, …); двоеточие внутри timestamp (`HH:MM:SS`) и ложные component вроде `MAC_ext` не режут message. Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
 
 Уровни Eltex `0–99` являются детализацией трассировки, а не RFC severity.
 

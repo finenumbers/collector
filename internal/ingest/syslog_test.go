@@ -525,6 +525,164 @@ func TestUnrecognizedCorpus20260724HasNoUnknownOrPartial(t *testing.T) {
 	}
 }
 
+func TestUnrecognizedCorpus3410HasNoUnknown(t *testing.T) {
+	path := filepath.Join("testdata", "syslog_unrecognized_3410.txt")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open corpus: %v", err)
+	}
+	defer file.Close()
+	deviceID := uuid.New()
+	received := time.Date(2026, 7, 24, 20, 21, 55, 0, time.UTC)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var events []analytics.SyslogEvent
+	for scanner.Scan() {
+		payload := strings.TrimSpace(scanner.Text())
+		if payload == "" {
+			continue
+		}
+		events = append(events, ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID,
+			ReceivedAt: received.Add(time.Duration(len(events)) * time.Millisecond),
+			SourceIP:   "5.227.161.181", SourcePort: 514, Payload: []byte(payload),
+		}))
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan corpus: %v", err)
+	}
+	if len(events) != 897 {
+		t.Fatalf("corpus size = %d, want 897", len(events))
+	}
+	// Seed a SIP parent so sipBurst can attach orphan SDP fragments the way a
+	// real 3.410 burst does (# SDP len / PBXIPC-SIP immediately before bare a=).
+	seed := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: received.Add(-time.Millisecond),
+		SourceIP: "5.227.161.181",
+		Payload:  []byte(`<14> <smg1016m>  20:21:55.157000  [INFO] # SDP len (232): 'v=0`),
+	})
+	batch := append([]analytics.SyslogEvent{seed}, events...)
+	NewContinuationAssembler().Assemble(batch)
+	for i, event := range batch[1:] {
+		if event.Category == "unknown" {
+			t.Fatalf("corpus line %d still unknown: component=%q message=%q attrs=%#v payload=%q",
+				i+1, event.Component, event.Message, event.Attributes, string(event.Payload))
+		}
+	}
+}
+
+func TestConfigWithoutTimestampIsParsed(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 20, 0, 0, 0, time.UTC),
+		SourceIP:   "5.227.161.181",
+		Payload:    []byte(`<14> <smg1016m> CONFIG: Configuration cmd:[CFG_SAVE] by WEBS/d.pershin`),
+	})
+	if event.ParseStatus != "parsed" || event.HeaderFormat != "eltex-config" {
+		t.Fatalf("CONFIG envelope not parsed: %#v", event)
+	}
+	if event.Category != "config_history" || event.Component != "CONFIG" {
+		t.Fatalf("CONFIG not config_history: category=%q component=%q", event.Category, event.Component)
+	}
+	if event.Attributes["parse_warning"] != "" {
+		t.Fatalf("unexpected parse_warning: %#v", event.Attributes)
+	}
+}
+
+func TestSIPTProcWithISUPStaysSIP(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 20, 21, 55, 0, time.UTC),
+		SourceIP:   "5.227.161.181",
+		Payload: []byte(
+			`<14> <smg1016m>  20:21:55.008088  [INFO] [C000045] SIPT Proc. Fill ISUP Hop counter. Callref 0044. Converted SIP Max-Forwards to ISUP Hop counter: 69 => 30`,
+		),
+	})
+	if event.Category != "sip" || !strings.HasPrefix(strings.ToUpper(event.Component), "SIPT PROC") {
+		t.Fatalf("SIPT Proc+ISUP leaked to %q component=%q", event.Category, event.Component)
+	}
+}
+
+func TestBareSDPLinesClassifyAsSIP(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 24, 20, 21, 55, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:21:55.157000  [INFO] PBXIPC-SIP. TX INVITE`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:21:55.157100  [INFO] # SDP len (232): 'v=0`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(2 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:21:55.157200  [INFO] a=rtpmap:8 PCMA/8000`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(3 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:21:55.157300  [INFO] m=audio 4000 RTP/AVP 8 101`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(4 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:21:55.157400  [INFO] '`),
+		}),
+	}
+	if events[0].Category != "sip" {
+		t.Fatalf("PBXIPC-SIP parent category=%q", events[0].Category)
+	}
+	if events[1].Category != "sip" || events[1].Attributes["fragment_kind"] != "hash_detail" {
+		t.Fatalf("# SDP len not sip/hash_detail: %#v", events[1])
+	}
+	if events[2].Category != "sip" || events[2].Attributes["fragment_kind"] != "sdp_line" {
+		t.Fatalf("a= not sdp_line: %#v", events[2])
+	}
+	if events[3].Category != "sip" || events[3].Attributes["fragment_kind"] != "sdp_line" {
+		t.Fatalf("m= not sdp_line: %#v", events[3])
+	}
+	if events[4].Category != "sip" || events[4].Attributes["fragment_kind"] != "sdp_quote" {
+		t.Fatalf("quote not sdp_quote: %#v", events[4])
+	}
+	NewContinuationAssembler().Assemble(events)
+	for i := 1; i < len(events); i++ {
+		if events[i].Attributes["parent_event_id"] == "" {
+			t.Fatalf("event %d missing parent: %#v", i, events[i].Attributes)
+		}
+		if events[i].Category != "sip" {
+			t.Fatalf("event %d category=%q after assemble", i, events[i].Category)
+		}
+	}
+}
+
+func TestKeepAliveCauseInheritsSIPBurst(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 24, 20, 40, 27, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:40:27.910000  [INFO] SIP. Keep Alive TX`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  20:40:27.911187  [INFO] 		# cause 200`),
+		}),
+	}
+	if events[1].Attributes["fragment_kind"] != "typed_hash" {
+		t.Fatalf("cause not typed_hash: %#v", events[1].Attributes)
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[1].Category != "sip" || events[1].Attributes["parent_event_id"] != events[0].EventID.String() {
+		t.Fatalf("keep-alive # cause did not inherit SIP: %#v", events[1])
+	}
+}
+
 func TestClassifySIPWithIAMStaysSIP(t *testing.T) {
 	event := ParseSyslog(RawSyslog{
 		EventID: uuid.New(), DeviceID: uuid.New(),
@@ -646,6 +804,40 @@ func TestFragmentLinkerGroupsSIPDetailAndRadiusAVP(t *testing.T) {
 	}
 	if events[4].Category != "sip" || events[4].Attributes["parent_event_id"] != events[0].EventID.String() {
 		t.Fatalf("SDP should inherit SIP signal parent: %#v", events[4])
+	}
+}
+
+func TestSIPHostIPListFragmentClassifiesAsSIP(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 24, 13, 3, 59, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  20:03:59.323892  [INFO]  SIP. proc cmd 'HostIPlist' [6] [0]`,
+			),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  20:03:59.324262  [INFO]  		95.163.183.222`,
+			),
+		}),
+	}
+	if events[0].Category != "sip" {
+		t.Fatalf("HostIPlist parent category=%q", events[0].Category)
+	}
+	if events[1].Category != "sip" || events[1].Attributes["fragment_kind"] != "host_ip" {
+		t.Fatalf("bare IP not classified as SIP host_ip: %#v", events[1])
+	}
+	if events[1].Attributes["host_ip"] != "95.163.183.222" {
+		t.Fatalf("host_ip attr: %#v", events[1].Attributes)
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[1].Attributes["parent_event_id"] != events[0].EventID.String() {
+		t.Fatalf("host_ip did not link to SIP parent: %#v", events[1].Attributes)
 	}
 }
 

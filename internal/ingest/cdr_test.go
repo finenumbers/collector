@@ -17,7 +17,8 @@ mts;2026-07-23 23:58:33.237;2026-07-23 23:58:37.191;2026-07-23 23:58:46.657;9.46
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := (CDRParser{DeviceID: uuid.New(), FileID: uuid.New(), Location: location}).Parse(strings.NewReader(sample))
+	deviceID := uuid.New()
+	result, err := (CDRParser{DeviceID: deviceID, FileID: uuid.New(), Location: location}).Parse(strings.NewReader(sample))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +40,15 @@ mts;2026-07-23 23:58:33.237;2026-07-23 23:58:37.191;2026-07-23 23:58:46.657;9.46
 	}
 	if record.UniqueTag != "110003076a62aaa9c9f5297a4f6a3001" {
 		t.Fatalf("unique tag parsed incorrectly: %q", record.UniqueTag)
+	}
+	replayed, err := (CDRParser{
+		DeviceID: deviceID, FileID: uuid.New(), Location: location,
+	}).Parse(strings.NewReader(sample))
+	if err != nil || len(replayed.Records) != 1 {
+		t.Fatalf("replay parse failed: %v", err)
+	}
+	if replayed.Records[0].RecordID != record.RecordID {
+		t.Fatal("same device/sequence must produce an idempotent record id")
 	}
 }
 

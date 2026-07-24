@@ -4,7 +4,10 @@
 
 CDR record — биллинговый факт одного логического/протокольного плеча. Пользовательский вызов может состоять из нескольких records при B2BUA, redirection, transfer, pickup, conference, IVR, SIP fork и alternate route.
 
-Связь хранится отдельно в `call_event_links`: `cdr_record_id`, `event_id`, method, confidence, evidence и parser version. Исходные записи не изменяются.
+RADIUS trace состоит из нескольких Syslog datagrams. Они сначала объединяются в
+`antifraud_transactions` по device и call context/request evidence. Связь хранится
+отдельно в `call_event_links`: `cdr_record_id`, `event_id`, method, confidence,
+evidence и parser version. Исходные записи не изменяются.
 
 ## Детерминированное правило
 
@@ -19,17 +22,21 @@ device_id + normalize(RADIUS Accounting-Session-Id)
 - пришёл RADIUS после CDR — link создаёт Syslog worker;
 - пришёл CDR после RADIUS — link создаёт CDR importer.
 
+Когда Acct-Session-Id появился только в одном фрагменте transaction, все event IDs
+этого же lifecycle связываются через evidence `call_context_transaction`.
 Retransmissions остаются событиями доставки, но не становятся новыми вызовами.
 
-## Fallback-порядок
+## Дополнительные exact evidence
 
-Следующие правила должны добавляться только с evidence и confidence:
+Автоматически разрешены только документированные точные значения:
 
-1. UniqueTag/X-UniqueTag, если подтверждена передача в обоих источниках;
-2. incoming/outgoing SIP Call-ID в контексте устройства и временного окна;
-3. SS7 Global Call Reference;
-4. trunk/link + CIC + interval overlap;
-5. номера до/после модификаций + trunk labels + setup/connect/disconnect + duration + Q.850.
+1. incoming/outgoing SIP Call-ID в контексте устройства и ограниченного окна CDR;
+2. SS7 Global Call Reference;
+3. CDR `radius-rejected` как подтверждение блокирующего RADIUS server/reply.
+
+UniqueTag используется только после подтверждения его наличия в обоих источниках.
+Trunk/link + CIC + interval и номера/время формируют `ambiguous candidate`, но не
+автоматическую связь без production corpus.
 
 Номер телефона и округлённое время без дополнительных признаков не считаются связью.
 
@@ -54,5 +61,9 @@ Retransmissions остаются событиями доставки, но не 
 - unlinked CDR;
 - RADIUS без CDR;
 - unknown parser messages.
+
+Для каждой AntiFraud transaction дополнительно фиксируются `complete`, `incomplete`,
+`orphan` и `ambiguous`; несколько CDR records с одинаковым device-scoped
+Acct-Session-Id отображаются как отдельные legs одного lifecycle.
 
 Порог автоматического fallback-link фиксируется после canary corpus; до этого кандидаты не склеиваются автоматически.

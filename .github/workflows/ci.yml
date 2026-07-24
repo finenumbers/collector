@@ -17,13 +17,32 @@ jobs:
   backend:
     name: Go test and vet
     runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.6-alpine
+        env:
+          CLICKHOUSE_DB: collector
+          CLICKHOUSE_USER: collector
+          CLICKHOUSE_PASSWORD: ci-clickhouse-password
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "clickhouse-client --user collector --password ci-clickhouse-password --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      CLICKHOUSE_TEST_ADDR: 127.0.0.1:9000
+      CLICKHOUSE_TEST_USER: collector
+      CLICKHOUSE_TEST_PASSWORD: ci-clickhouse-password
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test ./...
+      - run: go test -p 1 ./...
       - run: go vet ./...
 
   frontend:

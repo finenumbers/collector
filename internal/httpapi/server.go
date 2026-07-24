@@ -68,9 +68,11 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
 			private.Get("/devices/{deviceID}/events", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
+			private.Get("/devices/{deviceID}/antifraud", s.listAntifraud)
 			private.Get("/devices/{deviceID}/stats", s.deviceStats)
 			private.With(s.requireAdmin).Get("/devices/{deviceID}/syslog-diagnostics", s.syslogDiagnostics)
 			private.Get("/devices/{deviceID}/calls/{recordID}/timeline", s.callTimeline)
+			private.Get("/devices/{deviceID}/antifraud/{transactionID}/timeline", s.antifraudTimeline)
 			private.Get("/devices/{deviceID}/export.xlsx", s.exportXLSX)
 		})
 	})
@@ -327,6 +329,45 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	})
 }
 
+func (s *Server) listAntifraud(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
+	var cursor *analytics.AntifraudCursor
+	before := request.URL.Query().Get("before")
+	beforeID := request.URL.Query().Get("before_id")
+	if before != "" || beforeID != "" {
+		lastEventAt, timeErr := time.Parse(time.RFC3339Nano, before)
+		transactionID, idErr := uuid.Parse(beforeID)
+		if timeErr != nil || idErr != nil {
+			writeError(writer, http.StatusBadRequest, "invalid AntiFraud cursor")
+			return
+		}
+		cursor = &analytics.AntifraudCursor{
+			LastEventAt: lastEventAt, TransactionID: transactionID,
+		}
+	}
+	page, err := s.Analytics.ListAntifraudPage(
+		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
+	)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to query AntiFraud lifecycle")
+		return
+	}
+	var nextCursor any
+	if page.HasMore && len(page.Items) > 0 {
+		last := page.Items[len(page.Items)-1]
+		nextCursor = map[string]any{
+			"before": last.LastEventAt, "beforeId": last.TransactionID,
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
+	})
+}
+
 func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
@@ -381,7 +422,13 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 		"quarantineDepth": quarantineDepth, "natsStreamMessages": natsStreamMessages,
 		"natsConsumerPending": natsConsumerPending, "breakdown": diagnostics.Breakdown,
 		"appliedMigrations": diagnostics.AppliedMigrations,
-		"ingress":           ingressStatus, "ingressAvailable": ingressAvailable,
+		"rawEvents24h":      diagnostics.RawEvents24h, "classified24h": diagnostics.Classified24h,
+		"reprocessedV5":       diagnostics.ReprocessedV5,
+		"reprocessRemaining":  diagnostics.ReprocessRemaining,
+		"antifraudComplete":   diagnostics.AntifraudComplete,
+		"antifraudIncomplete": diagnostics.AntifraudIncomplete,
+		"antifraudOrphan":     diagnostics.AntifraudOrphan,
+		"ingress":             ingressStatus, "ingressAvailable": ingressAvailable,
 	})
 }
 
@@ -398,6 +445,24 @@ func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request)
 	rows, err := s.Analytics.CallTimeline(request.Context(), deviceID, recordID)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query call timeline")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
+}
+
+func (s *Server) antifraudTimeline(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	transactionID, err := uuid.Parse(chi.URLParam(request, "transactionID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid AntiFraud transaction id")
+		return
+	}
+	rows, err := s.Analytics.AntifraudTimeline(request.Context(), deviceID, transactionID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to query AntiFraud timeline")
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
@@ -434,6 +499,47 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 				row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag}
 			cell, _ := excelize.CoordinatesToCellName(1, index+2)
 			_ = stream.SetRow(cell, values)
+		}
+	} else if dataset == "antifraud" {
+		headers := []any{
+			"Первое событие", "Последнее событие", "Call context", "Acct-Session-Id",
+			"Операция", "Запрос", "Ответ", "Решение", "Причина", "RADIUS server",
+			"Latency, мс", "Повторы", "Calling", "Called", "Номер A вход",
+			"Номер B вход", "Номер A выход", "Номер B выход", "Входящий trunk",
+			"Исходящий trunk", "Accounting", "Q.850", "Полнота", "CDR legs", "Атрибуты",
+		}
+		_ = stream.SetRow("A1", headers)
+		var cursor *analytics.AntifraudCursor
+		rowNumber := 1
+		for {
+			page, queryErr := s.Analytics.ListAntifraudPage(
+				request.Context(), deviceID, search, 10000, cursor,
+			)
+			if queryErr != nil {
+				writeError(writer, http.StatusInternalServerError, "unable to export AntiFraud")
+				return
+			}
+			for _, row := range page.Items {
+				rowNumber++
+				attributes, _ := json.Marshal(row.Attributes)
+				cell, _ := excelize.CoordinatesToCellName(1, rowNumber)
+				_ = stream.SetRow(cell, []any{
+					row.FirstEventAt, row.LastEventAt, row.CallContext, row.AcctSessionID,
+					row.RequestType, row.RequestCode, row.ResponseCode, row.Decision,
+					row.DecisionReason, row.ServerAddress, row.LatencyMS, row.Retries,
+					row.CallingStationID, row.CalledStationID, row.SrcNumberIn,
+					row.DstNumberIn, row.SrcNumberOut, row.DstNumberOut,
+					row.InTrunkgroupLabel, row.OutTrunkgroupLabel, row.AccountingStatus,
+					row.Q850Cause, row.Completeness, row.LegCount, string(attributes),
+				})
+			}
+			if !page.HasMore || len(page.Items) == 0 {
+				break
+			}
+			last := page.Items[len(page.Items)-1]
+			cursor = &analytics.AntifraudCursor{
+				LastEventAt: last.LastEventAt, TransactionID: last.TransactionID,
+			}
 		}
 	} else {
 		category := request.URL.Query().Get("category")

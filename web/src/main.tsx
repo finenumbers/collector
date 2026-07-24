@@ -37,6 +37,8 @@ type TimelineRow = EventRow & { method: string; confidence: number }
 type DeviceStats = {
   calls24h: number; failedCalls24h: number; averageTalkMs: number
   alarms24h: number; radius24h: number; unknown24h: number
+  antifraud24h: number; antifraudRejected24h: number
+  antifraudIncomplete24h: number; unlinkedCalls24h: number
 }
 type SyslogBreakdown = {
   category: string; parseStatus: string; parserVersion: string; headerFormat: string
@@ -62,6 +64,13 @@ type SyslogDiagnostics = {
   natsConsumerPending: number
   breakdown: SyslogBreakdown[]
   appliedMigrations: string[]
+  rawEvents24h: number
+  classified24h: number
+  reprocessedV5: number
+  reprocessRemaining: number
+  antifraudComplete: number
+  antifraudIncomplete: number
+  antifraudOrphan: number
   ingressAvailable: boolean
   ingress: IngressStatus
 }
@@ -80,15 +89,44 @@ type CallRow = {
   radiusSessionId: string
   uniqueTag: string
 }
+type AntifraudRow = {
+  transactionId: string
+  firstEventAt: string
+  lastEventAt: string
+  callContext: string
+  acctSessionId: string
+  requestType: string
+  requestCode: string
+  responseCode: string
+  decision: string
+  decisionReason: string
+  serverAddress: string
+  retries: number
+  latencyMs?: number
+  callingStationId: string
+  calledStationId: string
+  srcNumberIn: string
+  dstNumberIn: string
+  srcNumberOut: string
+  dstNumberOut: string
+  inTrunkgroupLabel: string
+  outTrunkgroupLabel: string
+  accountingStatus: string
+  q850Cause?: number
+  completeness: string
+  attributes: Record<string, string>
+  linkedRecordIds: string[]
+  legCount: number
+}
 type PageCursor = { before: string; beforeId: string }
 type PageResponse = {
-  items: Array<EventRow | CallRow>
+  items: Array<EventRow | CallRow | AntifraudRow>
   hasMore: boolean
   nextCursor?: PageCursor
 }
 type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
-  'q931' | 'ip_connections' | 'ip_modules' | 'radius' | 'config_history' |
-  'system_journal' | 'unknown'
+  'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
+  'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown'
 
 let csrfToken = ''
 const PAGE_SIZE = 100
@@ -273,10 +311,16 @@ const navigation: { id: Dataset; label: string; icon: typeof Activity }[] = [
   { id: 'sip', label: 'SIP', icon: Radio },
   { id: 'isup', label: 'SS7 / ISUP', icon: Network },
   { id: 'q931', label: 'Q.931', icon: Network },
+  { id: 'h323', label: 'H.323', icon: Network },
+  { id: 'rtp', label: 'RTP / RTCP', icon: Radio },
+  { id: 'hardware', label: 'Аппаратные модули', icon: Database },
+  { id: 'ivr', label: 'IVR', icon: PhoneCall },
+  { id: 'ip_network', label: 'IP-сеть', icon: Network },
   { id: 'ip_connections', label: 'IP-соединения', icon: Server },
   { id: 'ip_modules', label: 'IP-субмодули', icon: Database },
   { id: 'radius', label: 'RADIUS', icon: ShieldCheck },
   { id: 'config_history', label: 'Изменения', icon: FileClock },
+  { id: 'auth_log', label: 'Журнал доступа', icon: ShieldCheck },
   { id: 'system_journal', label: 'Системный журнал', icon: FileClock },
   { id: 'unknown', label: 'Нераспознанное', icon: AlertTriangle },
 ]
@@ -290,9 +334,10 @@ function DeviceNavigation({ active, onChange }: { active: Dataset; onChange: (va
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
-  const [rows, setRows] = useState<Array<EventRow | CallRow>>([])
+  const [rows, setRows] = useState<Array<EventRow | CallRow | AntifraudRow>>([])
   const [loading, setLoading] = useState(false)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
+  const [selectedAntifraud, setSelectedAntifraud] = useState<AntifraudRow | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
   const [stats, setStats] = useState<DeviceStats | null>(null)
   const [diagnostics, setDiagnostics] = useState<SyslogDiagnostics | null>(null)
@@ -304,11 +349,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const generationRef = useRef(0)
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const category = dataset === 'syslog_all' ? 'all' : dataset
-  const exportUrl = `/api/devices/${device.id}/export.xlsx?dataset=${dataset === 'calls' ? 'calls' : 'events'}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}`
+  const exportDataset = dataset === 'calls' ? 'calls' : dataset === 'antifraud' ? 'antifraud' : 'events'
+  const exportUrl = `/api/devices/${device.id}/export.xlsx?dataset=${exportDataset}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}`
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     const base = dataset === 'calls'
       ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
-      : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+      : dataset === 'antifraud'
+        ? `/devices/${device.id}/antifraud?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
@@ -374,7 +422,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     observer.observe(target)
     return () => observer.disconnect()
   }, [hasMore, loadMore])
-  const showRadiusEmpty = !loading && rows.length === 0 && (dataset === 'antifraud' || dataset === 'radius')
+  const showRadiusEmpty = !loading && rows.length === 0 && dataset === 'radius'
+  const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
   return <section className="data-view">
     {stats && <div className="stat-strip">
       <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>
@@ -382,6 +431,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       <span><small>Средняя длительность</small><strong>{(stats.averageTalkMs / 1000).toFixed(1)} с</strong></span>
       <span><small>Аварий, 24 ч</small><strong>{stats.alarms24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>RADIUS, 24 ч</small><strong>{stats.radius24h.toLocaleString('ru-RU')}</strong></span>
+      <span><small>AntiFraud, 24 ч</small><strong>{stats.antifraud24h.toLocaleString('ru-RU')}</strong></span>
+      <span><small>Reject, 24 ч</small><strong className={stats.antifraudRejected24h ? 'warning-text' : ''}>{stats.antifraudRejected24h.toLocaleString('ru-RU')}</strong></span>
+      <span><small>Без связи CDR</small><strong className={stats.unlinkedCalls24h ? 'warning-text' : ''}>{stats.unlinkedCalls24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Нераспознано, 24 ч</small><strong className={stats.unknown24h ? 'warning-text' : ''}>{stats.unknown24h.toLocaleString('ru-RU')}</strong></span>
     </div>}
     {admin && diagnostics && <SyslogDiagnosticPanel value={diagnostics} />}
@@ -396,13 +448,18 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
       {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} onSelect={setSelectedCall} /> :
-        <EventsTable rows={rows as EventRow[]} onSelect={setSelectedEvent} />}
+        dataset === 'antifraud'
+          ? <AntifraudTable rows={rows as AntifraudRow[]} onSelect={setSelectedAntifraud} />
+          : <EventsTable rows={rows as EventRow[]} onSelect={setSelectedEvent} />}
       {showRadiusEmpty && <RadiusEmptyState />}
+      {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
         {loading && rows.length > 0 ? 'Загрузка следующих 100 записей…' : hasMore ? '' : rows.length > 0 ? 'Все записи загружены' : ''}
       </div>
     </div>
     {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
+    {selectedAntifraud && <AntifraudDrawer device={device} row={selectedAntifraud}
+      onClose={() => setSelectedAntifraud(null)} />}
     {selectedEvent && <EventDrawer event={selectedEvent} onClose={() => setSelectedEvent(null)} />}
   </section>
 }
@@ -431,6 +488,12 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>NATS stream: <strong>{value.natsStreamMessages.toLocaleString('ru-RU')}</strong></span>
       <span>NATS pending: <strong>{value.natsConsumerPending.toLocaleString('ru-RU')}</strong></span>
       <span>Quarantine: <strong>{value.quarantineDepth.toLocaleString('ru-RU')}</strong></span>
+      <span>Classified, 24 ч: <strong>{value.classified24h.toLocaleString('ru-RU')} / {value.rawEvents24h.toLocaleString('ru-RU')}</strong></span>
+      <span>Reprocess v5: <strong>{value.reprocessedV5.toLocaleString('ru-RU')}</strong></span>
+      <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
+      <span>AntiFraud complete: <strong>{value.antifraudComplete.toLocaleString('ru-RU')}</strong></span>
+      <span>AntiFraud incomplete: <strong>{value.antifraudIncomplete.toLocaleString('ru-RU')}</strong></span>
+      <span>AntiFraud без CDR: <strong>{value.antifraudOrphan.toLocaleString('ru-RU')}</strong></span>
       <span>Миграции: <strong>{value.appliedMigrations.join(', ') || '—'}</strong></span>
     </div>
     <div className="diagnostic-breakdown">
@@ -450,6 +513,101 @@ function RadiusEmptyState() {
     <p>Проверьте наличие тестового вызова, включение «АнтиФрод» в активном RADIUS-профиле SMG,
       группы Access/Accounting серверов и уровень трассировки Syslog. Режим Custom сам по себе
       задаёт формат RADIUS, но не создаёт события без вызовов.</p>
+  </div>
+}
+
+function AntifraudEmptyState() {
+  return <div className="table-empty">
+    <strong>AntiFraud lifecycle пока не собран</strong>
+    <p>Технический RADIUS-поток доступен в разделе «RADIUS». В AntiFraud появляются
+      только операции number/save_call/check_call, подтверждённые xpgk-атрибутами,
+      вместе с ответом, решением и связью с CDR.</p>
+  </div>
+}
+
+function AntifraudTable({ rows, onSelect }: {
+  rows: AntifraudRow[]
+  onSelect: (row: AntifraudRow) => void
+}) {
+  return <table><thead><tr>
+    <th>Последнее событие</th><th>Операция</th><th>Решение</th><th>Номер A</th>
+    <th>Номер B</th><th>Входящий маршрут</th><th>Исходящий маршрут</th>
+    <th>RADIUS server</th><th>Latency</th><th>Accounting</th><th>CDR legs</th>
+    <th>Полнота</th><th>Acct-Session-Id</th><th>Call context</th>
+  </tr></thead><tbody>{rows.map((row) => <tr key={row.transactionId}
+    onClick={() => onSelect(row)}>
+    <td className="mono">{formatTime(row.lastEventAt)}</td>
+    <td><span className="tag">{row.requestType || 'не определена'}</span></td>
+    <td><span className={`decision ${row.decision || 'pending'}`}>
+      {decisionLabel(row.decision)}</span></td>
+    <td className="mono">{row.srcNumberIn || row.callingStationId || '—'}</td>
+    <td className="mono">{row.dstNumberIn || row.calledStationId || '—'}</td>
+    <td>{row.inTrunkgroupLabel || '—'}</td><td>{row.outTrunkgroupLabel || '—'}</td>
+    <td className="mono">{row.serverAddress || '—'}</td>
+    <td className="right">{row.latencyMs == null ? '—' : `${row.latencyMs} мс`}</td>
+    <td>{row.accountingStatus || '—'}</td>
+    <td className="right">{row.legCount || 'нет CDR'}</td>
+    <td><span className={`parse-status ${row.completeness}`}>
+      {row.completeness}</span></td>
+    <td className="mono">{row.acctSessionId || '—'}</td>
+    <td className="mono">{row.callContext || '—'}</td>
+  </tr>)}</tbody></table>
+}
+
+function AntifraudDrawer({ device, row, onClose }: {
+  device: Device
+  row: AntifraudRow
+  onClose: () => void
+}) {
+  const [timeline, setTimeline] = useState<TimelineRow[]>([])
+  useEffect(() => {
+    api<{ items: TimelineRow[] }>(
+      `/devices/${device.id}/antifraud/${row.transactionId}/timeline`,
+    ).then(({ items }) => setTimeline(items || []))
+  }, [device.id, row.transactionId])
+  return <div className="drawer">
+    <div className="drawer-header"><div><h3>AntiFraud lifecycle</h3>
+      <span className="mono">{row.transactionId}</span></div>
+      <button onClick={onClose}>×</button></div>
+    <div className="call-facts">
+      <span><small>Операция</small><strong>{row.requestType || '—'}</strong></span>
+      <span><small>Решение</small><strong>{decisionLabel(row.decision)}</strong></span>
+      <span><small>Причина</small><strong>{row.decisionReason || '—'}</strong></span>
+      <span><small>Q.850</small><strong>{row.q850Cause ?? '—'}</strong></span>
+      <span><small>RADIUS server</small><strong className="mono">{row.serverAddress || '—'}</strong></span>
+      <span><small>Latency / retries</small><strong>{row.latencyMs == null ? '—' : `${row.latencyMs} мс`} / {row.retries}</strong></span>
+      <span><small>Accounting</small><strong>{row.accountingStatus || '—'}</strong></span>
+      <span><small>CDR legs</small><strong>{row.legCount}</strong></span>
+      <span><small>Acct-Session-Id</small><strong className="mono">{row.acctSessionId || '—'}</strong></span>
+      <span><small>Call context</small><strong className="mono">{row.callContext || '—'}</strong></span>
+    </div>
+    <h4>Номера и маршруты</h4>
+    <div className="call-facts">
+      <span><small>A: вход / выход</small><strong className="mono">
+        {row.srcNumberIn || row.callingStationId || '—'} / {row.srcNumberOut || '—'}</strong></span>
+      <span><small>B: вход / выход</small><strong className="mono">
+        {row.dstNumberIn || row.calledStationId || '—'} / {row.dstNumberOut || '—'}</strong></span>
+      <span><small>Входящий trunk</small><strong>{row.inTrunkgroupLabel || '—'}</strong></span>
+      <span><small>Исходящий trunk</small><strong>{row.outTrunkgroupLabel || '—'}</strong></span>
+    </div>
+    <h4>CDR legs</h4>
+    {row.linkedRecordIds.length === 0
+      ? <p className="warning-text">CDR не найден. Lifecycle сохранён как orphan/incomplete
+        и будет автоматически сверён после поступления CDR.</p>
+      : <div className="timeline">{row.linkedRecordIds.map((recordId, index) =>
+        <div className="timeline-item" key={recordId}><i /><div>
+          <strong>Leg {index + 1}</strong><p className="mono">{recordId}</p>
+        </div></div>)}</div>}
+    <h4>Исходные события RADIUS</h4>
+    <div className="timeline">{timeline.length === 0 && <p>События пока не найдены.</p>}
+      {timeline.map((event) => <div className="timeline-item" key={event.eventId}>
+        <i /><div><time>{formatTime(event.receivedAt)}</time>
+          <strong>{event.component || 'RADIUS'} · {event.attributes.packet_code || 'fragment'}</strong>
+          <p>{event.message}</p></div>
+      </div>)}
+    </div>
+    <h4>Все собранные атрибуты</h4>
+    <pre className="raw-payload">{JSON.stringify(row.attributes || {}, null, 2)}</pre>
   </div>
 }
 
@@ -605,6 +763,16 @@ function formatTime(value?: string) {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
     minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3,
   }).format(new Date(value))
+}
+
+function decisionLabel(value: string) {
+  switch (value) {
+    case 'accept': return 'Пропущен'
+    case 'reject': return 'Заблокирован'
+    case 'timeout_fail_open': return 'Пропущен по timeout'
+    case 'informational': return 'Информационный'
+    default: return 'Ожидается / неизвестно'
+  }
 }
 
 createRoot(document.getElementById('root')!).render(<App />)

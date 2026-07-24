@@ -12,11 +12,17 @@ flowchart LR
     IngressSpool -->|Unix socket with ACK| Receiver[Collector receiver]
     Receiver --> Spool[App durable spool]
     Spool --> NATS[NATS JetStream]
-    NATS --> Parser[Versioned parser]
+    NATS --> Parser[SMG 3.410 parser v5]
+    Parser --> Functional[Typed functional events]
+    Functional --> Radius[RADIUS transaction assembler]
+    Radius --> Correlator[Evidence correlator]
     FTP --> Watcher[CDR watcher]
     Watcher --> MinIO[Raw archive]
-    Watcher --> Parser
+    Watcher --> CDR[Typed CDR legs]
+    CDR --> Correlator
     Parser --> CH[ClickHouse]
+    Radius --> CH
+    Correlator --> CH
     Parser --> PG[PostgreSQL]
     UI[React UI] --> API[Go API]
     API --> CH
@@ -28,7 +34,9 @@ flowchart LR
 - `collector-ingress`: тот же stateless image в роли `ingress`; host-network UDP receiver фиксирует реальный source IP/port в отдельном `ingress.db` и передаёт подтверждёнными batch через локальный Unix socket.
 - `collector`: image в роли `app`; HTTP API, device validation, Syslog worker и CDR watcher запускаются как независимые goroutines с общим graceful shutdown. Сервис остаётся в Docker-сетях `default` и `proxy`.
 - `PostgreSQL`: control plane — users/sessions, devices, ingest file ledger, export jobs и audit.
-- `ClickHouse`: append-oriented raw Syslog, CDR, RADIUS facts, call-event links и агрегаты.
+- `ClickHouse`: immutable raw Syslog/CDR, typed RADIUS fragments, собранные
+  AntiFraud lifecycle, exact call-event links, неоднозначные correlation candidates
+  и агрегаты.
 - `durable spool`: две независимые BoltDB-очереди. `ingress.db` удерживает datagram до ACK после device validation и записи в `syslog.db`; `syslog.db` удерживает envelope до JetStream publish. Файлы не открываются двумя процессами одновременно; повреждённые envelopes атомарно переносятся в quarantine bucket.
 - `NATS JetStream`: disk-backed work queue между spool publisher и parser; без time-based eviction, duplicate window 72 часа, лимит 20 GiB и `discard=new`, чтобы переполнение оставляло данные в local spool. Некорректные envelopes сохраняются в отдельном `SYSLOG_DLQ`.
 - `MinIO`: неизменяемые исходные CDR. Архивация Syslog в MinIO пока не реализована; canonical raw-копия хранится в ClickHouse.
@@ -40,6 +48,17 @@ flowchart LR
 UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в ingress process. После этого datagram удаляется из ingress spool только после ACK основного Collector, а из app spool — только после JetStream acknowledgement. Один `event_id` проходит через оба spool; повторная передача безопасно перезаписывает BoltDB key, а `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
+
+Parser version `smg-3.410-v5` разделяет envelope, component classification и typed
+attributes. После миграции background reprocess читает сохранённый raw payload и
+идемпотентно перестраивает только derived RADIUS/AntiFraud facts. Progress хранится в
+`syslog_reprocess_ledger`; исходный payload и CDR archive не изменяются.
+
+Stateful RADIUS assembler восстанавливается из `antifraud_transactions FINAL`, поэтому
+рестарт между request и reply не теряет уже собранные fragments. Автоматическая связь
+использует device-scoped Acct-Session-Id, exact SIP Call-ID/GCR и transaction call
+context. Номера/время сохраняются только в `call_correlation_candidates` и не создают
+ложную связь.
 
 ## Изоляция устройств
 

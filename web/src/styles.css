@@ -124,6 +124,12 @@ tbody tr { cursor: pointer; }
 .tag, .parse-status { display: inline-block; padding: 2px 5px; border-radius: 2px; background: #e9edf3; color: #475467; }
 .parse-status.parsed { color: #146c43; background: #e3f5eb; }
 .parse-status.partial { color: #975a00; background: #fff2d6; }
+.parse-status.complete { color: #146c43; background: #e3f5eb; }
+.parse-status.incomplete, .parse-status.fragment { color: #975a00; background: #fff2d6; }
+.decision { display: inline-block; padding: 2px 5px; border-radius: 2px; background: #eef2f7; color: #475467; white-space: nowrap; }
+.decision.accept { color: #146c43; background: #e3f5eb; }
+.decision.reject { color: #b42318; background: #feeceb; }
+.decision.timeout_fail_open { color: #975a00; background: #fff2d6; }
 .scroll-sentinel { min-width: 1180px; min-height: 30px; display: grid; place-items: center; color: var(--muted); font-size: 10px; }
 .table-empty { width: min(620px, calc(100% - 40px)); margin: 28px auto; padding: 18px; border: 1px solid var(--line);
   background: #f8fafc; text-align: center; }

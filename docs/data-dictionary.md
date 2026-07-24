@@ -1,5 +1,16 @@
 # Словарь данных SMG-1016M 3.410
 
+## Нормативные источники
+
+- Eltex «SMG-1016M/2016/3016/3116. Руководство пользователя, ПО 3.410.0», разделы
+  Syslog 4.1.22.3/4.2.2.52, CDR 4.1.8.1.2–4.1.8.1.5 и AntiFraud;
+- Eltex «Подключение шлюзов SMG к ИС АнтиФрод по протоколу RADIUS»;
+- официальный Eltex RADIUS dictionary.
+
+Документация описывает release 3.410.0, но не исчерпывающую грамматику debug-трасс
+конкретного build. Недокументированный payload не интерпретируется предположительно:
+он сохраняется и получает `unknown`/`partial`.
+
 ## CDR
 
 Парсер использует emitted field-name row. Если она отключена, применяется сохранённый в карточке устройства ordered profile. Исходная пара `имя → значение` всегда остаётся в `raw_fields`.
@@ -38,13 +49,18 @@
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Категории: `alarms`, `call_trace`, `sip`, `isup`, `q931`, `ip_connections`, `ip_modules`, `radius`, `config_history`, `system_journal`, `unknown`.
+Категории:
+
+- документированные trace switches: `alarms`, `call_trace`, `sip`, `isup`, `q931`,
+  `radius`, `rtp`, `h323`, `hardware`, `ip_modules`, `ivr`, `ip_network`;
+- отдельные журналы: `config_history`, `auth_log`, `system_journal`;
+- диагностические: `ip_connections`, `unknown`.
 
 Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
 
 Уровни Eltex `0–99` являются детализацией трассировки, а не RFC severity.
 
-## RADIUS AntiFraud
+## RADIUS и AntiFraud
 
 Операции:
 
@@ -52,8 +68,31 @@
 - `check_call`: верификация входящего вызова;
 - `Accounting-Request`: длительность и завершение.
 
-Сохраняются standard и vendor-specific attributes. Ключевые: Calling/Called-Station-Id, Acct-Session-Id, Event-Timestamp, Acct-Delay-Time, session duration, setup/connect/disconnect, disconnect cause, trunk labels, gateway IP, redirect/original numbers.
+Сохраняются standard и vendor-specific attributes. Ключевые:
 
-Классификатор распознаёт RADIUS и без буквального слова `RADIUS`: по пакетам `Access-Request/Accept/Reject`, `Accounting-Request/Response`, атрибутам `Acct-Session-Id`, `Calling/Called-Station-Id` и VSA `xpgk-*`. В режиме Custom вкладка «АнтиФрод» показывает полный поток категории `radius`, не только события с уже извлечённым `xpgk-request-type`.
+- `User-Name`, `Calling-Station-Id`, `Called-Station-Id`, `Acct-Session-Id`;
+- `NAS-Port`, `NAS-Port-Type`, `Framed-IP-Address`, `Event-Timestamp`,
+  `Acct-Delay-Time`, `Acct-Session-Time`;
+- `h323-conf-id`, `h323-call-origin`, `h323-call-type`, redirect/generic number;
+- `Eltex-AVPair`, `Cisco-AVPair`, включая `xpgk-request-type`,
+  `xpgk-src-number-in/out`, `xpgk-dst-number-in/out`,
+  `in-trunkgroup-label`, `out-trunkgroup-label`, `h323-remote-id`;
+- setup/connect/disconnect, Q.850 disconnect cause и адрес RADIUS-сервера, когда они
+  присутствуют в trace.
 
-Результаты `check_call`: Access-Accept продолжает, Access-Reject завершает, timeout документирован как fail-open после исчерпания серверов/попыток. `save_call` не должен блокировать вызов.
+`radius_events` — один разобранный фрагмент/пакет, ссылающийся на исходный
+`raw_event_id`. `antifraud_transactions` — собранный lifecycle одного call context:
+request/reply, операция, решение, сервер, latency/retry, accounting и список исходных
+event IDs. Раздел «RADIUS» показывает полный технический поток; «АнтиФрод» показывает
+только structured lifecycle с `xpgk-request-type` либо доказанным AntiFraud flow.
+
+Решения:
+
+- `check_call + Access-Accept` → `accept`, вызов продолжается;
+- `check_call + Access-Reject` → `reject`, вызов завершается с Q.850 cause 21;
+- timeout/недоступность всех серверов → `timeout_fail_open`, вызов продолжается;
+- `number`/`save_call` — indication/registration; ответ не является решением о
+  пропуске вызова и хранится как `informational`.
+
+`Accounting-Request` завершает lifecycle данными длительности/причины; ожидается
+`Accounting-Response`. Его отсутствие отмечается как неполный accounting.

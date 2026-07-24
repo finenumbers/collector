@@ -236,8 +236,14 @@ func TestClassifiesEverySMGFunctionalSection(t *testing.T) {
 		{"sip", `<14> <smg1016m> 08:10:54.1 [INFO] [C1] PBXIPC-SIP. INVITE received`, "sip"},
 		{"ip connections", `<14> <smg1016m> 08:10:54.1 [INFO] [C1] IP-CONN. RTP connection opened`, "ip_connections"},
 		{"ip modules", `<14> <smg1016m> 08:10:54.1 [INFO] SM-VP. DSP module ready`, "ip_modules"},
+		{"h323", `<14> <smg1016m> 08:10:54.1 [INFO] H323. H.225 session opened`, "h323"},
+		{"rtp", `<14> <smg1016m> 08:10:54.1 [INFO] RTP-CREATE. RTP stream allocated`, "rtp"},
+		{"hardware", `<14> <smg1016m> 08:10:54.1 [INFO] HW. E1 stream initialized`, "hardware"},
+		{"ivr", `<14> <smg1016m> 08:10:54.1 [INFO] IVR. Scenario started`, "ivr"},
+		{"ipnet", `<14> <smg1016m> 08:10:54.1 [INFO] IPNET. Interface state changed`, "ip_network"},
 		{"alarms", `<14> <smg1016m> 08:10:54.1 [WARN] ALARM. E1 link lost`, "alarms"},
 		{"configuration", `<14> <smg1016m> 08:10:54.1 [INFO] CONFIG. User command committed`, "config_history"},
+		{"auth log", `<14> <smg1016m> 08:10:54.1 [INFO] AUTH. Login accepted`, "auth_log"},
 		{"call trace", `<14> <smg1016m> 08:10:54.1 [INFO] [C0270AD] Media resources allocated`, "call_trace"},
 	}
 	for _, test := range tests {
@@ -250,6 +256,56 @@ func TestClassifiesEverySMGFunctionalSection(t *testing.T) {
 				t.Fatalf("got %q, want %q: %#v", event.Category, test.category, event)
 			}
 		})
+	}
+}
+
+func TestRadiusV5ExtractsDocumentedLifecycleFields(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "5.227.161.181", SourcePort: 10003,
+		Payload: []byte(`<14> <smg1016m> 08:10:54.784750 [INFO] [C0270AD] RADIUS. ` +
+			`Access-Reject Request ID [157] server=10.0.0.8:1812 in 165 ms ` +
+			`Acct-Session-Id='session 42' Cisco-AVPair='xpgk-request-type=check_call' ` +
+			`Event-Timestamp=1784898654 Q.850=21`),
+	})
+	for key, want := range map[string]string{
+		"call_context":      "C0270AD",
+		"packet_code":       "access-reject",
+		"packet_direction":  "response",
+		"packet_identifier": "157",
+		"server_address":    "10.0.0.8:1812",
+		"latency_ms":        "165",
+		"acct_session_id":   "session 42",
+		"xpgk_request_type": "check_call",
+		"decision":          "reject",
+		"q850_cause":        "21",
+	} {
+		if got := event.Attributes[key]; got != want {
+			t.Errorf("%s=%q, want %q; all=%#v", key, got, want, event.Attributes)
+		}
+	}
+}
+
+func TestSIPCiscoAVPairIsNotMisclassifiedAsRadius(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "5.227.161.181",
+		Payload: []byte(`<14> <smg1016m> 08:10:54.1 [INFO] [C1] SIP. ` +
+			`Header Cisco-AVPair='diagnostic=value' in INVITE`),
+	})
+	if event.Category != "sip" {
+		t.Fatalf("got %q, want sip: %#v", event.Category, event)
+	}
+}
+
+func TestConfigurationUserNameIsNotMisclassifiedAsRadius(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "5.227.161.181",
+		Payload:  []byte(`<14> <smg1016m> 08:10:54.1 [INFO] CONFIG. User-Name changed`),
+	})
+	if event.Category != "config_history" {
+		t.Fatalf("got %q, want config_history: %#v", event.Category, event)
 	}
 }
 

@@ -10,16 +10,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/google/uuid"
 )
 
-const SyslogParserVersion = "smg-3.410-v4"
+const SyslogParserVersion = "smg-3.410-v5"
 
 type Client struct {
-	Conn clickhouse.Conn
+	Conn            clickhouse.Conn
+	antifraudMu     sync.Mutex
+	antifraudActive map[uuid.UUID]*AntifraudTransaction
 }
 
 type SyslogEvent struct {
@@ -69,12 +72,16 @@ type TimelineRow struct {
 }
 
 type DeviceStats struct {
-	Calls24h       uint64  `json:"calls24h"`
-	FailedCalls24h uint64  `json:"failedCalls24h"`
-	AverageTalkMS  float64 `json:"averageTalkMs"`
-	Alarms24h      uint64  `json:"alarms24h"`
-	Radius24h      uint64  `json:"radius24h"`
-	Unknown24h     uint64  `json:"unknown24h"`
+	Calls24h               uint64  `json:"calls24h"`
+	FailedCalls24h         uint64  `json:"failedCalls24h"`
+	AverageTalkMS          float64 `json:"averageTalkMs"`
+	Alarms24h              uint64  `json:"alarms24h"`
+	Radius24h              uint64  `json:"radius24h"`
+	Unknown24h             uint64  `json:"unknown24h"`
+	Antifraud24h           uint64  `json:"antifraud24h"`
+	AntifraudRejected24h   uint64  `json:"antifraudRejected24h"`
+	AntifraudIncomplete24h uint64  `json:"antifraudIncomplete24h"`
+	UnlinkedCalls24h       uint64  `json:"unlinkedCalls24h"`
 }
 
 type SyslogBreakdownRow struct {
@@ -88,8 +95,15 @@ type SyslogBreakdownRow struct {
 }
 
 type SyslogDiagnostics struct {
-	Breakdown         []SyslogBreakdownRow `json:"breakdown"`
-	AppliedMigrations []string             `json:"appliedMigrations"`
+	Breakdown           []SyslogBreakdownRow `json:"breakdown"`
+	AppliedMigrations   []string             `json:"appliedMigrations"`
+	RawEvents24h        uint64               `json:"rawEvents24h"`
+	Classified24h       uint64               `json:"classified24h"`
+	ReprocessedV5       uint64               `json:"reprocessedV5"`
+	ReprocessRemaining  uint64               `json:"reprocessRemaining"`
+	AntifraudComplete   uint64               `json:"antifraudComplete"`
+	AntifraudIncomplete uint64               `json:"antifraudIncomplete"`
+	AntifraudOrphan     uint64               `json:"antifraudOrphan"`
 }
 
 type CallRow struct {
@@ -134,6 +148,12 @@ type CDRRecord struct {
 	IncomingDescription, OutgoingDescription   string
 	IncomingCgPN, OutgoingCgPN                 string
 	IncomingCdPN, OutgoingCdPN                 string
+	IncomingRedirectingNumber                  string
+	OutgoingRedirectingNumber                  string
+	IncomingNumplan, OutgoingNumplan           string
+	CallingNAI, CalledNAI                      string
+	IncomingE1Stream, IncomingE1Channel        string
+	OutgoingE1Stream, OutgoingE1Channel        string
 	IncomingSIPCallID, OutgoingSIPCallID       string
 	IncomingSS7CIC, OutgoingSS7CIC             *uint32
 	RadiusSessionID, RadiusSessionIDNormalized string
@@ -157,7 +177,7 @@ func Open(addr, database, username, password string) (*Client, error) {
 	if err := conn.Ping(ctx); err != nil {
 		return nil, err
 	}
-	return &Client{Conn: conn}, nil
+	return &Client{Conn: conn, antifraudActive: make(map[uuid.UUID]*AntifraudTransaction)}, nil
 }
 
 func (c *Client) Migrate(ctx context.Context, directory string) error {
@@ -241,7 +261,16 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 	if len(records) == 0 {
 		return nil
 	}
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_records`)
+	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_records
+		(record_id,device_id,file_id,row_number,ingested_at,sequence_number,boot_epoch,sequence,
+		 setup_time,connect_time,disconnect_time,duration_ms,release_cause,release_info,
+		 release_side,incoming_ip,outgoing_ip,incoming_type,outgoing_type,incoming_description,
+		 outgoing_description,incoming_cgpn,outgoing_cgpn,incoming_cdpn,outgoing_cdpn,
+		 incoming_redirecting_number,outgoing_redirecting_number,incoming_numplan,outgoing_numplan,
+		 calling_nai,called_nai,incoming_e1_stream,incoming_e1_channel,outgoing_e1_stream,
+		 outgoing_e1_channel,incoming_sip_call_id,outgoing_sip_call_id,incoming_ss7_cic,
+		 outgoing_ss7_cic,radius_session_id,radius_session_id_normalized,global_callref,
+		 unique_tag,transfer_mark,rejecting_radius_server,raw_fields)`)
 	if err != nil {
 		return err
 	}
@@ -253,8 +282,12 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 			record.ReleaseInfo, record.ReleaseSide, record.IncomingIP, record.OutgoingIP,
 			record.IncomingType, record.OutgoingType, record.IncomingDescription,
 			record.OutgoingDescription, record.IncomingCgPN, record.OutgoingCgPN,
-			record.IncomingCdPN, record.OutgoingCdPN, record.IncomingSIPCallID,
-			record.OutgoingSIPCallID, record.IncomingSS7CIC, record.OutgoingSS7CIC,
+			record.IncomingCdPN, record.OutgoingCdPN, record.IncomingRedirectingNumber,
+			record.OutgoingRedirectingNumber, record.IncomingNumplan, record.OutgoingNumplan,
+			record.CallingNAI, record.CalledNAI, record.IncomingE1Stream,
+			record.IncomingE1Channel, record.OutgoingE1Stream, record.OutgoingE1Channel,
+			record.IncomingSIPCallID, record.OutgoingSIPCallID,
+			record.IncomingSS7CIC, record.OutgoingSS7CIC,
 			record.RadiusSessionID, record.RadiusSessionIDNormalized, record.GlobalCallref,
 			record.UniqueTag, record.TransferMark, record.RejectingRadiusServer, record.RawFields,
 		); err != nil {
@@ -265,65 +298,45 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 		return err
 	}
 	for _, record := range records {
+		if err := c.correlateCDRExactEvidence(ctx, record); err != nil {
+			return err
+		}
 		if record.RadiusSessionIDNormalized == "" {
 			continue
 		}
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
+			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,?,event_id,'exact_acct_session',toFloat32(1.0),
-				map('acct_session_id',acct_session_id_normalized),'smg-3.410-v1',now64(3)
+				map('acct_session_id',acct_session_id_normalized),'smg-3.410-v5',now64(3)
 			FROM collector.radius_events
 			WHERE device_id=? AND acct_session_id_normalized=?`,
 			record.RecordID, record.DeviceID, record.RadiusSessionIDNormalized); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func (c *Client) InsertRadiusAndCorrelate(ctx context.Context, event SyslogEvent) error {
-	sessionID := event.Attributes["acct_session_id"]
-	normalized := strings.ToLower(strings.Join(strings.Fields(sessionID), ""))
-	if normalized == "" {
-		return nil
-	}
-	message := strings.ToLower(event.Message)
-	packetCode := "unknown"
-	result := ""
-	for _, candidate := range []string{"access-request", "access-accept", "access-reject", "accounting-request", "accounting-response"} {
-		if strings.Contains(message, candidate) {
-			packetCode = candidate
-			break
+		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
+			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
+			SELECT ?,?,arrayJoin(raw_event_ids),'antifraud_transaction',toFloat32(1.0),
+				map('acct_session_id',acct_session_id_normalized),'smg-3.410-v5',now64(3)
+			FROM collector.antifraud_transactions FINAL
+			WHERE device_id=? AND acct_session_id_normalized=?`,
+			record.DeviceID, record.RecordID, record.DeviceID,
+			record.RadiusSessionIDNormalized); err != nil {
+			return err
+		}
+		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
+			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
+			SELECT ?,?,e.event_id,'call_context_transaction',toFloat32(0.98),
+				map('call_context',t.call_context),'smg-3.410-v5',now64(3)
+			FROM collector.antifraud_transactions AS t FINAL
+			CROSS JOIN collector.raw_syslog e
+			WHERE t.device_id=? AND t.acct_session_id_normalized=? AND t.call_context!=''
+				AND e.device_id=t.device_id AND e.attributes['call_context']=t.call_context`,
+			record.DeviceID, record.RecordID, record.DeviceID,
+			record.RadiusSessionIDNormalized); err != nil {
+			return err
 		}
 	}
-	switch {
-	case strings.Contains(message, "access-accept"):
-		result = "accept"
-	case strings.Contains(message, "access-reject"):
-		result = "reject"
-	case strings.Contains(message, "timeout"):
-		result = "timeout"
-	}
-	requestType := event.Attributes["xpgk_request_type"]
-	occurredAt := event.ReceivedAt
-	if event.EventTime != nil {
-		occurredAt = *event.EventTime
-	}
-	if err := c.Conn.Exec(ctx, `INSERT INTO collector.radius_events
-		(event_id,device_id,occurred_at,direction,packet_code,packet_identifier,request_type,
-		 server_address,acct_session_id,acct_session_id_normalized,calling_station_id,
-		 called_station_id,result,retry,latency_ms,attributes,raw_event_id)
-		VALUES(?,?,?,'unknown',?,NULL,?,'',?,?,?,?,?,0,NULL,?,?)`,
-		event.EventID, event.DeviceID, occurredAt, packetCode, requestType, sessionID, normalized,
-		event.Attributes["calling_station_id"], event.Attributes["called_station_id"], result,
-		event.Attributes, event.EventID); err != nil {
-		return err
-	}
-	return c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
-		SELECT device_id,record_id,?,'exact_acct_session',toFloat32(1.0),
-			map('acct_session_id',radius_session_id_normalized),'smg-3.410-v1',now64(3)
-		FROM collector.cdr_records
-		WHERE device_id=? AND radius_session_id_normalized=?`,
-		event.EventID, event.DeviceID, normalized)
+	return nil
 }
 
 func (c *Client) ListEvents(ctx context.Context, deviceID uuid.UUID, category, search string, limit uint64) ([]EventRow, error) {
@@ -342,8 +355,6 @@ func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, categor
 		switch category {
 		case "unknown":
 			query += ` AND category='unknown'`
-		case "antifraud":
-			query += ` AND category='radius'`
 		default:
 			query += ` AND category=?`
 			args = append(args, category)
@@ -442,10 +453,15 @@ func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search s
 
 func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID) ([]TimelineRow, error) {
 	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,e.category,e.component,e.message,
-		e.payload,e.parse_status,e.attributes,l.method,l.confidence
-		FROM collector.call_event_links l
+		e.payload,e.parse_status,e.attributes,l.method,l.max_confidence
+		FROM (
+			SELECT device_id,event_id,argMax(method,confidence) AS method,
+				max(confidence) AS max_confidence
+			FROM collector.call_event_links
+			WHERE device_id=? AND cdr_record_id=?
+			GROUP BY device_id,event_id
+		) l
 		INNER JOIN collector.raw_syslog e ON e.device_id=l.device_id AND e.event_id=l.event_id
-		WHERE l.device_id=? AND l.cdr_record_id=?
 		ORDER BY e.received_at`, deviceID, recordID)
 	if err != nil {
 		return nil, err
@@ -477,6 +493,28 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 		countIf(category='unknown')
 		FROM collector.raw_syslog WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR`, deviceID).
 		Scan(&result.Alarms24h, &result.Radius24h, &result.Unknown24h)
+	if err != nil {
+		return DeviceStats{}, err
+	}
+	err = c.Conn.QueryRow(ctx, `SELECT count(),countIf(decision='reject'),
+		countIf(completeness!='complete')
+		FROM collector.antifraud_transactions FINAL
+		WHERE device_id=? AND is_antifraud=1
+			AND last_event_at>=now()-INTERVAL 24 HOUR`, deviceID).
+		Scan(&result.Antifraud24h, &result.AntifraudRejected24h,
+			&result.AntifraudIncomplete24h)
+	if err != nil {
+		return DeviceStats{}, err
+	}
+	err = c.Conn.QueryRow(ctx, `SELECT count()
+		FROM collector.cdr_records c
+		LEFT JOIN (
+			SELECT DISTINCT device_id,cdr_record_id
+			FROM collector.call_event_links
+		) l ON l.device_id=c.device_id AND l.cdr_record_id=c.record_id
+		WHERE c.device_id=? AND coalesce(c.setup_time,c.ingested_at)>=now()-INTERVAL 24 HOUR
+			AND l.cdr_record_id=toUUID('00000000-0000-0000-0000-000000000000')`, deviceID).
+		Scan(&result.UnlinkedCalls24h)
 	return result, err
 }
 
@@ -517,5 +555,42 @@ func (c *Client) SyslogDiagnostics(ctx context.Context, deviceID uuid.UUID) (Sys
 		}
 		result.AppliedMigrations = append(result.AppliedMigrations, version)
 	}
-	return result, migrationRows.Err()
+	if err := migrationRows.Err(); err != nil {
+		return SyslogDiagnostics{}, err
+	}
+	if err := c.Conn.QueryRow(ctx, `SELECT countDistinct(event_id),
+		countDistinctIf(event_id,category!='unknown')
+		FROM collector.raw_syslog
+		WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR`, deviceID).
+		Scan(&result.RawEvents24h, &result.Classified24h); err != nil {
+		return SyslogDiagnostics{}, err
+	}
+	if err := c.Conn.QueryRow(ctx, `SELECT
+		(SELECT countDistinct(r.event_id)
+		 FROM collector.raw_syslog r
+		 INNER JOIN collector.syslog_reprocess_ledger l ON l.event_id=r.event_id
+		 WHERE r.device_id=? AND l.parser_version=?),
+		(SELECT countDistinct(r.event_id)
+		 FROM collector.raw_syslog r
+		 LEFT JOIN collector.syslog_reprocess_ledger l
+			ON l.event_id=r.event_id AND l.parser_version=?
+		 WHERE r.device_id=?
+			AND l.event_id=toUUID('00000000-0000-0000-0000-000000000000'))`,
+		deviceID, SyslogParserVersion, SyslogParserVersion, deviceID).
+		Scan(&result.ReprocessedV5, &result.ReprocessRemaining); err != nil {
+		return SyslogDiagnostics{}, err
+	}
+	if err := c.Conn.QueryRow(ctx, `SELECT countIf(completeness='complete'),
+		countIf(completeness!='complete'),
+		countIf(acct_session_id_normalized='' OR acct_session_id_normalized NOT IN (
+			SELECT radius_session_id_normalized FROM collector.cdr_records
+			WHERE device_id=? AND radius_session_id_normalized!=''
+		))
+		FROM collector.antifraud_transactions FINAL
+		WHERE device_id=? AND is_antifraud=1`, deviceID, deviceID).
+		Scan(&result.AntifraudComplete, &result.AntifraudIncomplete,
+			&result.AntifraudOrphan); err != nil {
+		return SyslogDiagnostics{}, err
+	}
+	return result, nil
 }

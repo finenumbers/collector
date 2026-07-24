@@ -36,7 +36,16 @@ var (
 	componentPattern  = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_./ -]{0,127}?)(?::|\.)\s*(.*)$`)
 	radiusPair        = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
 	radiusSession     = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
-	radiusVSAPair     = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id)=([^'"\s]+)`)
+	radiusVSAPair     = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
+	radiusPacket      = regexp.MustCompile(`(?i)\b(Access-Request|Access-Accept|Access-Reject|Accounting-Request|Accounting-Response)\b`)
+	radiusAttribute   = regexp.MustCompile(`(?i)^(?:User-Name|User-Password|Calling-Station-Id|Called-Station-Id|Acct-Session-Id|NAS-Port|NAS-Port-Type|Framed-IP-Address|Event-Timestamp|Acct-Delay-Time|Acct-Session-Time|Cisco-AVPair|Eltex-AVPair|h323-[A-Za-z0-9-]+)\s*(?:\([0-9]+\))?\s*[=:]`)
+	radiusRequestID   = regexp.MustCompile(`(?i)\b(?:Request|Packet)\s+ID\s*\[?([0-9]{1,3})\]?`)
+	radiusServer      = regexp.MustCompile(`(?i)\b(?:server|address)\s*[=:]?\s*((?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?)`)
+	radiusLatency     = regexp.MustCompile(`(?i)\b(?:in|latency\s*[=:]?)\s*([0-9]+)\s*ms\b`)
+	radiusRetry       = regexp.MustCompile(`(?i)\bretr(?:y|ies)\s*[=:]?\s*([0-9]+)\b`)
+	q850CausePattern  = regexp.MustCompile(`(?i)\b(?:Q\.?850|disconnect-cause|release-cause)\s*[=:]\s*([0-9]{1,3})`)
+	sipCallIDPattern  = regexp.MustCompile(`(?i)\bCall-ID\s*[=:]\s*["']?([^'"\s,;]+)`)
+	globalCallPattern = regexp.MustCompile(`(?i)\b(?:Global[- ]Callref|GCR)\s*[=:]\s*["']?([^'"\s,;]+)`)
 	systemAppPattern  = regexp.MustCompile(`(?i)\b(?:webapp|webspp)(?:\[[0-9]+\])?:\s*(?:WEBS|SEC)\s*:`)
 	systemBodyPattern = regexp.MustCompile(`(?i)^\s*(?:WEBS|SEC)\s*:`)
 	alarmPattern      = regexp.MustCompile(`(?i)(?:^|[\s:;,])ALARMS?(?:$|[\s:;,])|АВАР`)
@@ -304,12 +313,10 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 		}
 		for _, item := range parsed {
 			event := item.event
-			if event.Category == "radius" {
-				if err := client.InsertRadiusAndCorrelate(ctx, event); err != nil {
-					slog.Error("RADIUS correlation failed", "event", event.EventID, "error", err)
-					_ = item.message.NakWithDelay(5 * time.Second)
-					continue
-				}
+			if err := client.ProcessSyslogDerived(ctx, event); err != nil {
+				slog.Error("Syslog derived processing failed", "event", event.EventID, "error", err)
+				_ = item.message.NakWithDelay(5 * time.Second)
+				continue
 			}
 			_ = item.message.Ack()
 		}
@@ -370,67 +377,64 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 	}
 	event.Category = classify(event.Component, event.Attributes["application"], event.Message, string(raw.Payload))
 	if event.Category == "radius" {
-		for _, match := range radiusPair.FindAllStringSubmatch(text, -1) {
-			value := match[2]
-			if value == "" {
-				value = match[3]
-			}
-			if value == "" {
-				value = match[4]
-			}
-			event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(value)
-		}
-		if match := radiusSession.FindStringSubmatch(text); match != nil {
-			event.Attributes["acct_session_id"] = strings.TrimSpace(match[1])
-		}
-		for _, match := range radiusVSAPair.FindAllStringSubmatch(text, -1) {
-			event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(match[2])
-		}
+		extractRadiusAttributes(text, &event)
 	}
+	extractProtocolAttributes(text, &event)
 	return event
 }
 
 func classify(component, application, message, payload string) string {
 	upperComponent := strings.ToUpper(strings.TrimSpace(component))
 	upperApplication := strings.ToUpper(strings.TrimSpace(application))
+	upperMessage := strings.ToUpper(message)
 	upper := strings.ToUpper(strings.Join([]string{component, application, message, payload}, " "))
+	isRadiusComponent := upperComponent == "RADIUS" || upperComponent == "RC" ||
+		strings.Contains(upperComponent, "RADIUS")
+	isSIPComponent := upperComponent == "SIP" || upperComponent == "SIPT" ||
+		strings.Contains(upperComponent, "PBXIPC-SIP")
 	switch {
 	case upperApplication == "WEBAPP" || upperApplication == "WEBSPP" ||
 		upperApplication == "WEBS" || upperApplication == "SEC" ||
 		upperComponent == "WEBS" || upperComponent == "SEC" ||
 		systemAppPattern.MatchString(payload) || systemBodyPattern.MatchString(message):
 		return "system_journal"
-	case strings.Contains(upper, "RADIUS") ||
-		strings.Contains(upper, "ANTIFRAUD") || strings.Contains(upper, "ACCS-REQUEST") ||
-		strings.Contains(upper, "ACCESS-REQUEST") || strings.Contains(upper, "ACCESS-ACCEPT") ||
-		strings.Contains(upper, "ACCESS-REJECT") || strings.Contains(upper, "ACCOUNTING-REQUEST") ||
-		strings.Contains(upper, "ACCOUNTING-RESPONSE") || strings.Contains(upper, "ACCT-SESSION-ID") ||
-		strings.Contains(upper, "CALLING-STATION-ID") || strings.Contains(upper, "CALLED-STATION-ID") ||
-		strings.Contains(upper, "XPGK-") || strings.Contains(upper, "CISCO-AVPAIR") ||
-		strings.Contains(upper, "ELTEX-AVPAIR") || strings.Contains(upper, "H323-CONF-ID") ||
-		strings.Contains(upper, "H323-CREDIT-TIME") || strings.Contains(upper, "H323-CALL-ORIGIN") ||
-		strings.Contains(upper, "H323-CALL-TYPE") || strings.Contains(upper, "NAS-PORT-ID") ||
-		strings.Contains(upper, "NAS-PORT-TYPE") || strings.Contains(upper, "FRAMED-IP-ADDRESS") ||
-		strings.Contains(upper, "USER-NAME") || strings.Contains(upper, "PASSWORD") ||
-		upperComponent == "RC":
+	case isRadiusComponent || radiusPacket.MatchString(message) ||
+		strings.Contains(upperMessage, "ACCS-REQUEST") ||
+		strings.Contains(upperMessage, "ACCT-SESSION-ID") ||
+		strings.Contains(upperMessage, "XPGK-") ||
+		(upperComponent == "" && radiusAttribute.MatchString(strings.TrimSpace(message))) ||
+		(!isSIPComponent && strings.Contains(upperMessage, "ANTIFRAUD")):
 		return "radius"
 	case strings.Contains(upper, "SS7") || strings.Contains(upper, "ISUP") ||
 		strings.Contains(upper, "IAM-") || strings.Contains(upper, "RLC-"):
 		return "isup"
 	case strings.Contains(upper, "Q.931") || strings.Contains(upper, "Q931") || strings.Contains(upper, "DSS1"):
 		return "q931"
-	case strings.Contains(upper, "SIP") || strings.Contains(upper, "INVITE") || strings.Contains(upper, "CALL-ID"):
+	case isSIPComponent || strings.Contains(upper, "SIP") ||
+		strings.Contains(upper, "INVITE") || strings.Contains(upper, "CALL-ID"):
 		return "sip"
-	case strings.Contains(upper, "IP-CONN") || strings.Contains(upper, "RTP") || strings.Contains(upper, "RTCP") || strings.Contains(upper, "CONN["):
+	case upperComponent == "H323" || strings.Contains(upperComponent, "H.323"):
+		return "h323"
+	case upperComponent == "RTP" || upperComponent == "RTCP" || upperComponent == "RTP-CREATE" ||
+		strings.Contains(upperMessage, "RTP SESSION") || strings.Contains(upperMessage, "RTP STREAM"):
+		return "rtp"
+	case upperComponent == "HW" || strings.Contains(upperComponent, "HARDWARE"):
+		return "hardware"
+	case strings.Contains(upper, "IP-CONN") || strings.Contains(upper, "CONN["):
 		return "ip_connections"
-	case strings.Contains(upper, "SM-VP") || strings.Contains(upper, "MSP"):
+	case strings.Contains(upperComponent, "SM-VP") || strings.Contains(upperComponent, "SMVP") ||
+		strings.Contains(upperComponent, "MSP"):
 		return "ip_modules"
+	case upperComponent == "IVR" || strings.HasPrefix(upperComponent, "IVR/"):
+		return "ivr"
+	case upperComponent == "IPNET" || strings.HasPrefix(upperComponent, "IPNET/"):
+		return "ip_network"
 	case upperComponent == "ALARM" || upperComponent == "ALARMS" || alarmPattern.MatchString(upper):
 		return "alarms"
 	case strings.Contains(upper, "CONFIG") || strings.Contains(upper, "COMMAND") || strings.Contains(upper, "USERLOG"):
 		return "config_history"
-	case strings.Contains(upper, "AUTH") || strings.Contains(upper, "LOGIN") || strings.Contains(upper, "LOGOUT"):
-		return "system_journal"
+	case strings.Contains(upper, "AUTHLOG") || upperComponent == "AUTH":
+		return "auth_log"
 	case strings.HasPrefix(eventCallContext(payload), "C") || callPattern.MatchString(upper):
 		return "call_trace"
 	case upperApplication != "":
@@ -438,6 +442,99 @@ func classify(component, application, message, payload string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func extractRadiusAttributes(text string, event *analytics.SyslogEvent) {
+	lowerText := strings.ToLower(text)
+	for _, match := range radiusPair.FindAllStringSubmatch(text, -1) {
+		value := firstNonEmpty(match[2], match[3], match[4])
+		event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(value)
+	}
+	if match := radiusSession.FindStringSubmatch(text); match != nil {
+		event.Attributes["acct_session_id"] = strings.TrimSpace(match[1])
+	}
+	for _, match := range radiusVSAPair.FindAllStringSubmatch(text, -1) {
+		event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(match[2])
+	}
+	if match := radiusPacket.FindStringSubmatch(text); match != nil {
+		packetCode := strings.ToLower(match[1])
+		event.Attributes["packet_code"] = packetCode
+		if strings.HasSuffix(packetCode, "request") {
+			event.Attributes["packet_direction"] = "request"
+		} else {
+			event.Attributes["packet_direction"] = "response"
+		}
+	}
+	if event.Attributes["packet_code"] == "" {
+		switch {
+		case strings.Contains(lowerText, "radius server rejected"):
+			event.Attributes["packet_code"] = "access-reject"
+			event.Attributes["packet_direction"] = "response"
+		case strings.Contains(lowerText, "got valid reply for accs"):
+			event.Attributes["packet_code"] = "access-response"
+			event.Attributes["packet_direction"] = "response"
+		case strings.Contains(lowerText, "process queue"):
+			event.Attributes["packet_direction"] = "request"
+		}
+	}
+	if match := radiusRequestID.FindStringSubmatch(text); match != nil {
+		event.Attributes["packet_identifier"] = match[1]
+	}
+	if match := radiusServer.FindStringSubmatch(text); match != nil {
+		event.Attributes["server_address"] = match[1]
+	}
+	if match := radiusLatency.FindStringSubmatch(text); match != nil {
+		event.Attributes["latency_ms"] = match[1]
+	}
+	if match := radiusRetry.FindStringSubmatch(text); match != nil {
+		event.Attributes["retry"] = match[1]
+	}
+	requestType := strings.ToLower(event.Attributes["xpgk_request_type"])
+	if requestType == "check_call" || requestType == "save_call" || requestType == "number" {
+		event.Attributes["is_antifraud"] = "true"
+	}
+	packetCode := event.Attributes["packet_code"]
+	switch {
+	case requestType == "check_call" && packetCode == "access-accept":
+		event.Attributes["decision"] = "accept"
+	case requestType == "check_call" && packetCode == "access-reject":
+		event.Attributes["decision"] = "reject"
+	case strings.Contains(lowerText, "timeout"):
+		event.Attributes["decision"] = "timeout_fail_open"
+	case (requestType == "number" || requestType == "save_call") &&
+		(packetCode == "access-accept" || packetCode == "access-reject"):
+		event.Attributes["decision"] = "informational"
+	}
+	if strings.Contains(lowerText, "radius server rejected") {
+		event.Attributes["result"] = "reject"
+	}
+	if packetCode == "accounting-request" {
+		event.Attributes["accounting_status"] = "request"
+	}
+	if packetCode == "accounting-response" {
+		event.Attributes["accounting_status"] = "complete"
+	}
+}
+
+func extractProtocolAttributes(text string, event *analytics.SyslogEvent) {
+	if match := q850CausePattern.FindStringSubmatch(text); match != nil {
+		event.Attributes["q850_cause"] = match[1]
+	}
+	if match := sipCallIDPattern.FindStringSubmatch(text); match != nil {
+		event.Attributes["sip_call_id"] = match[1]
+	}
+	if match := globalCallPattern.FindStringSubmatch(text); match != nil {
+		event.Attributes["global_callref"] = match[1]
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func parseEltexTrace(value string, received time.Time) (*time.Time, string, string, bool) {

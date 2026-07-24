@@ -74,7 +74,15 @@ Health endpoints:
 - `/health/ready` — PostgreSQL и ClickHouse.
 - `http://127.0.0.1:18081` на Docker-хосте — source-preserving ingress.
 
-В административной строке «Диагностика Syslog» отдельно показываются ingress accepted/handoff/spool и app accepted/rejected. Обязательные алерты: container restart, оба local spool depth/size (`ingress.db`, `syslog.db`), handoff errors, NATS lag/storage, unknown source Syslog, unknown parser rate, CDR ingest age, disk >75/85%, ClickHouse insert errors, SFTPGo unavailable, backup age.
+В административной строке «Диагностика Syslog» отдельно показываются ingress
+accepted/handoff/spool, app accepted/rejected, classified/raw coverage, progress
+historical reprocess и AntiFraud complete/incomplete/orphan. После обновления на parser
+v5 `reprocessRemaining` должен монотонно дойти до нуля; Collector можно перезапускать,
+ledger продолжит с необработанных event IDs. Обязательные алерты: container restart,
+оба local spool depth/size (`ingress.db`, `syslog.db`), handoff errors, NATS lag/storage,
+unknown source Syslog, unknown parser rate, persistent reprocess backlog, AntiFraud
+orphan/incomplete rate, CDR ingest age, disk >75/85%, ClickHouse insert errors,
+SFTPGo unavailable, backup age.
 
 ## Инциденты
 

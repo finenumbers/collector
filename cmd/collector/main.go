@@ -130,6 +130,12 @@ func main() {
 		}
 		errs <- watcher.Run(ctx)
 	}()
+	go func() {
+		if err := ingest.RunHistoricalSyslogReprocess(ctx, warehouse); err != nil &&
+			!errors.Is(err, context.Canceled) {
+			slog.Error("historical Syslog reprocess failed", "error", err)
+		}
+	}()
 
 	select {
 	case <-ctx.Done():

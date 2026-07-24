@@ -128,8 +128,13 @@ func (p CDRParser) mapRecord(row uint64, fields map[string]string) (analytics.CD
 		sequence, _ = strconv.ParseUint(match[2], 10, 64)
 	}
 	radiusSessionID := fields["radius_accounting_session_id"]
+	recordIDKey := p.DeviceID.String() + "|" + sequenceNumber
+	if sequenceNumber == "" {
+		recordIDKey = p.DeviceID.String() + "|" + p.FileID.String() + "|" + strconv.FormatUint(row, 10)
+	}
 	return analytics.CDRRecord{
-		RecordID: uuid.New(), DeviceID: p.DeviceID, FileID: p.FileID, RowNumber: row,
+		RecordID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(recordIDKey)),
+		DeviceID: p.DeviceID, FileID: p.FileID, RowNumber: row,
 		IngestedAt: time.Now().UTC(), SequenceNumber: sequenceNumber, BootEpoch: bootEpoch,
 		Sequence: sequence, SetupTime: setup, ConnectTime: connect, DisconnectTime: disconnect,
 		DurationMS: parseDuration(fields["duration"]), ReleaseCause: parseUint16(fields["release_cause"]),
@@ -139,6 +144,12 @@ func (p CDRParser) mapRecord(row uint64, fields map[string]string) (analytics.CD
 		IncomingDescription: fields["incoming_description"], OutgoingDescription: fields["outgoing_description"],
 		IncomingCgPN: fields["incoming_cgpn"], OutgoingCgPN: fields["outgoing_cgpn"],
 		IncomingCdPN: fields["incoming_cdpn"], OutgoingCdPN: fields["outgoing_cdpn"],
+		IncomingRedirectingNumber: fields["incoming_redirecting_number"],
+		OutgoingRedirectingNumber: fields["outgoing_redirecting_number"],
+		IncomingNumplan:           fields["incoming_numplan"], OutgoingNumplan: fields["outgoing_numplan"],
+		CallingNAI: fields["calling_nai"], CalledNAI: fields["called_nai"],
+		IncomingE1Stream: fields["incoming_e1_stream"], IncomingE1Channel: fields["incoming_e1_channel"],
+		OutgoingE1Stream: fields["outgoing_e1_stream"], OutgoingE1Channel: fields["outgoing_e1_channel"],
 		IncomingSIPCallID: fields["incoming_sip_call_id"], OutgoingSIPCallID: fields["outgoing_sip_call_id"],
 		IncomingSS7CIC: parseUint32(fields["incoming_ss7_cic"]), OutgoingSS7CIC: parseUint32(fields["outgoing_ss7_cic"]),
 		RadiusSessionID: radiusSessionID, RadiusSessionIDNormalized: normalizeSessionID(radiusSessionID),

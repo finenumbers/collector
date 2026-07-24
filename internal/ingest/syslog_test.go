@@ -866,3 +866,110 @@ func TestContinuationAssemblerKeepsSeparateCallContexts(t *testing.T) {
 		t.Fatalf("call context C000001 linked to wrong parent: %#v", events[2].Attributes)
 	}
 }
+
+func TestUnrecognizedCorpus3410ISUPHasNoUnknown(t *testing.T) {
+	path := filepath.Join("testdata", "syslog_unrecognized_3410_isup.txt")
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open corpus: %v", err)
+	}
+	defer file.Close()
+	deviceID := uuid.New()
+	received := time.Date(2026, 7, 25, 0, 6, 45, 0, time.UTC)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var events []analytics.SyslogEvent
+	for scanner.Scan() {
+		payload := strings.TrimSpace(scanner.Text())
+		if payload == "" {
+			continue
+		}
+		events = append(events, ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID,
+			ReceivedAt: received.Add(time.Duration(len(events)) * time.Millisecond),
+			SourceIP:   "5.227.161.181", SourcePort: 514, Payload: []byte(payload),
+		}))
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan corpus: %v", err)
+	}
+	if len(events) != 1627 {
+		t.Fatalf("corpus size = %d, want 1627", len(events))
+	}
+	seed := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: received.Add(-time.Millisecond),
+		SourceIP: "5.227.161.181",
+		Payload:  []byte(`<14> <smg1016m>  00:06:45.000000  [INFO] SS7/ISUP. IAM CIC=1`),
+	})
+	batch := append([]analytics.SyslogEvent{seed}, events...)
+	NewContinuationAssembler().Assemble(batch)
+	for i, event := range batch[1:] {
+		if event.Category == "unknown" {
+			t.Fatalf("corpus line %d still unknown: message=%q attrs=%#v",
+				i+1, event.Message, event.Attributes)
+		}
+		if event.Category != "isup" {
+			t.Fatalf("corpus line %d category=%q want isup message=%q",
+				i+1, event.Category, event.Message)
+		}
+	}
+}
+
+func TestDottedHexAndNoOptionalParamsClassifyAsISUP(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 25, 0, 6, 45, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  00:06:45.000000  [INFO] SS7/ISUP. Release`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  00:06:45.601491  [INFO] 0B.C5.35.43.20.10.41.00.17.01.01.1E.`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(2 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  00:06:45.601859  [INFO] 		[No optional params]`),
+		}),
+	}
+	if events[1].Category != "isup" || events[1].Attributes["fragment_kind"] != "dotted_hex" {
+		t.Fatalf("dotted hex not isup/dotted_hex: %#v", events[1])
+	}
+	if events[2].Category != "isup" || events[2].Attributes["fragment_kind"] != "isup_optional" {
+		t.Fatalf("optional params not isup/isup_optional: %#v", events[2])
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[1].Attributes["parent_event_id"] != events[0].EventID.String() {
+		t.Fatalf("dotted_hex did not link to ISUP parent: %#v", events[1].Attributes)
+	}
+	if events[2].Attributes["parent_event_id"] == "" || events[2].Category != "isup" {
+		t.Fatalf("isup_optional did not stay under ISUP: %#v", events[2])
+	}
+}
+
+func TestDottedHexDoesNotInheritRADIUS(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 25, 0, 6, 45, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  00:06:45.000000  [INFO] RADIUS. Access-Request`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(10 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  00:06:45.010000  [INFO] 0B.C5.35.43.20.10.41.00.17.01.01.1E.`),
+		}),
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[1].Category != "isup" {
+		t.Fatalf("dotted hex category=%q want isup", events[1].Category)
+	}
+	if events[1].Attributes["parent_event_id"] != "" {
+		t.Fatalf("dotted hex must not inherit RADIUS parent: %#v", events[1].Attributes)
+	}
+}

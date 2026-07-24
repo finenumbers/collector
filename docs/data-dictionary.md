@@ -77,7 +77,7 @@ quarantine. Исходная пара `имя → значение` всегда
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Parser `smg-3.410-v11` (имя историческое; правила Syslog **общие** для схем прошивки
+Parser `smg-3.410-v12` (имя историческое; правила Syslog **общие** для схем прошивки
 `3.23.2` и `3.410`) использует **component-first** классификацию: `SIP` / `SIPT[…]` /
 `SIPT Proc` / `Port SIPT` / `PBXIPC-SIP` остаются в `sip` даже при тексте
 `IAM-`/`ISUP`/`SS7` (SIP-I/SIP-T). Keyword `ISUP`/`IAM-` применяется только когда
@@ -92,7 +92,8 @@ Envelope:
 
 Фрагменты SMG (отдельные UDP datagram’ы) помечаются `trace_continuation` +
 `fragment_kind` (`typed_hash`, `hash_detail`, `sdp`, `sdp_line`, `sdp_quote`, `codec`,
-`avp`, `hex`, `digest`, `rc_fragment`, `host_ip`, `indented`, `empty`).
+`avp`, `hex`, `dotted_hex`, `isup_optional`, `digest`, `rc_fragment`, `host_ip`,
+`indented`, `empty`).
 
 Диалект 3.410 (bare SDP без обёртки `##` 3.23.2):
 
@@ -100,12 +101,19 @@ Envelope:
 - обрывок `'` после `# SDP len (N): 'v=0` → `sip`, `fragment_kind=sdp_quote`;
 - `\t\t 95.163.183.222` (HostIPlist) → `sip`, `fragment_kind=host_ip`.
 
+Диалект 3.410 (SS7/ISUP PDU dump при включённой трассировке ISUP):
+
+- dotted-hex `XX.XX.XX.…` (≥4 октета) → `isup`, `fragment_kind=dotted_hex`
+  (**не** RADIUS continuous-hex);
+- `\t\t[No optional params]` → `isup`, `fragment_kind=isup_optional`.
+
 `ContinuationAssembler` индексирует parents по `device_id + call_context` и отдельные
-radius/sip burst без context. AVP/hex/digest наследуют RADIUS-родителя; `host_ip`,
-bare SDP, `# cause`/`# requestID`/`# SDP` без `[C…]` — SIP-родителя (`sipBurst`, ≤2s).
+radius/sip/isup burst без context. AVP/hex/digest наследуют RADIUS-родителя; `host_ip`,
+bare SDP, `# cause`/`# requestID`/`# SDP` без `[C…]` — SIP-родителя (`sipBurst`, ≤2s);
+`dotted_hex` / `isup_optional` — ISUP-родителя (`isupBurst`, ≤2s), без radius fallback.
 Raw payload не склеивается: 1 datagram = 1 event. UI группирует списки по
-`call_context` / `parent_event_id` и скрывает только `empty_body`/hex/digest
-(SDP-строки оффера **не** скрываются).
+`call_context` / `parent_event_id` и скрывает `empty_body`/hex/`dotted_hex`/digest
+(SDP-строки оффера и `isup_optional` **не** скрываются).
 
 Категории:
 

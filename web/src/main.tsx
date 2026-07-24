@@ -893,7 +893,7 @@ function isTechnicalFragment(row: EventRow): boolean {
   const attrs = row.attributes || {}
   if (attrs.empty_body === 'true') return true
   const kind = attrs.fragment_kind || ''
-  return kind === 'hex' || kind === 'digest' || kind === 'empty'
+  return kind === 'hex' || kind === 'dotted_hex' || kind === 'digest' || kind === 'empty'
 }
 
 function eventThreadKey(row: EventRow): string {

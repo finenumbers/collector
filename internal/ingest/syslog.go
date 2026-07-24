@@ -71,6 +71,9 @@ var (
 	sdpQuotePattern = regexp.MustCompile(`^'`)
 	configLinePat   = regexp.MustCompile(`(?i)^CONFIG:\s*(.*)$`)
 	siptProcPattern = regexp.MustCompile(`(?i)^SIPT\s+Proc\b`)
+	// 3.410 SS7/ISUP PDU dumps (dotted octets) and decode placeholders.
+	dottedHexPattern    = regexp.MustCompile(`(?i)^[0-9a-f]{2}(\.[0-9a-f]{2}){3,}\.?$`)
+	noOptionalParamsPat = regexp.MustCompile(`(?i)^\[No optional params\]$`)
 )
 
 var allowedComponents = map[string]struct{}{
@@ -105,6 +108,7 @@ type ContinuationAssembler struct {
 	byCallRadius map[string]continuationParent
 	radiusBurst  map[uuid.UUID]continuationParent
 	sipBurst     map[uuid.UUID]continuationParent
+	isupBurst    map[uuid.UUID]continuationParent
 }
 
 func NewContinuationAssembler() *ContinuationAssembler {
@@ -113,6 +117,7 @@ func NewContinuationAssembler() *ContinuationAssembler {
 		byCallRadius: make(map[string]continuationParent),
 		radiusBurst:  make(map[uuid.UUID]continuationParent),
 		sipBurst:     make(map[uuid.UUID]continuationParent),
+		isupBurst:    make(map[uuid.UUID]continuationParent),
 	}
 }
 
@@ -157,12 +162,16 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 			if event.Category == "sip" {
 				a.sipBurst[event.DeviceID] = parent
 			}
+			if event.Category == "isup" {
+				a.isupBurst[event.DeviceID] = parent
+			}
 			continue
 		}
 		kind := event.Attributes["fragment_kind"]
 		radiusFragment := kind == "avp" || kind == "hex" || kind == "digest" || kind == "rc_fragment"
 		sipBurstFragment := kind == "host_ip" || kind == "sdp_line" || kind == "sdp_quote" ||
 			kind == "sdp" || kind == "typed_hash" || kind == "hash_detail" || kind == "codec"
+		isupBurstFragment := kind == "dotted_hex" || kind == "isup_optional"
 		parent, ok := continuationParent{}, false
 		if callContext != "" {
 			key := continuationCallKey(event.DeviceID, callContext)
@@ -190,7 +199,13 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 				ok = false
 			}
 		}
-		if !ok && callContext == "" && !radiusFragment {
+		if !ok && isupBurstFragment {
+			parent, ok = a.isupBurst[event.DeviceID]
+			if !ok || parent.category != "isup" || !parentFresh(parent, event, sourceIP, 2*time.Second) {
+				ok = false
+			}
+		}
+		if !ok && callContext == "" && !radiusFragment && !isupBurstFragment {
 			parent, ok = a.radiusBurst[event.DeviceID]
 			if !ok || parent.category != "radius" ||
 				!parentFresh(parent, event, sourceIP, 100*time.Millisecond) {
@@ -209,6 +224,13 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 		// even when the preceding line was itself a continuation (# SDP len).
 		if event.Category == "sip" {
 			a.sipBurst[event.DeviceID] = continuationParent{
+				eventID: event.EventID, receivedAt: event.ReceivedAt,
+				sourceIP: sourceIP, category: event.Category,
+				component: event.Component, callContext: callContext,
+			}
+		}
+		if event.Category == "isup" {
+			a.isupBurst[event.DeviceID] = continuationParent{
 				eventID: event.EventID, receivedAt: event.ReceivedAt,
 				sourceIP: sourceIP, category: event.Category,
 				component: event.Component, callContext: callContext,
@@ -753,6 +775,8 @@ func classify(component, application, message, payload string) string {
 		return "system_journal"
 	case isBareSDPLine(trimmedMessage):
 		return "sip"
+	case isIsupDumpFragment(trimmedMessage):
+		return "isup"
 	case sipComponent && (strings.Contains(upperMessage, "ANTIFRAUD") ||
 		strings.Contains(upperMessage, "RADIUS:") || strings.Contains(upperMessage, "RADIUS ")):
 		return "radius"
@@ -843,6 +867,10 @@ func isBareSDPLine(trimmed string) bool {
 		return true
 	}
 	return false
+}
+
+func isIsupDumpFragment(trimmed string) bool {
+	return noOptionalParamsPat.MatchString(trimmed) || dottedHexPattern.MatchString(trimmed)
 }
 
 func isSIPComponentName(upperComponent string) bool {
@@ -963,6 +991,10 @@ func extractTraceContinuation(event *analytics.SyslogEvent) {
 		markTraceContinuation(event, "sdp_line")
 	case trimmed == "'" || sdpQuotePattern.MatchString(trimmed):
 		markTraceContinuation(event, "sdp_quote")
+	case noOptionalParamsPat.MatchString(trimmed):
+		markTraceContinuation(event, "isup_optional")
+	case dottedHexPattern.MatchString(trimmed):
+		markTraceContinuation(event, "dotted_hex")
 	case hexOnlyPattern.MatchString(strings.ReplaceAll(trimmed, " ", "")):
 		markTraceContinuation(event, "hex")
 	case digestLabelPat.MatchString(trimmed):

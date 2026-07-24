@@ -521,55 +521,6 @@ func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, categor
 	} else {
 		return c.listFallbackEventsPage(ctx, deviceID, category, search, limit, cursor)
 	}
-	query := `SELECT r.event_id,r.received_at,i.event_time,i.category,i.component,i.message,
-		r.payload,i.parse_status,i.attributes,i.source_timezone
-		FROM collector.syslog_interpretations AS i FINAL
-		INNER JOIN collector.raw_syslog r
-			ON r.device_id=i.device_id AND r.event_id=i.event_id
-		WHERE i.device_id=? AND i.parser_version=?`
-	args := []any{deviceID, SyslogParserVersion}
-	if category != "" && category != "all" {
-		switch category {
-		case "unknown":
-			query += ` AND i.category='unknown'`
-		default:
-			query += ` AND i.category=?`
-			args = append(args, category)
-		}
-	}
-	if search != "" {
-		query += ` AND positionCaseInsensitive(r.payload, ?) > 0`
-		args = append(args, search)
-	}
-	if cursor != nil {
-		query += ` AND (r.received_at < ? OR (r.received_at = ? AND r.event_id < ?))`
-		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
-	}
-	query += ` ORDER BY r.received_at DESC,r.event_id DESC LIMIT ?`
-	args = append(args, limit+1)
-	rows, err := c.Conn.Query(ctx, query, args...)
-	if err != nil {
-		return EventPage{}, err
-	}
-	defer rows.Close()
-	result := make([]EventRow, 0)
-	for rows.Next() {
-		var row EventRow
-		if err := rows.Scan(&row.EventID, &row.ReceivedAt, &row.EventTime,
-			&row.Category, &row.Component, &row.Message, &row.RawPayload,
-			&row.Status, &row.Attributes, &row.SourceTimezone); err != nil {
-			return EventPage{}, err
-		}
-		result = append(result, row)
-	}
-	if err := rows.Err(); err != nil {
-		return EventPage{}, err
-	}
-	hasMore := uint64(len(result)) > limit
-	if hasMore {
-		result = result[:limit]
-	}
-	return EventPage{Items: result, HasMore: hasMore}, nil
 }
 
 func (c *Client) ListCalls(ctx context.Context, deviceID uuid.UUID, search string, limit uint64) ([]CallRow, error) {

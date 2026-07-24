@@ -16,10 +16,10 @@ UPDATE
         match(payload, '(?i)\\bSIP|PBXIPC-SIP|INVITE|CALL-ID'), 'sip',
         match(payload, '(?i)IP-CONN|\\bRTP|\\bRTCP|CONN\\['), 'ip_connections',
         match(payload, '(?i)SM-VP|\\bMSP'), 'ip_modules',
-        match(payload, '(?i)(?:^|[\\s:;,])ALARMS?(?:$|[\\s:;,])|АВАР'), 'alarms',
+        match(payload, '(?i)(?:^|[\\s:,])ALARMS?(?:$|[\\s:,])|АВАР'), 'alarms',
         match(payload, '(?i)CONFIG|COMMAND|USERLOG'), 'config_history',
         match(payload, '(?i)AUTH|LOGIN|LOGOUT'), 'system_journal',
-        match(payload, '\\[C[A-Za-z0-9_-]+\\]') OR match(payload, '(?i)(?:^|[\\s:;,])CALL(?:$|[\\s:;,])|(?:^|[\\s:;,])PORT\\s+[0-9]'), 'call_trace',
+        match(payload, '\\[C[A-Za-z0-9_-]+\\]') OR match(payload, '(?i)(?:^|[\\s:,])CALL(?:$|[\\s:,])|(?:^|[\\s:,])PORT\\s+[0-9]'), 'call_trace',
         match(payload, '(?i)^(?:<[0-9]{1,3}>)?[A-Z][a-z]{2}\\s+[0-9]{1,2}\\s+[0-9]{2}:[0-9]{2}:[0-9]{2}\\s+(?:\\S+\\s+)?[A-Za-z0-9_.-]+(?:\\[[0-9]+\\])?:'), 'system_journal',
         'unknown'
     ),

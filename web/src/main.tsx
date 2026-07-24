@@ -26,6 +26,8 @@ type Device = {
 type EventRow = {
   eventId: string
   receivedAt: string
+  eventTime?: string
+  sourceTimezone: string
   category: string
   component: string
   message: string
@@ -66,11 +68,14 @@ type SyslogDiagnostics = {
   appliedMigrations: string[]
   rawEvents24h: number
   classified24h: number
-  reprocessedV5: number
+  reprocessedCurrent: number
   reprocessRemaining: number
   antifraudComplete: number
   antifraudIncomplete: number
   antifraudOrphan: number
+  correlationExact: number
+  correlationComposite: number
+  correlationAmbiguous: number
   ingressAvailable: boolean
   ingress: IngressStatus
 }
@@ -117,6 +122,12 @@ type AntifraudRow = {
   attributes: Record<string, string>
   linkedRecordIds: string[]
   legCount: number
+  cdrSetupTime?: string
+  correlationMethod: string
+  correlationConfidence: number
+  correlationTimeDeltaMs: number
+  ambiguityReason: string
+  cdrSessionId: string
 }
 type PageCursor = { before: string; beforeId: string }
 type PageResponse = {
@@ -242,6 +253,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [activeDevice, setActiveDevice] = useState<string>('')
   const [dataset, setDataset] = useState<Dataset>('calls')
   const [showCreate, setShowCreate] = useState(false)
+  const [editingDevice, setEditingDevice] = useState<Device | null>(null)
   const [credentials, setCredentials] = useState<Device | null>(null)
   const [error, setError] = useState('')
 
@@ -285,6 +297,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         {selected && <div className="header-health">
           <span><i className="status-dot online" /> Приём активен</span>
           <span>{selected.antifraudEnabled ? `АнтиФрод: ${selected.antifraudMode}` : 'Без АнтиФрод'}</span>
+          {user.role === 'admin' && <button className="secondary"
+            onClick={() => setEditingDevice(selected)}>Настройки SMG</button>}
         </div>}
       </header>
       {error && <div className="global-error">{error}</div>}
@@ -298,6 +312,11 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       loadDevices()
       setActiveDevice(device.id)
     }} />}
+    {editingDevice && <EditDeviceDialog device={editingDevice}
+      onClose={() => setEditingDevice(null)} onSaved={(device) => {
+        setDevices((current) => current.map((item) => item.id === device.id ? device : item))
+        setEditingDevice(null)
+      }} />}
     {credentials && <CredentialsDialog device={credentials} onClose={() => setCredentials(null)} />}
   </div>
 }
@@ -447,10 +466,13 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
-      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} onSelect={setSelectedCall} /> :
+      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} timezone={device.timezone}
+        onSelect={setSelectedCall} /> :
         dataset === 'antifraud'
-          ? <AntifraudTable rows={rows as AntifraudRow[]} onSelect={setSelectedAntifraud} />
-          : <EventsTable rows={rows as EventRow[]} onSelect={setSelectedEvent} />}
+          ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={device.timezone}
+            onSelect={setSelectedAntifraud} />
+          : <EventsTable rows={rows as EventRow[]} timezone={device.timezone}
+            onSelect={setSelectedEvent} />}
       {showRadiusEmpty && <RadiusEmptyState />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
@@ -460,7 +482,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
     {selectedAntifraud && <AntifraudDrawer device={device} row={selectedAntifraud}
       onClose={() => setSelectedAntifraud(null)} />}
-    {selectedEvent && <EventDrawer event={selectedEvent} onClose={() => setSelectedEvent(null)} />}
+    {selectedEvent && <EventDrawer event={selectedEvent} timezone={device.timezone}
+      onClose={() => setSelectedEvent(null)} />}
   </section>
 }
 
@@ -489,11 +512,14 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>NATS pending: <strong>{value.natsConsumerPending.toLocaleString('ru-RU')}</strong></span>
       <span>Quarantine: <strong>{value.quarantineDepth.toLocaleString('ru-RU')}</strong></span>
       <span>Classified, 24 ч: <strong>{value.classified24h.toLocaleString('ru-RU')} / {value.rawEvents24h.toLocaleString('ru-RU')}</strong></span>
-      <span>Reprocess v5: <strong>{value.reprocessedV5.toLocaleString('ru-RU')}</strong></span>
+      <span>Reprocess current: <strong>{value.reprocessedCurrent.toLocaleString('ru-RU')}</strong></span>
       <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud complete: <strong>{value.antifraudComplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud incomplete: <strong>{value.antifraudIncomplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud без CDR: <strong>{value.antifraudOrphan.toLocaleString('ru-RU')}</strong></span>
+      <span>Exact links: <strong>{value.correlationExact.toLocaleString('ru-RU')}</strong></span>
+      <span>Composite links: <strong>{value.correlationComposite.toLocaleString('ru-RU')}</strong></span>
+      <span>Ambiguous: <strong>{value.correlationAmbiguous.toLocaleString('ru-RU')}</strong></span>
       <span>Миграции: <strong>{value.appliedMigrations.join(', ') || '—'}</strong></span>
     </div>
     <div className="diagnostic-breakdown">
@@ -525,18 +551,19 @@ function AntifraudEmptyState() {
   </div>
 }
 
-function AntifraudTable({ rows, onSelect }: {
+function AntifraudTable({ rows, timezone, onSelect }: {
   rows: AntifraudRow[]
+  timezone: string
   onSelect: (row: AntifraudRow) => void
 }) {
   return <table><thead><tr>
     <th>Последнее событие</th><th>Операция</th><th>Решение</th><th>Номер A</th>
     <th>Номер B</th><th>Входящий маршрут</th><th>Исходящий маршрут</th>
-    <th>RADIUS server</th><th>Latency</th><th>Accounting</th><th>CDR legs</th>
+    <th>RADIUS server</th><th>Latency</th><th>Accounting</th><th>Корреляция</th><th>CDR legs</th>
     <th>Полнота</th><th>Acct-Session-Id</th><th>Call context</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.transactionId}
     onClick={() => onSelect(row)}>
-    <td className="mono">{formatTime(row.lastEventAt)}</td>
+    <td className="mono">{formatTime(row.lastEventAt, timezone)}</td>
     <td><span className="tag">{row.requestType || 'не определена'}</span></td>
     <td><span className={`decision ${row.decision || 'pending'}`}>
       {decisionLabel(row.decision)}</span></td>
@@ -546,6 +573,7 @@ function AntifraudTable({ rows, onSelect }: {
     <td className="mono">{row.serverAddress || '—'}</td>
     <td className="right">{row.latencyMs == null ? '—' : `${row.latencyMs} мс`}</td>
     <td>{row.accountingStatus || '—'}</td>
+    <td>{row.correlationMethod || row.ambiguityReason || 'нет CDR'}</td>
     <td className="right">{row.legCount || 'нет CDR'}</td>
     <td><span className={`parse-status ${row.completeness}`}>
       {row.completeness}</span></td>
@@ -578,7 +606,12 @@ function AntifraudDrawer({ device, row, onClose }: {
       <span><small>Latency / retries</small><strong>{row.latencyMs == null ? '—' : `${row.latencyMs} мс`} / {row.retries}</strong></span>
       <span><small>Accounting</small><strong>{row.accountingStatus || '—'}</strong></span>
       <span><small>CDR legs</small><strong>{row.legCount}</strong></span>
+      <span><small>CDR setup</small><strong>{formatTime(row.cdrSetupTime, device.timezone)}</strong></span>
+      <span><small>Корреляция</small><strong>{row.correlationMethod || row.ambiguityReason || 'нет CDR'}</strong></span>
+      <span><small>Confidence / delta</small><strong>
+        {row.correlationMethod ? `${row.correlationConfidence.toFixed(2)} / ${row.correlationTimeDeltaMs} мс` : '—'}</strong></span>
       <span><small>Acct-Session-Id</small><strong className="mono">{row.acctSessionId || '—'}</strong></span>
+      <span><small>CDR Acct-Session-Id</small><strong className="mono">{row.cdrSessionId || '—'}</strong></span>
       <span><small>Call context</small><strong className="mono">{row.callContext || '—'}</strong></span>
     </div>
     <h4>Номера и маршруты</h4>
@@ -601,7 +634,7 @@ function AntifraudDrawer({ device, row, onClose }: {
     <h4>Исходные события RADIUS</h4>
     <div className="timeline">{timeline.length === 0 && <p>События пока не найдены.</p>}
       {timeline.map((event) => <div className="timeline-item" key={event.eventId}>
-        <i /><div><time>{formatTime(event.receivedAt)}</time>
+        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, device.timezone)}</time>
           <strong>{event.component || 'RADIUS'} · {event.attributes.packet_code || 'fragment'}</strong>
           <p>{event.message}</p></div>
       </div>)}
@@ -611,13 +644,17 @@ function AntifraudDrawer({ device, row, onClose }: {
   </div>
 }
 
-function CallsTable({ rows, onSelect }: { rows: CallRow[]; onSelect: (row: CallRow) => void }) {
+function CallsTable({ rows, timezone, onSelect }: {
+  rows: CallRow[]
+  timezone: string
+  onSelect: (row: CallRow) => void
+}) {
   return <table><thead><tr>
     <th>Установка</th><th>Входящий маршрут</th><th>Исходящий маршрут</th><th>Номер A: вход</th>
     <th>Номер A: выход</th><th>Номер B: вход</th><th>Номер B: выход</th><th>Длит.</th>
     <th>Q.850</th><th>Результат</th><th>Acct-Session-Id</th><th>UniqueTag</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId} onClick={() => onSelect(row)}>
-    <td className="mono">{formatTime(row.setupTime)}</td>
+    <td className="mono">{formatTime(row.setupTime, timezone)}</td>
     <td>{row.incomingDescription || '—'}</td><td>{row.outgoingDescription || '—'}</td>
     <td className="mono">{row.incomingCgpn || '—'}</td><td className="mono">{row.outgoingCgpn || '—'}</td>
     <td className="mono">{row.incomingCdpn || '—'}</td><td className="mono">{row.outgoingCdpn || '—'}</td>
@@ -637,7 +674,7 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
     <div className="drawer-header"><div><h3>Карточка вызова</h3><span className="mono">{call.recordId}</span></div>
       <button onClick={onClose}>×</button></div>
     <div className="call-facts">
-      <span><small>Установка</small><strong>{formatTime(call.setupTime)}</strong></span>
+      <span><small>Установка</small><strong>{formatTime(call.setupTime, device.timezone)}</strong></span>
       <span><small>Длительность</small><strong>{call.durationMs == null ? '—' : `${(call.durationMs / 1000).toFixed(3)} c`}</strong></span>
       <span><small>Q.850</small><strong>{call.releaseCause ?? '—'} · {call.releaseInfo || '—'}</strong></span>
       <span><small>Acct-Session-Id</small><strong className="mono">{call.radiusSessionId || '—'}</strong></span>
@@ -645,30 +682,40 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
     <h4>Связанные события АнтиФрод и Syslog</h4>
     <div className="timeline">{timeline.length === 0 && <p>Связанные события пока не найдены.</p>}
       {timeline.map((event) => <div className="timeline-item" key={event.eventId}>
-        <i /><div><time>{formatTime(event.receivedAt)}</time><strong>{event.category} · {event.component || 'SMG'}</strong>
+        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, device.timezone)}</time><strong>{event.category} · {event.component || 'SMG'}</strong>
           <p>{event.message}</p><small>{event.method} · confidence {event.confidence.toFixed(2)}</small></div>
       </div>)}
     </div>
   </div>
 }
 
-function EventsTable({ rows, onSelect }: { rows: EventRow[]; onSelect: (row: EventRow) => void }) {
+function EventsTable({ rows, timezone, onSelect }: {
+  rows: EventRow[]
+  timezone: string
+  onSelect: (row: EventRow) => void
+}) {
   return <table><thead><tr><th>Получено</th><th>Раздел</th><th>Компонент</th>
     <th>Сообщение</th><th>Статус</th><th>Атрибуты</th></tr></thead>
     <tbody>{rows.map((row) => <tr key={row.eventId} onClick={() => onSelect(row)}>
-      <td className="mono">{formatTime(row.receivedAt)}</td><td><span className="tag">{row.category}</span></td>
+      <td className="mono">{formatTime(row.eventTime || row.receivedAt, timezone)}</td><td><span className="tag">{row.category}</span></td>
       <td className="mono">{row.component || '—'}</td><td className="message-cell">{row.message}</td>
       <td><span className={`parse-status ${row.parseStatus}`}>{row.parseStatus}</span></td>
       <td className="mono">{Object.entries(row.attributes || {}).map(([key, value]) => `${key}=${value}`).join(' · ') || '—'}</td>
     </tr>)}</tbody></table>
 }
 
-function EventDrawer({ event, onClose }: { event: EventRow; onClose: () => void }) {
+function EventDrawer({ event, timezone, onClose }: {
+  event: EventRow
+  timezone: string
+  onClose: () => void
+}) {
   return <div className="drawer">
     <div className="drawer-header"><div><h3>Событие Syslog</h3><span className="mono">{event.eventId}</span></div>
       <button onClick={onClose}>×</button></div>
     <div className="call-facts">
-      <span><small>Получено</small><strong>{formatTime(event.receivedAt)}</strong></span>
+      <span><small>Время события</small><strong>{formatTime(event.eventTime || event.receivedAt, timezone)}</strong></span>
+      <span><small>Получено Collector</small><strong>{formatTime(event.receivedAt, timezone)}</strong></span>
+      <span><small>Timezone источника</small><strong>{event.sourceTimezone || timezone}</strong></span>
       <span><small>Раздел</small><strong>{event.category}</strong></span>
       <span><small>Компонент</small><strong>{event.component || '—'}</strong></span>
       <span><small>Разбор</small><strong>{event.parseStatus}</strong></span>
@@ -727,6 +774,67 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
   </Modal>
 }
 
+function EditDeviceDialog({ device, onClose, onSaved }: {
+  device: Device
+  onClose: () => void
+  onSaved: (device: Device) => void
+}) {
+  const [form, setForm] = useState({
+    name: device.name, firmware: device.firmware, timezone: device.timezone,
+    managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp,
+    deviceSign: device.deviceSign, antifraudEnabled: device.antifraudEnabled,
+    antifraudMode: device.antifraudMode, enabled: device.enabled,
+  })
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const update = (field: string, value: string | boolean) =>
+    setForm((current) => ({ ...current, [field]: value }))
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      onSaved(await api<Device>(`/devices/${device.id}`, {
+        method: 'PATCH', body: JSON.stringify(form),
+      }))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка сохранения')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <Modal title={`Настройки ${device.name}`} onClose={onClose}>
+    <form className="device-form" onSubmit={submit}>
+      <div className="form-grid">
+        <label>Название<input autoFocus required value={form.name}
+          onChange={(e) => update('name', e.target.value)} /></label>
+        <label>Device Sign<input value={form.deviceSign}
+          onChange={(e) => update('deviceSign', e.target.value)} /></label>
+        <label>IP управления<input value={form.managementIp}
+          onChange={(e) => update('managementIp', e.target.value)} /></label>
+        <label>IP-источник Syslog<input required value={form.syslogSourceIp}
+          onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
+        <label>Прошивка<input required value={form.firmware}
+          onChange={(e) => update('firmware', e.target.value)} /></label>
+        <label>Часовой пояс IANA<input required placeholder="Asia/Novosibirsk"
+          value={form.timezone} onChange={(e) => update('timezone', e.target.value)} /></label>
+        <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
+          onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
+        <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled}
+          value={form.antifraudMode} onChange={(e) => update('antifraudMode', e.target.value)}>
+          <option>Custom</option><option>Astarta</option><option>Intek</option><option>OFF</option>
+        </select></label>
+        <label className="checkbox-row"><input type="checkbox" checked={form.enabled}
+          onChange={(e) => update('enabled', e.target.checked)} /> Приём данных включён</label>
+      </div>
+      {error && <div className="form-error">{error}</div>}
+      <div className="dialog-actions"><button type="button" className="secondary"
+        onClick={onClose}>Отмена</button>
+        <button className="primary" disabled={busy}>{busy ? 'Сохранение…' : 'Сохранить'}</button></div>
+    </form>
+  </Modal>
+}
+
 function CredentialsDialog({ device, onClose }: { device: Device; onClose: () => void }) {
   return <Modal title="Параметры приёма данных" onClose={onClose}>
     <div className="credentials-warning">Пароль FTP отображается один раз. Сохраните его в защищённом хранилище.</div>
@@ -757,11 +865,12 @@ function Centered({ children }: { children: React.ReactNode }) {
   return <div className="centered">{children}</div>
 }
 
-function formatTime(value?: string) {
+function formatTime(value?: string, timezone = 'UTC') {
   if (!value) return '—'
   return new Intl.DateTimeFormat('ru-RU', {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
     minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3,
+    timeZone: timezone,
   }).format(new Date(value))
 }
 

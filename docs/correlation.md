@@ -34,11 +34,13 @@ Retransmissions остаются событиями доставки, но не 
 2. SS7 Global Call Reference;
 3. CDR `radius-rejected` как подтверждение блокирующего RADIUS server/reply.
 
-UniqueTag используется только после подтверждения его наличия в обоих источниках.
-Trunk/link + CIC + interval и номера/время формируют `ambiguous candidate`, но не
-автоматическую связь без production corpus.
+Если exact ID недоступен, v6 строит composite signature из всех вариантов CgPN/CdPN
+до/после модификаций, точных incoming/outgoing route labels и исправленного event time.
+Российские 10/11-значные номера канонизируются к `7XXXXXXXXXX`.
 
-Номер телефона и округлённое время без дополнительных признаков не считаются связью.
+Внутри сигнатуры edges сортируются детерминированно по confidence, абсолютному time
+delta и UUID. Связывается только unique best с margin; один CDR нельзя назначить двум
+transactions. Один номер или округлённое время без route/второго номера недостаточны.
 
 ## Edge cases
 
@@ -48,6 +50,8 @@ Trunk/link + CIC + interval и номера/время формируют `ambig
 - Route retry: trunk/IP/Call-ID меняются, Acct-Session-Id может сохраниться.
 - Missing accounting: CDR остаётся полноценным unmatched record.
 - Late events: используется embedded Event-Timestamp/Acct-Delay-Time, receive time только fallback.
+- Source wall clock Syslog/CDR интерпретируется в IANA timezone устройства; UTC
+  используется для хранения instant и matching, `received_at` остаётся отдельным фактом.
 - Clock step/NTP: временное окно расширяется только после измерения observed offset.
 - Reboot: sequence boot component сохраняется полностью.
 
@@ -66,4 +70,5 @@ Trunk/link + CIC + interval и номера/время формируют `ambig
 `orphan` и `ambiguous`; несколько CDR records с одинаковым device-scoped
 Acct-Session-Id отображаются как отдельные legs одного lifecycle.
 
-Порог автоматического fallback-link фиксируется после canary corpus; до этого кандидаты не склеиваются автоматически.
+Coverage-инвариант считается в направлении AntiFraud: `linked + ambiguous + orphan =
+total AntiFraud`; число всех CDR не обязано совпадать с числом AntiFraud operations.

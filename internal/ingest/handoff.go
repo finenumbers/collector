@@ -29,12 +29,13 @@ type handoffResponse struct {
 }
 
 type cachedHandoffDevice struct {
-	id      uuid.UUID
-	expires time.Time
+	id       uuid.UUID
+	timezone string
+	expires  time.Time
 }
 
 type DeviceResolver interface {
-	DeviceBySourceIP(context.Context, string) (uuid.UUID, error)
+	DeviceIdentityBySourceIP(context.Context, string) (uuid.UUID, string, error)
 }
 
 func RunIngressHandoffPublisher(
@@ -174,10 +175,12 @@ func handleHandoffConnection(
 			normalizedIP = ipv4.String()
 		}
 		deviceID := uuid.Nil
+		timezone := ""
 		if cached, ok := cache[normalizedIP]; ok && now.Before(cached.expires) {
 			deviceID = cached.id
+			timezone = cached.timezone
 		} else {
-			resolved, err := control.DeviceBySourceIP(ctx, normalizedIP)
+			resolved, resolvedTimezone, err := control.DeviceIdentityBySourceIP(ctx, normalizedIP)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					completed = append(completed, datagram.EventID)
@@ -192,11 +195,15 @@ func handleHandoffConnection(
 				return err
 			}
 			deviceID = resolved
-			cache[normalizedIP] = cachedHandoffDevice{id: deviceID, expires: now.Add(30 * time.Second)}
+			timezone = resolvedTimezone
+			cache[normalizedIP] = cachedHandoffDevice{
+				id: deviceID, timezone: timezone, expires: now.Add(30 * time.Second),
+			}
 		}
 		raw := RawSyslog{
 			EventID: datagram.EventID, DeviceID: deviceID, ReceivedAt: datagram.ReceivedAt,
 			SourceIP: normalizedIP, SourcePort: datagram.SourcePort, Payload: datagram.Payload,
+			Timezone: timezone,
 		}
 		payload, err := json.Marshal(raw)
 		if err != nil {

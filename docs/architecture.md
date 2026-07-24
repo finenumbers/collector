@@ -12,7 +12,7 @@ flowchart LR
     IngressSpool -->|Unix socket with ACK| Receiver[Collector receiver]
     Receiver --> Spool[App durable spool]
     Spool --> NATS[NATS JetStream]
-    NATS --> Parser[SMG 3.410 parser v5]
+    NATS --> Parser[SMG 3.410 parser v6 + device timezone]
     Parser --> Functional[Typed functional events]
     Functional --> Radius[RADIUS transaction assembler]
     Radius --> Correlator[Evidence correlator]
@@ -49,16 +49,21 @@ UDP Syslog не имеет acknowledgement: packet может потерятьс
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 
-Parser version `smg-3.410-v5` разделяет envelope, component classification и typed
+Parser version `smg-3.410-v6` разделяет envelope, component classification и typed
 attributes. После миграции background reprocess читает сохранённый raw payload и
 идемпотентно перестраивает только derived RADIUS/AntiFraud facts. Progress хранится в
 `syslog_reprocess_ledger`; исходный payload и CDR archive не изменяются.
 
+Eltex/RFC3164 wall clock интерпретируется в IANA timezone устройства и переводится в
+UTC. Версионная interpretation-таблица хранит parser version, source timezone и offset.
+Смена timezone инвалидирует derived v6 и запускает идемпотентный replay raw.
+
 Stateful RADIUS assembler восстанавливается из `antifraud_transactions FINAL`, поэтому
 рестарт между request и reply не теряет уже собранные fragments. Автоматическая связь
 использует device-scoped Acct-Session-Id, exact SIP Call-ID/GCR и transaction call
-context. Номера/время сохраняются только в `call_correlation_candidates` и не создают
-ложную связь.
+context. Для lifecycle без exact ID применяется детерминированный one-to-one matching
+по нормализованным номерам, маршрутам и времени; только unique best с margin создаёт
+связь, остальные кандидаты остаются ambiguous.
 
 ## Изоляция устройств
 

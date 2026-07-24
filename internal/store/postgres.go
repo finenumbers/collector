@@ -65,6 +65,18 @@ type NewDevice struct {
 	CDRColumns       []string `json:"cdrColumns"`
 }
 
+type DeviceUpdate struct {
+	Name             string `json:"name"`
+	Firmware         string `json:"firmware"`
+	Timezone         string `json:"timezone"`
+	ManagementIP     string `json:"managementIp"`
+	SyslogSourceIP   string `json:"syslogSourceIp"`
+	DeviceSign       string `json:"deviceSign"`
+	AntifraudEnabled bool   `json:"antifraudEnabled"`
+	AntifraudMode    string `json:"antifraudMode"`
+	Enabled          bool   `json:"enabled"`
+}
+
 type Session struct {
 	User User
 	CSRF string
@@ -250,6 +262,20 @@ func (s *Store) DeviceBySourceIP(ctx context.Context, sourceIP string) (uuid.UUI
 	return id, err
 }
 
+func (s *Store) DeviceIdentityBySourceIP(
+	ctx context.Context, sourceIP string,
+) (uuid.UUID, string, error) {
+	var id uuid.UUID
+	var timezone string
+	err := s.DB.QueryRow(ctx,
+		`SELECT id,timezone FROM devices WHERE syslog_source_ip=$1 AND enabled`, sourceIP).
+		Scan(&id, &timezone)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, "", ErrNotFound
+	}
+	return id, timezone, err
+}
+
 func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
 	err := s.DB.QueryRow(ctx, `SELECT id,name,model,firmware,timezone,management_ip::text,
@@ -263,6 +289,15 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 		return Device{}, ErrNotFound
 	}
 	return device, err
+}
+
+func (s *Store) DeviceTimezone(ctx context.Context, id uuid.UUID) (string, error) {
+	var timezone string
+	err := s.DB.QueryRow(ctx, `SELECT timezone FROM devices WHERE id=$1`, id).Scan(&timezone)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return timezone, err
 }
 
 func (s *Store) RegisterIngestFile(ctx context.Context, deviceID uuid.UUID, name, objectKey, checksum string, size int64) (uuid.UUID, error) {
@@ -294,6 +329,9 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	}
 	if input.Timezone == "" {
 		input.Timezone = "Asia/Novosibirsk"
+	}
+	if _, err := time.LoadLocation(input.Timezone); err != nil {
+		return Device{}, fmt.Errorf("invalid IANA timezone %q", input.Timezone)
 	}
 	if input.AntifraudMode == "" {
 		input.AntifraudMode = "OFF"
@@ -340,6 +378,61 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	}
 	device.GeneratedPassword = ftpPassword
 	return device, nil
+}
+
+func (s *Store) UpdateDevice(
+	ctx context.Context, id uuid.UUID, input DeviceUpdate, actor User, remoteIP string,
+) (Device, error) {
+	if strings.TrimSpace(input.Name) == "" || net.ParseIP(input.SyslogSourceIP) == nil {
+		return Device{}, errors.New("name and valid syslogSourceIp are required")
+	}
+	if _, err := time.LoadLocation(input.Timezone); err != nil {
+		return Device{}, fmt.Errorf("invalid IANA timezone %q", input.Timezone)
+	}
+	if input.ManagementIP != "" && net.ParseIP(input.ManagementIP) == nil {
+		return Device{}, errors.New("managementIp must be empty or a valid IP")
+	}
+	if input.Firmware == "" {
+		return Device{}, errors.New("firmware is required")
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return Device{}, err
+	}
+	defer tx.Rollback(ctx)
+	var device Device
+	err = tx.QueryRow(ctx, `UPDATE devices SET
+		name=$2,firmware=$3,timezone=$4,management_ip=NULLIF($5,'')::inet,
+		syslog_source_ip=$6,device_sign=$7,antifraud_enabled=$8,antifraud_mode=$9,
+		enabled=$10
+		WHERE id=$1
+		RETURNING id,name,model,firmware,timezone,management_ip::text,syslog_source_ip::text,
+			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
+			cdr_columns,enabled,created_at`,
+		id, strings.TrimSpace(input.Name), input.Firmware, input.Timezone,
+		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
+		input.AntifraudEnabled, input.AntifraudMode, input.Enabled,
+	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
+		&device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
+		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
+		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Device{}, ErrNotFound
+	}
+	if err != nil {
+		return Device{}, err
+	}
+	details, _ := json.Marshal(map[string]any{
+		"name": device.Name, "timezone": device.Timezone,
+		"syslogSourceIp": device.SyslogSourceIP, "enabled": device.Enabled,
+	})
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_log
+		(actor_id,action,resource_type,resource_id,remote_ip,details)
+		VALUES($1,'device_update','device',$2,$3,$4)`,
+		actor.ID, id.String(), nullableIP(remoteIP), details); err != nil {
+		return Device{}, err
+	}
+	return device, tx.Commit(ctx)
 }
 
 func (s *Store) DeleteDevice(ctx context.Context, id uuid.UUID, actor User, remoteIP string) error {

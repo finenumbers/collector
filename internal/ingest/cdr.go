@@ -132,6 +132,11 @@ func (p CDRParser) mapRecord(row uint64, fields map[string]string) (analytics.CD
 	if sequenceNumber == "" {
 		recordIDKey = p.DeviceID.String() + "|" + p.FileID.String() + "|" + strconv.FormatUint(row, 10)
 	}
+	offsetAt := time.Now().UTC()
+	if setup != nil {
+		offsetAt = *setup
+	}
+	_, offsetSeconds := offsetAt.In(p.Location).Zone()
 	return analytics.CDRRecord{
 		RecordID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(recordIDKey)),
 		DeviceID: p.DeviceID, FileID: p.FileID, RowNumber: row,
@@ -155,7 +160,8 @@ func (p CDRParser) mapRecord(row uint64, fields map[string]string) (analytics.CD
 		RadiusSessionID: radiusSessionID, RadiusSessionIDNormalized: normalizeSessionID(radiusSessionID),
 		GlobalCallref: fields["global_callref"], UniqueTag: fields["uniquetag_identifier"],
 		TransferMark: fields["call_transfer_mark"], RejectingRadiusServer: fields["rejecting_radius_server_address"],
-		RawFields: fields,
+		RawFields: fields, SourceTimezone: p.Location.String(),
+		SourceUTCOffsetMinutes: int16(offsetSeconds / 60),
 	}, nil
 }
 

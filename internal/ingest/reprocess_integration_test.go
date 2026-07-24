@@ -11,6 +11,14 @@ import (
 	"github.com/google/uuid"
 )
 
+type fixedTimezoneResolver string
+
+func (r fixedTimezoneResolver) DeviceTimezone(
+	_ context.Context, _ uuid.UUID,
+) (string, error) {
+	return string(r), nil
+}
+
 func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	address := os.Getenv("CLICKHOUSE_TEST_ADDR")
 	if address == "" {
@@ -39,10 +47,11 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	if err := client.InsertSyslog(ctx, event); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunHistoricalSyslogReprocess(ctx, client); err != nil {
+	resolver := fixedTimezoneResolver("Asia/Novosibirsk")
+	if err := RunHistoricalSyslogReprocessOnce(ctx, client, resolver); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunHistoricalSyslogReprocess(ctx, client); err != nil {
+	if err := RunHistoricalSyslogReprocessOnce(ctx, client, resolver); err != nil {
 		t.Fatal(err)
 	}
 	var ledgerRows, transactions uint64

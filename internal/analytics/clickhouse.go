@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const SyslogParserVersion = "smg-3.410-v5"
+const SyslogParserVersion = "smg-3.410-v6"
 
 type Client struct {
 	Conn            clickhouse.Conn
@@ -26,33 +26,37 @@ type Client struct {
 }
 
 type SyslogEvent struct {
-	EventID      uuid.UUID
-	DeviceID     uuid.UUID
-	ReceivedAt   time.Time
-	SourceIP     net.IP
-	SourcePort   uint16
-	Payload      []byte
-	PRI          *uint16
-	Facility     *uint8
-	Severity     *uint8
-	HeaderFormat string
-	ParseStatus  string
-	Category     string
-	EventTime    *time.Time
-	Component    string
-	Message      string
-	Attributes   map[string]string
+	EventID                uuid.UUID
+	DeviceID               uuid.UUID
+	ReceivedAt             time.Time
+	SourceIP               net.IP
+	SourcePort             uint16
+	Payload                []byte
+	PRI                    *uint16
+	Facility               *uint8
+	Severity               *uint8
+	HeaderFormat           string
+	ParseStatus            string
+	Category               string
+	EventTime              *time.Time
+	Component              string
+	Message                string
+	Attributes             map[string]string
+	SourceTimezone         string
+	SourceUTCOffsetMinutes int16
 }
 
 type EventRow struct {
-	EventID    uuid.UUID         `json:"eventId"`
-	ReceivedAt time.Time         `json:"receivedAt"`
-	Category   string            `json:"category"`
-	Component  string            `json:"component"`
-	Message    string            `json:"message"`
-	RawPayload string            `json:"rawPayload"`
-	Status     string            `json:"parseStatus"`
-	Attributes map[string]string `json:"attributes"`
+	EventID        uuid.UUID         `json:"eventId"`
+	ReceivedAt     time.Time         `json:"receivedAt"`
+	EventTime      *time.Time        `json:"eventTime"`
+	Category       string            `json:"category"`
+	Component      string            `json:"component"`
+	Message        string            `json:"message"`
+	RawPayload     string            `json:"rawPayload"`
+	Status         string            `json:"parseStatus"`
+	Attributes     map[string]string `json:"attributes"`
+	SourceTimezone string            `json:"sourceTimezone"`
 }
 
 type EventCursor struct {
@@ -95,15 +99,18 @@ type SyslogBreakdownRow struct {
 }
 
 type SyslogDiagnostics struct {
-	Breakdown           []SyslogBreakdownRow `json:"breakdown"`
-	AppliedMigrations   []string             `json:"appliedMigrations"`
-	RawEvents24h        uint64               `json:"rawEvents24h"`
-	Classified24h       uint64               `json:"classified24h"`
-	ReprocessedV5       uint64               `json:"reprocessedV5"`
-	ReprocessRemaining  uint64               `json:"reprocessRemaining"`
-	AntifraudComplete   uint64               `json:"antifraudComplete"`
-	AntifraudIncomplete uint64               `json:"antifraudIncomplete"`
-	AntifraudOrphan     uint64               `json:"antifraudOrphan"`
+	Breakdown            []SyslogBreakdownRow `json:"breakdown"`
+	AppliedMigrations    []string             `json:"appliedMigrations"`
+	RawEvents24h         uint64               `json:"rawEvents24h"`
+	Classified24h        uint64               `json:"classified24h"`
+	ReprocessedCurrent   uint64               `json:"reprocessedCurrent"`
+	ReprocessRemaining   uint64               `json:"reprocessRemaining"`
+	AntifraudComplete    uint64               `json:"antifraudComplete"`
+	AntifraudIncomplete  uint64               `json:"antifraudIncomplete"`
+	AntifraudOrphan      uint64               `json:"antifraudOrphan"`
+	CorrelationExact     uint64               `json:"correlationExact"`
+	CorrelationComposite uint64               `json:"correlationComposite"`
+	CorrelationAmbiguous uint64               `json:"correlationAmbiguous"`
 }
 
 type CallRow struct {
@@ -160,6 +167,8 @@ type CDRRecord struct {
 	GlobalCallref, UniqueTag, TransferMark     string
 	RejectingRadiusServer                      string
 	RawFields                                  map[string]string
+	SourceTimezone                             string
+	SourceUTCOffsetMinutes                     int16
 }
 
 func Open(addr, database, username, password string) (*Client, error) {
@@ -239,7 +248,7 @@ func (c *Client) InsertSyslogBatch(ctx context.Context, events []SyslogEvent) er
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.raw_syslog
 		(event_id,device_id,received_at,source_ip,source_port,transport,payload,payload_sha256,
 		 pri,facility,severity,header_format,parser_version,parse_status,category,event_time,
-		 component,message,attributes)`)
+		 component,message,attributes,source_timezone,source_utc_offset_minutes)`)
 	if err != nil {
 		return err
 	}
@@ -249,7 +258,37 @@ func (c *Client) InsertSyslogBatch(ctx context.Context, events []SyslogEvent) er
 			event.EventID, event.DeviceID, event.ReceivedAt, event.SourceIP, event.SourcePort, "udp",
 			string(event.Payload), hex.EncodeToString(sum[:]), event.PRI, event.Facility, event.Severity,
 			event.HeaderFormat, SyslogParserVersion, event.ParseStatus, event.Category, event.EventTime,
-			event.Component, event.Message, event.Attributes,
+			event.Component, event.Message, event.Attributes, event.SourceTimezone,
+			event.SourceUTCOffsetMinutes,
+		); err != nil {
+			return err
+		}
+	}
+	if err := batch.Send(); err != nil {
+		return err
+	}
+	return c.InsertSyslogInterpretationsBatch(ctx, events)
+}
+
+func (c *Client) InsertSyslogInterpretationsBatch(
+	ctx context.Context, events []SyslogEvent,
+) error {
+	if len(events) == 0 {
+		return nil
+	}
+	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.syslog_interpretations
+		(event_id,device_id,interpreted_at,parser_version,parse_status,category,event_time,
+		 component,message,attributes,source_timezone,source_utc_offset_minutes)`)
+	if err != nil {
+		return err
+	}
+	interpretedAt := time.Now().UTC()
+	for _, event := range events {
+		if err := batch.Append(
+			event.EventID, event.DeviceID, interpretedAt, SyslogParserVersion,
+			event.ParseStatus, event.Category, event.EventTime, event.Component,
+			event.Message, event.Attributes, event.SourceTimezone,
+			event.SourceUTCOffsetMinutes,
 		); err != nil {
 			return err
 		}
@@ -270,7 +309,8 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 		 calling_nai,called_nai,incoming_e1_stream,incoming_e1_channel,outgoing_e1_stream,
 		 outgoing_e1_channel,incoming_sip_call_id,outgoing_sip_call_id,incoming_ss7_cic,
 		 outgoing_ss7_cic,radius_session_id,radius_session_id_normalized,global_callref,
-		 unique_tag,transfer_mark,rejecting_radius_server,raw_fields)`)
+		 unique_tag,transfer_mark,rejecting_radius_server,raw_fields,source_timezone,
+		 source_utc_offset_minutes)`)
 	if err != nil {
 		return err
 	}
@@ -290,6 +330,7 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 			record.IncomingSS7CIC, record.OutgoingSS7CIC,
 			record.RadiusSessionID, record.RadiusSessionIDNormalized, record.GlobalCallref,
 			record.UniqueTag, record.TransferMark, record.RejectingRadiusServer, record.RawFields,
+			record.SourceTimezone, record.SourceUTCOffsetMinutes,
 		); err != nil {
 			return err
 		}
@@ -297,46 +338,84 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 	if err := batch.Send(); err != nil {
 		return err
 	}
+	if err := c.InsertCDRTimeInterpretationsBatch(ctx, records); err != nil {
+		return err
+	}
 	for _, record := range records {
 		if err := c.correlateCDRExactEvidence(ctx, record); err != nil {
 			return err
 		}
-		if record.RadiusSessionIDNormalized == "" {
-			continue
+	}
+	deviceSince := make(map[uuid.UUID]time.Time)
+	for _, record := range records {
+		since := record.IngestedAt.Add(-10 * time.Minute)
+		if record.SetupTime != nil {
+			since = record.SetupTime.Add(-10 * time.Minute)
 		}
-		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
-			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
-			SELECT device_id,?,event_id,'exact_acct_session',toFloat32(1.0),
-				map('acct_session_id',acct_session_id_normalized),'smg-3.410-v5',now64(3)
-			FROM collector.radius_events
-			WHERE device_id=? AND acct_session_id_normalized=?`,
-			record.RecordID, record.DeviceID, record.RadiusSessionIDNormalized); err != nil {
-			return err
+		current, ok := deviceSince[record.DeviceID]
+		if !ok || since.Before(current) {
+			deviceSince[record.DeviceID] = since
 		}
-		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
-			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
-			SELECT ?,?,arrayJoin(raw_event_ids),'antifraud_transaction',toFloat32(1.0),
-				map('acct_session_id',acct_session_id_normalized),'smg-3.410-v5',now64(3)
-			FROM collector.antifraud_transactions FINAL
-			WHERE device_id=? AND acct_session_id_normalized=?`,
-			record.DeviceID, record.RecordID, record.DeviceID,
-			record.RadiusSessionIDNormalized); err != nil {
-			return err
-		}
-		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
-			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
-			SELECT ?,?,e.event_id,'call_context_transaction',toFloat32(0.98),
-				map('call_context',t.call_context),'smg-3.410-v5',now64(3)
-			FROM collector.antifraud_transactions AS t FINAL
-			CROSS JOIN collector.raw_syslog e
-			WHERE t.device_id=? AND t.acct_session_id_normalized=? AND t.call_context!=''
-				AND e.device_id=t.device_id AND e.attributes['call_context']=t.call_context`,
-			record.DeviceID, record.RecordID, record.DeviceID,
-			record.RadiusSessionIDNormalized); err != nil {
+	}
+	for deviceID, since := range deviceSince {
+		if err := c.ReconcileDevice(ctx, deviceID, since); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *Client) InsertCDRTimeInterpretationsBatch(
+	ctx context.Context, records []CDRRecord,
+) error {
+	if len(records) == 0 {
+		return nil
+	}
+	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_time_interpretations
+		(record_id,device_id,interpreted_at,setup_time,connect_time,disconnect_time,
+		 source_timezone,source_utc_offset_minutes)`)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, record := range records {
+		if err := batch.Append(
+			record.RecordID, record.DeviceID, now, record.SetupTime, record.ConnectTime,
+			record.DisconnectTime, record.SourceTimezone, record.SourceUTCOffsetMinutes,
+		); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
+
+func (c *Client) ReinterpretCDRTimes(
+	ctx context.Context, deviceID uuid.UUID, timezone string,
+) error {
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return err
+	}
+	return c.Conn.Exec(ctx, `INSERT INTO collector.cdr_time_interpretations
+		(record_id,device_id,interpreted_at,setup_time,connect_time,disconnect_time,
+		 source_timezone,source_utc_offset_minutes)
+		SELECT c.record_id,c.device_id,now64(6),
+			if(c.raw_fields['setup_time']='',c.setup_time,
+				parseDateTime64BestEffortOrNull(c.raw_fields['setup_time'],6,?)),
+			if(c.raw_fields['connect_time']='',c.connect_time,
+				parseDateTime64BestEffortOrNull(c.raw_fields['connect_time'],6,?)),
+			if(c.raw_fields['disconnect_time']='',c.disconnect_time,
+				parseDateTime64BestEffortOrNull(c.raw_fields['disconnect_time'],6,?)),
+			?,
+			if(c.raw_fields['setup_time']='',toInt16(0),toInt16(dateDiff('minute',
+				parseDateTime64BestEffortOrNull(c.raw_fields['setup_time'],6,?),
+				parseDateTime64BestEffortOrNull(c.raw_fields['setup_time'],6,'UTC'))))
+		FROM collector.cdr_records AS c FINAL
+		LEFT JOIN collector.cdr_time_interpretations AS t FINAL
+			ON t.device_id=c.device_id AND t.record_id=c.record_id
+		WHERE c.device_id=? AND (
+			t.record_id=toUUID('00000000-0000-0000-0000-000000000000')
+			OR t.source_timezone!=?)`,
+		timezone, timezone, timezone, timezone, timezone, deviceID, timezone)
 }
 
 func (c *Client) ListEvents(ctx context.Context, deviceID uuid.UUID, category, search string, limit uint64) ([]EventRow, error) {
@@ -348,27 +427,31 @@ func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, categor
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
-	query := `SELECT event_id,received_at,category,component,message,payload,parse_status,attributes
-		FROM collector.raw_syslog WHERE device_id=?`
-	args := []any{deviceID}
+	query := `SELECT r.event_id,r.received_at,i.event_time,i.category,i.component,i.message,
+		r.payload,i.parse_status,i.attributes,i.source_timezone
+		FROM collector.syslog_interpretations AS i FINAL
+		INNER JOIN collector.raw_syslog r
+			ON r.device_id=i.device_id AND r.event_id=i.event_id
+		WHERE i.device_id=? AND i.parser_version=?`
+	args := []any{deviceID, SyslogParserVersion}
 	if category != "" && category != "all" {
 		switch category {
 		case "unknown":
-			query += ` AND category='unknown'`
+			query += ` AND i.category='unknown'`
 		default:
-			query += ` AND category=?`
+			query += ` AND i.category=?`
 			args = append(args, category)
 		}
 	}
 	if search != "" {
-		query += ` AND positionCaseInsensitive(payload, ?) > 0`
+		query += ` AND positionCaseInsensitive(r.payload, ?) > 0`
 		args = append(args, search)
 	}
 	if cursor != nil {
-		query += ` AND (received_at < ? OR (received_at = ? AND event_id < ?))`
+		query += ` AND (r.received_at < ? OR (r.received_at = ? AND r.event_id < ?))`
 		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
 	}
-	query += ` ORDER BY received_at DESC,event_id DESC LIMIT ?`
+	query += ` ORDER BY r.received_at DESC,r.event_id DESC LIMIT ?`
 	args = append(args, limit+1)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {
@@ -378,8 +461,9 @@ func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, categor
 	result := make([]EventRow, 0)
 	for rows.Next() {
 		var row EventRow
-		if err := rows.Scan(&row.EventID, &row.ReceivedAt, &row.Category, &row.Component,
-			&row.Message, &row.RawPayload, &row.Status, &row.Attributes); err != nil {
+		if err := rows.Scan(&row.EventID, &row.ReceivedAt, &row.EventTime,
+			&row.Category, &row.Component, &row.Message, &row.RawPayload,
+			&row.Status, &row.Attributes, &row.SourceTimezone); err != nil {
 			return EventPage{}, err
 		}
 		result = append(result, row)
@@ -403,27 +487,30 @@ func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search s
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
-	query := `SELECT record_id,setup_time,duration_ms,release_cause,release_info,
-		incoming_cgpn,outgoing_cgpn,incoming_cdpn,outgoing_cdpn,
-		incoming_description,outgoing_description,radius_session_id,unique_tag,
-		coalesce(setup_time,ingested_at) AS sort_time
-		FROM collector.cdr_records WHERE device_id=?`
+	query := `SELECT c.record_id,coalesce(t.setup_time,c.setup_time),c.duration_ms,
+		c.release_cause,c.release_info,c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,
+		c.outgoing_cdpn,c.incoming_description,c.outgoing_description,c.radius_session_id,
+		c.unique_tag,coalesce(t.setup_time,c.setup_time,c.ingested_at) AS sort_time
+		FROM collector.cdr_records AS c FINAL
+		LEFT JOIN collector.cdr_time_interpretations AS t FINAL
+			ON t.device_id=c.device_id AND t.record_id=c.record_id
+		WHERE c.device_id=?`
 	args := []any{deviceID}
 	if search != "" {
-		query += ` AND (positionCaseInsensitive(incoming_cgpn,?)>0 OR positionCaseInsensitive(outgoing_cgpn,?)>0
-			OR positionCaseInsensitive(incoming_cdpn,?)>0 OR positionCaseInsensitive(outgoing_cdpn,?)>0
-			OR positionCaseInsensitive(radius_session_id,?)>0 OR positionCaseInsensitive(unique_tag,?)>0
-			OR positionCaseInsensitive(incoming_description,?)>0 OR positionCaseInsensitive(outgoing_description,?)>0)`
+		query += ` AND (positionCaseInsensitive(c.incoming_cgpn,?)>0 OR positionCaseInsensitive(c.outgoing_cgpn,?)>0
+			OR positionCaseInsensitive(c.incoming_cdpn,?)>0 OR positionCaseInsensitive(c.outgoing_cdpn,?)>0
+			OR positionCaseInsensitive(c.radius_session_id,?)>0 OR positionCaseInsensitive(c.unique_tag,?)>0
+			OR positionCaseInsensitive(c.incoming_description,?)>0 OR positionCaseInsensitive(c.outgoing_description,?)>0)`
 		for range 8 {
 			args = append(args, search)
 		}
 	}
 	if cursor != nil {
-		query += ` AND (coalesce(setup_time,ingested_at) < ?
-			OR (coalesce(setup_time,ingested_at) = ? AND record_id < ?))`
+		query += ` AND (coalesce(t.setup_time,c.setup_time,c.ingested_at) < ?
+			OR (coalesce(t.setup_time,c.setup_time,c.ingested_at) = ? AND c.record_id < ?))`
 		args = append(args, cursor.SortTime, cursor.SortTime, cursor.RecordID)
 	}
-	query += ` ORDER BY sort_time DESC,record_id DESC LIMIT ?`
+	query += ` ORDER BY sort_time DESC,c.record_id DESC LIMIT ?`
 	args = append(args, limit+1)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {
@@ -452,17 +539,22 @@ func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search s
 }
 
 func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID) ([]TimelineRow, error) {
-	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,e.category,e.component,e.message,
-		e.payload,e.parse_status,e.attributes,l.method,l.max_confidence
+	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,i.event_time,i.category,
+		i.component,i.message,e.payload,i.parse_status,i.attributes,i.source_timezone,
+		l.method,l.max_confidence
 		FROM (
 			SELECT device_id,event_id,argMax(method,confidence) AS method,
 				max(confidence) AS max_confidence
 			FROM collector.call_event_links
-			WHERE device_id=? AND cdr_record_id=?
+			WHERE device_id=? AND cdr_record_id=? AND parser_version=?
 			GROUP BY device_id,event_id
 		) l
 		INNER JOIN collector.raw_syslog e ON e.device_id=l.device_id AND e.event_id=l.event_id
-		ORDER BY e.received_at`, deviceID, recordID)
+		INNER JOIN collector.syslog_interpretations AS i FINAL
+			ON i.device_id=e.device_id AND i.event_id=e.event_id
+		WHERE i.parser_version=?
+		ORDER BY e.received_at`, deviceID, recordID, SyslogParserVersion,
+		SyslogParserVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -470,8 +562,10 @@ func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID)
 	result := make([]TimelineRow, 0)
 	for rows.Next() {
 		var row TimelineRow
-		if err := rows.Scan(&row.EventID, &row.ReceivedAt, &row.Category, &row.Component,
-			&row.Message, &row.RawPayload, &row.Status, &row.Attributes, &row.Method, &row.Confidence); err != nil {
+		if err := rows.Scan(&row.EventID, &row.ReceivedAt, &row.EventTime,
+			&row.Category, &row.Component, &row.Message, &row.RawPayload,
+			&row.Status, &row.Attributes, &row.SourceTimezone,
+			&row.Method, &row.Confidence); err != nil {
 			return nil, err
 		}
 		result = append(result, row)
@@ -483,15 +577,21 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 	var result DeviceStats
 	err := c.Conn.QueryRow(ctx, `SELECT count(),countIf(release_cause IS NOT NULL AND release_cause!=16),
 		ifNull(avg(duration_ms),0)
-		FROM collector.cdr_records
-		WHERE device_id=? AND coalesce(setup_time,ingested_at)>=now()-INTERVAL 24 HOUR`, deviceID).
+		FROM collector.cdr_records AS c FINAL
+		LEFT JOIN collector.cdr_time_interpretations AS t FINAL
+			ON t.device_id=c.device_id AND t.record_id=c.record_id
+		WHERE c.device_id=? AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=now()-INTERVAL 24 HOUR`,
+		deviceID).
 		Scan(&result.Calls24h, &result.FailedCalls24h, &result.AverageTalkMS)
 	if err != nil {
 		return DeviceStats{}, err
 	}
-	err = c.Conn.QueryRow(ctx, `SELECT countIf(category='alarms'),countIf(category='radius'),
-		countIf(category='unknown')
-		FROM collector.raw_syslog WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR`, deviceID).
+	err = c.Conn.QueryRow(ctx, `SELECT countIf(i.category='alarms'),countIf(i.category='radius'),
+		countIf(i.category='unknown')
+		FROM collector.syslog_interpretations AS i FINAL
+		INNER JOIN collector.raw_syslog r ON r.device_id=i.device_id AND r.event_id=i.event_id
+		WHERE i.device_id=? AND i.parser_version=?
+			AND r.received_at>=now()-INTERVAL 24 HOUR`, deviceID, SyslogParserVersion).
 		Scan(&result.Alarms24h, &result.Radius24h, &result.Unknown24h)
 	if err != nil {
 		return DeviceStats{}, err
@@ -500,31 +600,43 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 		countIf(completeness!='complete')
 		FROM collector.antifraud_transactions FINAL
 		WHERE device_id=? AND is_antifraud=1
-			AND last_event_at>=now()-INTERVAL 24 HOUR`, deviceID).
+			AND parser_version=? AND last_event_at>=now()-INTERVAL 24 HOUR`,
+		deviceID, SyslogParserVersion).
 		Scan(&result.Antifraud24h, &result.AntifraudRejected24h,
 			&result.AntifraudIncomplete24h)
 	if err != nil {
 		return DeviceStats{}, err
 	}
 	err = c.Conn.QueryRow(ctx, `SELECT count()
-		FROM collector.cdr_records c
+		FROM collector.cdr_records AS c FINAL
+		LEFT JOIN collector.cdr_time_interpretations AS t FINAL
+			ON t.device_id=c.device_id AND t.record_id=c.record_id
 		LEFT JOIN (
 			SELECT DISTINCT device_id,cdr_record_id
 			FROM collector.call_event_links
+			WHERE parser_version=?
 		) l ON l.device_id=c.device_id AND l.cdr_record_id=c.record_id
-		WHERE c.device_id=? AND coalesce(c.setup_time,c.ingested_at)>=now()-INTERVAL 24 HOUR
-			AND l.cdr_record_id=toUUID('00000000-0000-0000-0000-000000000000')`, deviceID).
+		WHERE c.device_id=? AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=now()-INTERVAL 24 HOUR
+			AND l.cdr_record_id=toUUID('00000000-0000-0000-0000-000000000000')`,
+		SyslogParserVersion, deviceID).
 		Scan(&result.UnlinkedCalls24h)
 	return result, err
 }
 
 func (c *Client) SyslogDiagnostics(ctx context.Context, deviceID uuid.UUID) (SyslogDiagnostics, error) {
-	rows, err := c.Conn.Query(ctx, `SELECT category,parse_status,parser_version,header_format,source_port,
-		count(),max(received_at)
-		FROM collector.raw_syslog
-		WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR
-		GROUP BY category,parse_status,parser_version,header_format,source_port
-		ORDER BY count() DESC`, deviceID)
+	rows, err := c.Conn.Query(ctx, `SELECT i.category,i.parse_status,i.parser_version,
+		r.header_format,r.source_port,count(),max(r.max_received_at)
+		FROM collector.syslog_interpretations AS i FINAL
+		INNER JOIN (
+			SELECT event_id,device_id,any(header_format) AS header_format,
+				any(source_port) AS source_port,max(received_at) AS max_received_at
+			FROM collector.raw_syslog
+			WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR
+			GROUP BY event_id,device_id
+		) r ON r.device_id=i.device_id AND r.event_id=i.event_id
+		WHERE i.device_id=? AND i.parser_version=?
+		GROUP BY i.category,i.parse_status,i.parser_version,r.header_format,r.source_port
+		ORDER BY count() DESC`, deviceID, deviceID, SyslogParserVersion)
 	if err != nil {
 		return SyslogDiagnostics{}, err
 	}
@@ -558,10 +670,15 @@ func (c *Client) SyslogDiagnostics(ctx context.Context, deviceID uuid.UUID) (Sys
 	if err := migrationRows.Err(); err != nil {
 		return SyslogDiagnostics{}, err
 	}
-	if err := c.Conn.QueryRow(ctx, `SELECT countDistinct(event_id),
-		countDistinctIf(event_id,category!='unknown')
-		FROM collector.raw_syslog
-		WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR`, deviceID).
+	if err := c.Conn.QueryRow(ctx, `SELECT
+		(SELECT countDistinct(event_id) FROM collector.raw_syslog
+		 WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR),
+		(SELECT countDistinct(i.event_id)
+		 FROM collector.syslog_interpretations AS i FINAL
+		 INNER JOIN collector.raw_syslog r ON r.event_id=i.event_id AND r.device_id=i.device_id
+		 WHERE i.device_id=? AND i.parser_version=? AND i.category!='unknown'
+			AND r.received_at>=now()-INTERVAL 24 HOUR)`,
+		deviceID, deviceID, SyslogParserVersion).
 		Scan(&result.RawEvents24h, &result.Classified24h); err != nil {
 		return SyslogDiagnostics{}, err
 	}
@@ -577,20 +694,59 @@ func (c *Client) SyslogDiagnostics(ctx context.Context, deviceID uuid.UUID) (Sys
 		 WHERE r.device_id=?
 			AND l.event_id=toUUID('00000000-0000-0000-0000-000000000000'))`,
 		deviceID, SyslogParserVersion, SyslogParserVersion, deviceID).
-		Scan(&result.ReprocessedV5, &result.ReprocessRemaining); err != nil {
+		Scan(&result.ReprocessedCurrent, &result.ReprocessRemaining); err != nil {
 		return SyslogDiagnostics{}, err
 	}
 	if err := c.Conn.QueryRow(ctx, `SELECT countIf(completeness='complete'),
 		countIf(completeness!='complete'),
-		countIf(acct_session_id_normalized='' OR acct_session_id_normalized NOT IN (
-			SELECT radius_session_id_normalized FROM collector.cdr_records
-			WHERE device_id=? AND radius_session_id_normalized!=''
+		countIf(transaction_id NOT IN (
+			SELECT transaction_id FROM collector.antifraud_call_links
+			WHERE device_id=? AND parser_version=? AND ambiguity=0
 		))
 		FROM collector.antifraud_transactions FINAL
-		WHERE device_id=? AND is_antifraud=1`, deviceID, deviceID).
+		WHERE device_id=? AND is_antifraud=1 AND parser_version=?`,
+		deviceID, SyslogParserVersion, deviceID, SyslogParserVersion).
 		Scan(&result.AntifraudComplete, &result.AntifraudIncomplete,
 			&result.AntifraudOrphan); err != nil {
 		return SyslogDiagnostics{}, err
 	}
+	_ = c.Conn.QueryRow(ctx, `SELECT exact_linked,composite_linked,ambiguous
+		FROM collector.correlation_runs FINAL
+		WHERE device_id=? AND parser_version=? ORDER BY ran_at DESC LIMIT 1`,
+		deviceID, SyslogParserVersion).
+		Scan(&result.CorrelationExact, &result.CorrelationComposite,
+			&result.CorrelationAmbiguous)
 	return result, nil
+}
+
+func (c *Client) InvalidateDeviceDerivedData(ctx context.Context, deviceID uuid.UUID) error {
+	mutations := []string{
+		`ALTER TABLE collector.syslog_reprocess_ledger DELETE
+			WHERE device_id=? AND parser_version=? SETTINGS mutations_sync=1`,
+		`ALTER TABLE collector.syslog_interpretations DELETE
+			WHERE device_id=? AND parser_version=? SETTINGS mutations_sync=1`,
+		`ALTER TABLE collector.radius_events DELETE
+			WHERE device_id=? AND parser_version=? SETTINGS mutations_sync=1`,
+		`ALTER TABLE collector.antifraud_transactions DELETE
+			WHERE device_id=? AND parser_version=? SETTINGS mutations_sync=1`,
+		`ALTER TABLE collector.call_event_links DELETE
+			WHERE device_id=? AND parser_version=? SETTINGS mutations_sync=1`,
+		`ALTER TABLE collector.antifraud_call_links DELETE
+			WHERE device_id=? AND parser_version=? SETTINGS mutations_sync=1`,
+		`ALTER TABLE collector.correlation_runs DELETE
+			WHERE device_id=? AND parser_version=? SETTINGS mutations_sync=1`,
+	}
+	for _, mutation := range mutations {
+		if err := c.Conn.Exec(ctx, mutation, deviceID, SyslogParserVersion); err != nil {
+			return err
+		}
+	}
+	c.antifraudMu.Lock()
+	for transactionID, transaction := range c.antifraudActive {
+		if transaction.DeviceID == deviceID {
+			delete(c.antifraudActive, transactionID)
+		}
+	}
+	c.antifraudMu.Unlock()
+	return nil
 }

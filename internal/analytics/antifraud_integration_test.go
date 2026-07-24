@@ -101,7 +101,9 @@ func TestAntifraudLifecycleClickHouse(t *testing.T) {
 	}
 	item := page.Items[0]
 	if item.Decision != "reject" || item.Q850Cause == nil || *item.Q850Cause != 21 ||
-		item.LegCount != 1 || item.Completeness != "complete" {
+		item.LegCount != 1 || item.Completeness != "complete" ||
+		item.CorrelationMethod != "exact_acct_session" ||
+		item.CorrelationConfidence != 1 || abs64(item.CorrelationTimeDeltaMS) >= 1000 {
 		t.Fatalf("invalid lifecycle: %#v", item)
 	}
 	timeline, err := client.AntifraudTimeline(ctx, deviceID, item.TransactionID)
@@ -117,6 +119,13 @@ func TestAntifraudLifecycleClickHouse(t *testing.T) {
 	}
 	if len(callTimeline) < 3 {
 		t.Fatalf("CDR did not receive complete AntiFraud evidence: %d", len(callTimeline))
+	}
+	eventsPage, err := client.ListEventsPage(ctx, deviceID, "all", "", 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eventsPage.Items) != 3 {
+		t.Fatalf("got %d interpreted Syslog events, want 3", len(eventsPage.Items))
 	}
 	var candidateCount, candidateLinks uint64
 	if err := client.Conn.QueryRow(ctx, `SELECT count()
@@ -148,7 +157,117 @@ func TestAntifraudLifecycleClickHouse(t *testing.T) {
 		t.Fatal(err)
 	}
 	if diagnostics.RawEvents24h != 3 || diagnostics.Classified24h != 3 ||
-		diagnostics.AntifraudComplete != 1 {
+		diagnostics.AntifraudComplete != 1 || diagnostics.CorrelationExact == 0 {
 		t.Fatalf("incorrect parser/lifecycle diagnostics: %#v", diagnostics)
+	}
+}
+
+func TestReconcilerEnforcesOneToOneOnSessionConflict(t *testing.T) {
+	address := os.Getenv("CLICKHOUSE_TEST_ADDR")
+	if address == "" {
+		t.Skip("CLICKHOUSE_TEST_ADDR is not set")
+	}
+	client, err := Open(
+		address, "collector", os.Getenv("CLICKHOUSE_TEST_USER"),
+		os.Getenv("CLICKHOUSE_TEST_PASSWORD"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := client.Migrate(ctx, "../../migrations/clickhouse"); err != nil {
+		t.Fatal(err)
+	}
+	deviceID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	for index, callContext := range []string{"C-CONFLICT-1", "C-CONFLICT-2"} {
+		event := SyslogEvent{
+			EventID: uuid.New(), DeviceID: deviceID,
+			ReceivedAt: now.Add(time.Duration(index) * time.Second),
+			SourceIP:   net.ParseIP("10.0.0.11"), SourcePort: 10003,
+			Category: "radius", Component: "RADIUS", ParseStatus: "parsed",
+			Attributes: map[string]string{
+				"call_context": callContext, "acct_session_id": "shared-session",
+				"packet_code": "Access-Request", "request_type": "check_call",
+				"is_antifraud": "true",
+			},
+		}
+		if err := client.ProcessSyslogDerived(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup := now
+	if err := client.InsertCDRBatch(ctx, []CDRRecord{{
+		RecordID: uuid.New(), DeviceID: deviceID, FileID: uuid.New(), RowNumber: 1,
+		IngestedAt: now, SetupTime: &setup, RadiusSessionID: "shared-session",
+		RadiusSessionIDNormalized: "shared-session", RawFields: map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var linked, ambiguous uint64
+	if err := client.Conn.QueryRow(ctx, `SELECT countIf(ambiguity=0),countIf(ambiguity=1)
+		FROM collector.antifraud_call_links FINAL
+		WHERE device_id=? AND parser_version=?`, deviceID, SyslogParserVersion).
+		Scan(&linked, &ambiguous); err != nil {
+		t.Fatal(err)
+	}
+	if linked != 1 || ambiguous != 1 {
+		t.Fatalf("linked=%d ambiguous=%d, want strict one-to-one 1/1", linked, ambiguous)
+	}
+	if err := client.InvalidateDeviceDerivedData(ctx, deviceID); err != nil {
+		t.Fatalf("invalidate derived data after timezone edit: %v", err)
+	}
+}
+
+func TestCDRTimezoneReinterpretationUsesRawWallClock(t *testing.T) {
+	address := os.Getenv("CLICKHOUSE_TEST_ADDR")
+	if address == "" {
+		t.Skip("CLICKHOUSE_TEST_ADDR is not set")
+	}
+	client, err := Open(
+		address, "collector", os.Getenv("CLICKHOUSE_TEST_USER"),
+		os.Getenv("CLICKHOUSE_TEST_PASSWORD"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := client.Migrate(ctx, "../../migrations/clickhouse"); err != nil {
+		t.Fatal(err)
+	}
+	deviceID, recordID := uuid.New(), uuid.New()
+	wrongUTC := time.Date(2026, 7, 24, 18, 0, 0, 0, time.UTC)
+	if err := client.InsertCDRBatch(ctx, []CDRRecord{{
+		RecordID: recordID, DeviceID: deviceID, FileID: uuid.New(), RowNumber: 1,
+		IngestedAt: wrongUTC, SetupTime: &wrongUTC, SourceTimezone: "UTC",
+		RawFields: map[string]string{"setup_time": "2026-07-24 18:00:00.000"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReinterpretCDRTimes(ctx, deviceID, "Asia/Novosibirsk"); err != nil {
+		t.Fatal(err)
+	}
+	var setup time.Time
+	var timezone string
+	var offset int16
+	if err := client.Conn.QueryRow(ctx, `SELECT setup_time,source_timezone,
+		source_utc_offset_minutes FROM collector.cdr_time_interpretations FINAL
+		WHERE device_id=? AND record_id=?`, deviceID, recordID).
+		Scan(&setup, &timezone, &offset); err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 7, 24, 11, 0, 0, 0, time.UTC)
+	if !setup.Equal(want) || timezone != "Asia/Novosibirsk" || offset != 420 {
+		t.Fatalf("setup=%v timezone=%q offset=%d", setup, timezone, offset)
+	}
+	page, err := client.ListCallsPage(ctx, deviceID, "", 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].SetupTime == nil ||
+		!page.Items[0].SetupTime.Equal(want) {
+		t.Fatalf("calls API did not use corrected time: %#v", page.Items)
 	}
 }

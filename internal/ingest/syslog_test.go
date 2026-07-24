@@ -309,6 +309,35 @@ func TestConfigurationUserNameIsNotMisclassifiedAsRadius(t *testing.T) {
 	}
 }
 
+func TestSyslogWallClockUsesDeviceTimezone(t *testing.T) {
+	received := time.Date(2026, 7, 24, 11, 0, 1, 0, time.UTC)
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: received,
+		SourceIP: "10.0.0.10", SourcePort: 10003, Timezone: "Asia/Novosibirsk",
+		Payload: []byte("<14> <smg1016m> 18:00:00.500 [INFO] [CTZ] RADIUS. Access-Request"),
+	})
+	want := time.Date(2026, 7, 24, 11, 0, 0, 500_000_000, time.UTC)
+	if event.EventTime == nil || !event.EventTime.Equal(want) {
+		t.Fatalf("event time = %v, want %v", event.EventTime, want)
+	}
+	if event.SourceTimezone != "Asia/Novosibirsk" || event.SourceUTCOffsetMinutes != 420 {
+		t.Fatalf("source time audit = %q/%d", event.SourceTimezone, event.SourceUTCOffsetMinutes)
+	}
+}
+
+func TestSyslogTimezoneConversionAcrossUTCMidnight(t *testing.T) {
+	received := time.Date(2026, 7, 23, 18, 30, 1, 0, time.UTC)
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: received,
+		Timezone: "Asia/Novosibirsk",
+		Payload:  []byte("<14> <smg1016m> 01:30:00.000 [INFO] [CTZ2] CALLS: setup"),
+	})
+	want := time.Date(2026, 7, 23, 18, 30, 0, 0, time.UTC)
+	if event.EventTime == nil || !event.EventTime.Equal(want) {
+		t.Fatalf("event time = %v, want %v", event.EventTime, want)
+	}
+}
+
 func TestKnownBodyDoesNotHidePartialEnvelope(t *testing.T) {
 	event := ParseSyslog(RawSyslog{
 		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),

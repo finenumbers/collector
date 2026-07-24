@@ -77,12 +77,17 @@ Health endpoints:
 В административной строке «Диагностика Syslog» отдельно показываются ingress
 accepted/handoff/spool, app accepted/rejected, classified/raw coverage, progress
 historical reprocess и AntiFraud complete/incomplete/orphan. После обновления на parser
-v5 `reprocessRemaining` должен монотонно дойти до нуля; Collector можно перезапускать,
+v6 `reprocessRemaining` должен монотонно дойти до нуля; Collector можно перезапускать,
 ledger продолжит с необработанных event IDs. Обязательные алерты: container restart,
 оба local spool depth/size (`ingress.db`, `syslog.db`), handoff errors, NATS lag/storage,
 unknown source Syslog, unknown parser rate, persistent reprocess backlog, AntiFraud
 orphan/incomplete rate, CDR ingest age, disk >75/85%, ClickHouse insert errors,
 SFTPGo unavailable, backup age.
+
+IANA timezone редактируется в настройках конкретного SMG. Сохранение инвалидирует
+только derived v6, после чего непрерывный replay пересобирает interpretation, lifecycle
+и links из неизменяемого raw Syslog. Контролируйте correlation coverage
+`exact/composite/ambiguous/orphan`.
 
 ## Инциденты
 

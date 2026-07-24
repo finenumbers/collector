@@ -47,33 +47,39 @@ type AntifraudTransaction struct {
 }
 
 type AntifraudRow struct {
-	TransactionID      uuid.UUID         `json:"transactionId"`
-	FirstEventAt       time.Time         `json:"firstEventAt"`
-	LastEventAt        time.Time         `json:"lastEventAt"`
-	CallContext        string            `json:"callContext"`
-	AcctSessionID      string            `json:"acctSessionId"`
-	RequestType        string            `json:"requestType"`
-	RequestCode        string            `json:"requestCode"`
-	ResponseCode       string            `json:"responseCode"`
-	Decision           string            `json:"decision"`
-	DecisionReason     string            `json:"decisionReason"`
-	ServerAddress      string            `json:"serverAddress"`
-	Retries            uint16            `json:"retries"`
-	LatencyMS          *uint32           `json:"latencyMs"`
-	CallingStationID   string            `json:"callingStationId"`
-	CalledStationID    string            `json:"calledStationId"`
-	SrcNumberIn        string            `json:"srcNumberIn"`
-	DstNumberIn        string            `json:"dstNumberIn"`
-	SrcNumberOut       string            `json:"srcNumberOut"`
-	DstNumberOut       string            `json:"dstNumberOut"`
-	InTrunkgroupLabel  string            `json:"inTrunkgroupLabel"`
-	OutTrunkgroupLabel string            `json:"outTrunkgroupLabel"`
-	AccountingStatus   string            `json:"accountingStatus"`
-	Q850Cause          *uint16           `json:"q850Cause"`
-	Completeness       string            `json:"completeness"`
-	Attributes         map[string]string `json:"attributes"`
-	LinkedRecordIDs    []uuid.UUID       `json:"linkedRecordIds"`
-	LegCount           uint64            `json:"legCount"`
+	TransactionID          uuid.UUID         `json:"transactionId"`
+	FirstEventAt           time.Time         `json:"firstEventAt"`
+	LastEventAt            time.Time         `json:"lastEventAt"`
+	CallContext            string            `json:"callContext"`
+	AcctSessionID          string            `json:"acctSessionId"`
+	RequestType            string            `json:"requestType"`
+	RequestCode            string            `json:"requestCode"`
+	ResponseCode           string            `json:"responseCode"`
+	Decision               string            `json:"decision"`
+	DecisionReason         string            `json:"decisionReason"`
+	ServerAddress          string            `json:"serverAddress"`
+	Retries                uint16            `json:"retries"`
+	LatencyMS              *uint32           `json:"latencyMs"`
+	CallingStationID       string            `json:"callingStationId"`
+	CalledStationID        string            `json:"calledStationId"`
+	SrcNumberIn            string            `json:"srcNumberIn"`
+	DstNumberIn            string            `json:"dstNumberIn"`
+	SrcNumberOut           string            `json:"srcNumberOut"`
+	DstNumberOut           string            `json:"dstNumberOut"`
+	InTrunkgroupLabel      string            `json:"inTrunkgroupLabel"`
+	OutTrunkgroupLabel     string            `json:"outTrunkgroupLabel"`
+	AccountingStatus       string            `json:"accountingStatus"`
+	Q850Cause              *uint16           `json:"q850Cause"`
+	Completeness           string            `json:"completeness"`
+	Attributes             map[string]string `json:"attributes"`
+	LinkedRecordIDs        []uuid.UUID       `json:"linkedRecordIds"`
+	LegCount               uint64            `json:"legCount"`
+	CDRSetupTime           *time.Time        `json:"cdrSetupTime"`
+	CorrelationMethod      string            `json:"correlationMethod"`
+	CorrelationConfidence  float32           `json:"correlationConfidence"`
+	CorrelationTimeDeltaMS int64             `json:"correlationTimeDeltaMs"`
+	AmbiguityReason        string            `json:"ambiguityReason"`
+	CDRSessionID           string            `json:"cdrSessionId"`
 }
 
 type AntifraudCursor struct {
@@ -87,12 +93,13 @@ type AntifraudPage struct {
 }
 
 type ReplaySyslogRow struct {
-	EventID    uuid.UUID
-	DeviceID   uuid.UUID
-	ReceivedAt time.Time
-	SourceIP   net.IP
-	SourcePort uint16
-	Payload    []byte
+	EventID        uuid.UUID
+	DeviceID       uuid.UUID
+	ReceivedAt     time.Time
+	SourceIP       net.IP
+	SourcePort     uint16
+	Payload        []byte
+	SourceTimezone string
 }
 
 func (c *Client) ProcessSyslogDerived(ctx context.Context, event SyslogEvent) error {
@@ -114,10 +121,13 @@ func (c *Client) processRadiusEvent(ctx context.Context, event SyslogEvent) erro
 		occurredAt = *event.EventTime
 	}
 	transactionID := antifraudTransactionID(event, occurredAt)
+	packetTransactionID := antifraudPacketTransactionID(event, occurredAt, transactionID)
 	packetIdentifier := parseUint8Attribute(event.Attributes["packet_identifier"])
 	latency := parseUint32Attribute(event.Attributes["latency_ms"])
 	delay := parseUint32Attribute(event.Attributes["acct_delay_time"])
-	eventTimestamp := parseRadiusEventTimestamp(event.Attributes["event_timestamp"])
+	eventTimestamp := parseRadiusEventTimestamp(
+		event.Attributes["event_timestamp"], event.SourceTimezone,
+	)
 	q850 := parseUint16Attribute(event.Attributes["q850_cause"])
 	retry := uint16(0)
 	if parsed := parseUint16Attribute(event.Attributes["retry"]); parsed != nil {
@@ -146,19 +156,20 @@ func (c *Client) processRadiusEvent(ctx context.Context, event SyslogEvent) erro
 		completeness = "packet"
 	}
 	if err := c.Conn.Exec(ctx, `INSERT INTO collector.radius_events
-		(event_id,device_id,transaction_id,call_context,is_antifraud,occurred_at,direction,
+		(event_id,device_id,transaction_id,packet_transaction_id,call_context,is_antifraud,occurred_at,direction,
 		 packet_code,packet_identifier,request_type,server_address,acct_session_id,
 		 acct_session_id_normalized,calling_station_id,called_station_id,result,decision,
 		 decision_reason,event_timestamp,acct_delay_seconds,accounting_status,completeness,
-		 retry,latency_ms,attributes,raw_event_id)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		event.EventID, event.DeviceID, transactionID, event.Attributes["call_context"],
+		 parser_version,retry,latency_ms,attributes,raw_event_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		event.EventID, event.DeviceID, transactionID, packetTransactionID,
+		event.Attributes["call_context"],
 		boolToUInt8(isAntifraud), occurredAt, direction, packetCode, packetIdentifier,
 		requestType, event.Attributes["server_address"], sessionID, normalized,
 		event.Attributes["calling_station_id"], event.Attributes["called_station_id"],
 		result, event.Attributes["decision"], event.Attributes["decision_reason"],
 		eventTimestamp, delay, event.Attributes["accounting_status"], completeness,
-		retry, latency, event.Attributes, event.EventID); err != nil {
+		SyslogParserVersion, retry, latency, event.Attributes, event.EventID); err != nil {
 		return err
 	}
 
@@ -308,7 +319,9 @@ func (c *Client) loadAntifraudTransaction(
 		calling_station_id,called_station_id,src_number_in,dst_number_in,src_number_out,dst_number_out,
 		in_trunkgroup_label,out_trunkgroup_label,accounting_status,q850_cause,is_antifraud,
 		completeness,attributes,raw_event_ids,parser_version
-		FROM collector.antifraud_transactions FINAL WHERE transaction_id=? LIMIT 1`, transactionID)
+		FROM collector.antifraud_transactions FINAL
+		WHERE transaction_id=? AND parser_version=? LIMIT 1`,
+		transactionID, SyslogParserVersion)
 	var result AntifraudTransaction
 	if err := row.Scan(
 		&result.TransactionID, &result.DeviceID, &result.UpdatedAt, &result.FirstEventAt,
@@ -350,31 +363,7 @@ func (c *Client) insertAntifraudTransaction(ctx context.Context, item *Antifraud
 }
 
 func (c *Client) linkAntifraudTransaction(ctx context.Context, item *AntifraudTransaction) error {
-	if item.AcctSessionIDNormalized == "" || len(item.RawEventIDs) == 0 {
-		return nil
-	}
-	if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
-		(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
-		SELECT c.device_id,c.record_id,arrayJoin(?),'exact_acct_session',toFloat32(1.0),
-			map('acct_session_id',c.radius_session_id_normalized),'smg-3.410-v5',now64(3)
-		FROM collector.cdr_records c
-		WHERE c.device_id=? AND c.radius_session_id_normalized=?`,
-		item.RawEventIDs, item.DeviceID, item.AcctSessionIDNormalized); err != nil {
-		return err
-	}
-	if item.CallContext == "" {
-		return nil
-	}
-	return c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
-		(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
-		SELECT c.device_id,c.record_id,e.event_id,'call_context_transaction',toFloat32(0.98),
-			map('call_context',?,'acct_session_id',?),'smg-3.410-v5',now64(3)
-		FROM collector.cdr_records c
-		CROSS JOIN collector.raw_syslog e
-		WHERE c.device_id=? AND c.radius_session_id_normalized=?
-			AND e.device_id=c.device_id AND e.attributes['call_context']=?`,
-		item.CallContext, item.AcctSessionIDNormalized, item.DeviceID,
-		item.AcctSessionIDNormalized, item.CallContext)
+	return c.ReconcileDevice(ctx, item.DeviceID, item.FirstEventAt.Add(-10*time.Minute))
 }
 
 func (c *Client) correlateExactProtocolEvent(ctx context.Context, event SyslogEvent) error {
@@ -382,19 +371,10 @@ func (c *Client) correlateExactProtocolEvent(ctx context.Context, event SyslogEv
 	if event.EventTime != nil {
 		occurredAt = *event.EventTime
 	}
-	if callContext := event.Attributes["call_context"]; callContext != "" {
-		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
-			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
-			SELECT c.device_id,c.record_id,?,'call_context_transaction',toFloat32(0.98),
-				map('call_context',?,'acct_session_id',t.acct_session_id_normalized),
-				'smg-3.410-v5',now64(3)
-			FROM collector.antifraud_transactions AS t FINAL
-			INNER JOIN collector.cdr_records c
-				ON c.device_id=t.device_id
-				AND c.radius_session_id_normalized=t.acct_session_id_normalized
-			WHERE t.device_id=? AND t.call_context=?
-				AND t.acct_session_id_normalized!=''`,
-			event.EventID, callContext, event.DeviceID, callContext); err != nil {
+	if event.Category != "radius" && event.Attributes["call_context"] != "" {
+		if err := c.ReconcileDevice(
+			ctx, event.DeviceID, occurredAt.Add(-10*time.Minute),
+		); err != nil {
 			return err
 		}
 	}
@@ -402,7 +382,7 @@ func (c *Client) correlateExactProtocolEvent(ctx context.Context, event SyslogEv
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,record_id,?,'exact_sip_call_id',toFloat32(1.0),
-				map('sip_call_id',?),'smg-3.410-v5',now64(3)
+				map('sip_call_id',?),'smg-3.410-v6',now64(3)
 			FROM collector.cdr_records
 			WHERE device_id=? AND (incoming_sip_call_id=? OR outgoing_sip_call_id=?)
 				AND ? BETWEEN coalesce(setup_time,ingested_at)-INTERVAL 5 MINUTE
@@ -415,7 +395,7 @@ func (c *Client) correlateExactProtocolEvent(ctx context.Context, event SyslogEv
 		return c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,record_id,?,'exact_global_callref',toFloat32(1.0),
-				map('global_callref',?),'smg-3.410-v5',now64(3)
+				map('global_callref',?),'smg-3.410-v6',now64(3)
 			FROM collector.cdr_records WHERE device_id=? AND global_callref=?`,
 			event.EventID, globalCallref, event.DeviceID, globalCallref)
 	}
@@ -430,7 +410,7 @@ func (c *Client) correlateCDRExactEvidence(ctx context.Context, record CDRRecord
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,?,event_id,'exact_sip_call_id',toFloat32(1.0),
-				map('sip_call_id',?),'smg-3.410-v5',now64(3)
+				map('sip_call_id',?),'smg-3.410-v6',now64(3)
 			FROM collector.raw_syslog
 			WHERE device_id=? AND attributes['sip_call_id']=?
 				AND received_at BETWEEN coalesce(?,?)-INTERVAL 5 MINUTE
@@ -444,7 +424,7 @@ func (c *Client) correlateCDRExactEvidence(ctx context.Context, record CDRRecord
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,?,event_id,'exact_global_callref',toFloat32(1.0),
-				map('global_callref',?),'smg-3.410-v5',now64(3)
+				map('global_callref',?),'smg-3.410-v6',now64(3)
 			FROM collector.raw_syslog
 			WHERE device_id=? AND attributes['global_callref']=?`,
 			record.RecordID, record.GlobalCallref, record.DeviceID, record.GlobalCallref); err != nil {
@@ -455,7 +435,7 @@ func (c *Client) correlateCDRExactEvidence(ctx context.Context, record CDRRecord
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,?,event_id,'cdr_radius_rejected',toFloat32(0.99),
-				map('rejecting_radius_server',?),'smg-3.410-v5',now64(3)
+				map('rejecting_radius_server',?),'smg-3.410-v6',now64(3)
 			FROM collector.raw_syslog
 			WHERE device_id=? AND category='radius'
 				AND (attributes['server_address']=?
@@ -473,9 +453,6 @@ func (c *Client) correlateCDRExactEvidence(ctx context.Context, record CDRRecord
 }
 
 func (c *Client) insertCorrelationCandidates(ctx context.Context, record CDRRecord) error {
-	if record.RadiusSessionIDNormalized != "" {
-		return nil
-	}
 	numbers := []string{
 		record.IncomingCgPN, record.OutgoingCgPN, record.IncomingCdPN, record.OutgoingCdPN,
 	}
@@ -527,17 +504,30 @@ func (c *Client) ListAntifraudPage(
 		t.decision_reason,t.server_address,t.retries,t.latency_ms,t.calling_station_id,
 		t.called_station_id,t.src_number_in,t.dst_number_in,t.src_number_out,t.dst_number_out,
 		t.in_trunkgroup_label,t.out_trunkgroup_label,t.accounting_status,t.q850_cause,
-		t.completeness,t.attributes,ifNull(c.record_ids,[]),ifNull(c.leg_count,0)
+		t.completeness,t.attributes,ifNull(c.record_ids,[]),ifNull(c.leg_count,0),
+		c.setup_time,ifNull(c.method,''),ifNull(c.confidence,0),
+		ifNull(c.time_delta_ms,0),ifNull(c.ambiguity_reason,''),ifNull(c.cdr_session_id,'')
 		FROM collector.antifraud_transactions AS t FINAL
 		LEFT JOIN (
-			SELECT device_id,radius_session_id_normalized,groupArray(record_id) AS record_ids,
-				count() AS leg_count
-			FROM collector.cdr_records
-			GROUP BY device_id,radius_session_id_normalized
-		) c ON c.device_id=t.device_id
-			AND c.radius_session_id_normalized=t.acct_session_id_normalized
-		WHERE t.device_id=? AND t.is_antifraud=1`
-	args := []any{deviceID}
+			SELECT l.device_id AS device_id,l.transaction_id AS transaction_id,
+				groupArrayIf(l.cdr_record_id,l.ambiguity=0) AS record_ids,
+				countIf(l.ambiguity=0) AS leg_count,
+				minIf(coalesce(ct.setup_time,d.setup_time),l.ambiguity=0) AS setup_time,
+				argMaxIf(d.radius_session_id,l.linked_at,l.ambiguity=0) AS cdr_session_id,
+				argMaxIf(l.method,l.linked_at,l.ambiguity=0) AS method,
+				maxIf(l.confidence,l.ambiguity=0) AS confidence,
+				argMaxIf(l.time_delta_ms,l.linked_at,l.ambiguity=0) AS time_delta_ms,
+				argMaxIf(l.candidate_reason,l.linked_at,l.ambiguity=1) AS ambiguity_reason
+			FROM collector.antifraud_call_links AS l FINAL
+			LEFT JOIN collector.cdr_records AS d FINAL
+				ON d.device_id=l.device_id AND d.record_id=l.cdr_record_id
+			LEFT JOIN collector.cdr_time_interpretations AS ct FINAL
+				ON ct.device_id=d.device_id AND ct.record_id=d.record_id
+			WHERE l.parser_version=?
+			GROUP BY l.device_id,l.transaction_id
+		) c ON c.device_id=t.device_id AND c.transaction_id=t.transaction_id
+		WHERE t.device_id=? AND t.is_antifraud=1 AND t.parser_version=?`
+	args := []any{SyslogParserVersion, deviceID, SyslogParserVersion}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(t.acct_session_id,?)>0
 			OR positionCaseInsensitive(t.calling_station_id,?)>0
@@ -569,7 +559,9 @@ func (c *Client) ListAntifraudPage(
 			&item.SrcNumberIn, &item.DstNumberIn, &item.SrcNumberOut, &item.DstNumberOut,
 			&item.InTrunkgroupLabel, &item.OutTrunkgroupLabel, &item.AccountingStatus,
 			&item.Q850Cause, &item.Completeness, &item.Attributes, &item.LinkedRecordIDs,
-			&item.LegCount,
+			&item.LegCount, &item.CDRSetupTime, &item.CorrelationMethod,
+			&item.CorrelationConfidence, &item.CorrelationTimeDeltaMS,
+			&item.AmbiguityReason, &item.CDRSessionID,
 		); err != nil {
 			return AntifraudPage{}, err
 		}
@@ -588,14 +580,19 @@ func (c *Client) ListAntifraudPage(
 func (c *Client) AntifraudTimeline(
 	ctx context.Context, deviceID, transactionID uuid.UUID,
 ) ([]TimelineRow, error) {
-	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,e.category,e.component,
-		e.message,e.payload,e.parse_status,e.attributes,'antifraud_transaction',toFloat32(1.0)
+	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,i.event_time,i.category,
+		i.component,i.message,e.payload,i.parse_status,i.attributes,i.source_timezone,
+		'antifraud_transaction',toFloat32(1.0)
 		FROM collector.antifraud_transactions AS t FINAL
 		ARRAY JOIN t.raw_event_ids AS linked_event_id
 		INNER JOIN collector.raw_syslog e
 			ON e.device_id=t.device_id AND e.event_id=linked_event_id
-		WHERE t.device_id=? AND t.transaction_id=?
-		ORDER BY e.received_at,e.event_id`, deviceID, transactionID)
+		INNER JOIN collector.syslog_interpretations AS i FINAL
+			ON i.device_id=e.device_id AND i.event_id=e.event_id
+		WHERE t.device_id=? AND t.transaction_id=? AND t.parser_version=?
+			AND i.parser_version=?
+		ORDER BY e.received_at,e.event_id`, deviceID, transactionID,
+		SyslogParserVersion, SyslogParserVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -604,9 +601,9 @@ func (c *Client) AntifraudTimeline(
 	for rows.Next() {
 		var item TimelineRow
 		if err := rows.Scan(
-			&item.EventID, &item.ReceivedAt, &item.Category, &item.Component,
-			&item.Message, &item.RawPayload, &item.Status, &item.Attributes,
-			&item.Method, &item.Confidence,
+			&item.EventID, &item.ReceivedAt, &item.EventTime, &item.Category,
+			&item.Component, &item.Message, &item.RawPayload, &item.Status,
+			&item.Attributes, &item.SourceTimezone, &item.Method, &item.Confidence,
 		); err != nil {
 			return nil, err
 		}
@@ -619,7 +616,7 @@ func (c *Client) NextSyslogReplayBatch(
 	ctx context.Context, parserVersion string, limit uint64,
 ) ([]ReplaySyslogRow, error) {
 	rows, err := c.Conn.Query(ctx, `SELECT r.event_id,any(r.device_id),any(r.received_at),
-		any(r.source_ip),any(r.source_port),any(r.payload)
+		any(r.source_ip),any(r.source_port),any(r.payload),any(r.source_timezone)
 		FROM collector.raw_syslog r
 		LEFT JOIN collector.syslog_reprocess_ledger l
 			ON l.event_id=r.event_id AND l.parser_version=?
@@ -635,7 +632,7 @@ func (c *Client) NextSyslogReplayBatch(
 		var payload string
 		if err := rows.Scan(
 			&item.EventID, &item.DeviceID, &item.ReceivedAt, &item.SourceIP,
-			&item.SourcePort, &payload,
+			&item.SourcePort, &payload, &item.SourceTimezone,
 		); err != nil {
 			return nil, err
 		}
@@ -645,27 +642,20 @@ func (c *Client) NextSyslogReplayBatch(
 	return result, rows.Err()
 }
 
-func (c *Client) MarkSyslogReprocessed(
-	ctx context.Context, eventID uuid.UUID, parserVersion string,
-) error {
-	return c.Conn.Exec(ctx, `INSERT INTO collector.syslog_reprocess_ledger
-		(event_id,parser_version,processed_at) VALUES(?,?,now64(3))`, eventID, parserVersion)
-}
-
 func (c *Client) MarkSyslogReprocessedBatch(
-	ctx context.Context, eventIDs []uuid.UUID, parserVersion string,
+	ctx context.Context, events []SyslogEvent, parserVersion string,
 ) error {
-	if len(eventIDs) == 0 {
+	if len(events) == 0 {
 		return nil
 	}
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.syslog_reprocess_ledger
-		(event_id,parser_version,processed_at)`)
+		(event_id,device_id,parser_version,processed_at)`)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	for _, eventID := range eventIDs {
-		if err := batch.Append(eventID, parserVersion, now); err != nil {
+	for _, event := range events {
+		if err := batch.Append(event.EventID, event.DeviceID, parserVersion, now); err != nil {
 			return err
 		}
 	}
@@ -684,7 +674,19 @@ func antifraudTransactionID(event SyslogEvent, occurredAt time.Time) uuid.UUID {
 		key = "event:" + event.EventID.String()
 	}
 	return uuid.NewSHA1(uuid.NameSpaceOID,
-		[]byte(event.DeviceID.String()+"|"+occurredAt.UTC().Format("2006-01-02")+"|"+key))
+		[]byte(event.DeviceID.String()+"|"+key))
+}
+
+func antifraudPacketTransactionID(
+	event SyslogEvent, occurredAt time.Time, lifecycleID uuid.UUID,
+) uuid.UUID {
+	identifier := event.Attributes["packet_identifier"]
+	if identifier == "" {
+		return lifecycleID
+	}
+	key := fmt.Sprintf("%s|%s|%s|%s", event.DeviceID, event.Attributes["call_context"],
+		identifier, event.ReceivedAt.UTC().Truncate(10*time.Minute))
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(key))
 }
 
 func normalizeCorrelationValue(value string) string {
@@ -718,7 +720,7 @@ func parseUint32Attribute(value string) *uint32 {
 	return &result
 }
 
-func parseRadiusEventTimestamp(value string) *time.Time {
+func parseRadiusEventTimestamp(value, timezone string) *time.Time {
 	if value == "" {
 		return nil
 	}
@@ -726,8 +728,14 @@ func parseRadiusEventTimestamp(value string) *time.Time {
 		result := time.Unix(epoch, 0).UTC()
 		return &result
 	}
+	location := time.UTC
+	if timezone != "" {
+		if parsedLocation, err := time.LoadLocation(timezone); err == nil {
+			location = parsedLocation
+		}
+	}
 	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05"} {
-		if parsed, err := time.Parse(layout, value); err == nil {
+		if parsed, err := time.ParseInLocation(layout, value, location); err == nil {
 			result := parsed.UTC()
 			return &result
 		}

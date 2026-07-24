@@ -63,6 +63,20 @@ func main() {
 		slog.Error("clickhouse migration failed", "error", err)
 		os.Exit(1)
 	}
+	if devices, listErr := control.ListDevices(ctx); listErr != nil {
+		slog.Error("device timezone initialization failed", "error", listErr)
+		os.Exit(1)
+	} else {
+		for _, device := range devices {
+			if reinterpretErr := warehouse.ReinterpretCDRTimes(
+				ctx, device.ID, device.Timezone,
+			); reinterpretErr != nil {
+				slog.Error("CDR timezone initialization failed",
+					"device", device.ID, "error", reinterpretErr)
+				os.Exit(1)
+			}
+		}
+	}
 	rawArchive, err := openArchive(ctx, cfg)
 	if err != nil {
 		slog.Error("object archive startup failed", "error", err)
@@ -131,9 +145,31 @@ func main() {
 		errs <- watcher.Run(ctx)
 	}()
 	go func() {
-		if err := ingest.RunHistoricalSyslogReprocess(ctx, warehouse); err != nil &&
+		if err := ingest.RunHistoricalSyslogReprocess(ctx, warehouse, control); err != nil &&
 			!errors.Is(err, context.Canceled) {
 			slog.Error("historical Syslog reprocess failed", "error", err)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			devices, err := control.ListDevices(ctx)
+			if err == nil {
+				for _, device := range devices {
+					if reconcileErr := warehouse.ReconcileDevice(
+						ctx, device.ID, time.Now().UTC().Add(-72*time.Hour),
+					); reconcileErr != nil {
+						slog.Error("call correlation reconciliation failed",
+							"device", device.ID, "error", reconcileErr)
+					}
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 		}
 	}()
 

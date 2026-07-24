@@ -1,5 +1,13 @@
 # Словарь данных SMG-1016M 3.410
 
+## Время
+
+`received_at` — UTC instant приёма datagram Collector. `event_time` — wall clock из
+Eltex/RFC3164, интерпретированный в IANA timezone устройства и сохранённый как UTC
+instant. `source_timezone` и `source_utc_offset_minutes` — audit интерпретации parser
+v6. CDR setup/connect/disconnect проходят то же правило timezone устройства. UI и XLSX
+форматируют UTC instant обратно в timezone SMG, а не timezone браузера.
+
 ## Нормативные источники
 
 - Eltex «SMG-1016M/2016/3016/3116. Руководство пользователя, ПО 3.410.0», разделы

@@ -41,6 +41,10 @@ mts;2026-07-23 23:58:33.237;2026-07-23 23:58:37.191;2026-07-23 23:58:46.657;9.46
 	if record.UniqueTag != "110003076a62aaa9c9f5297a4f6a3001" {
 		t.Fatalf("unique tag parsed incorrectly: %q", record.UniqueTag)
 	}
+	if record.SourceTimezone != "Asia/Novosibirsk" || record.SourceUTCOffsetMinutes != 420 {
+		t.Fatalf("source time audit parsed incorrectly: %q/%d",
+			record.SourceTimezone, record.SourceUTCOffsetMinutes)
+	}
 	replayed, err := (CDRParser{
 		DeviceID: deviceID, FileID: uuid.New(), Location: location,
 	}).Parse(strings.NewReader(sample))

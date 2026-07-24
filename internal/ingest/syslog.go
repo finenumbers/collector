@@ -59,6 +59,7 @@ type RawSyslog struct {
 	SourceIP   string    `json:"sourceIp"`
 	SourcePort uint16    `json:"sourcePort"`
 	Payload    []byte    `json:"payload"`
+	Timezone   string    `json:"timezone,omitempty"`
 }
 
 type SyslogReceiver struct {
@@ -126,8 +127,9 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 		_ = conn.Close()
 	}()
 	type cachedDevice struct {
-		id      uuid.UUID
-		expires time.Time
+		id       uuid.UUID
+		timezone string
+		expires  time.Time
 	}
 	const (
 		maxBatch    = 256
@@ -185,13 +187,23 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 		}
 		now := time.Now()
 		deviceID := uuid.Nil
+		timezone := ""
 		if cached, ok := deviceCache[sourceIP]; ok && now.Before(cached.expires) {
 			deviceID = cached.id
+			timezone = cached.timezone
 			err = nil
 		} else {
 			deviceID, err = r.Store.DeviceBySourceIP(ctx, sourceIP)
 			if err == nil {
-				deviceCache[sourceIP] = cachedDevice{id: deviceID, expires: now.Add(cacheTTL)}
+				device, deviceErr := r.Store.Device(ctx, deviceID)
+				if deviceErr != nil {
+					err = deviceErr
+				} else {
+					timezone = device.Timezone
+					deviceCache[sourceIP] = cachedDevice{
+						id: deviceID, timezone: timezone, expires: now.Add(cacheTTL),
+					}
+				}
 			}
 		}
 		if err != nil || deviceID == uuid.Nil {
@@ -205,7 +217,7 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 		record := RawSyslog{
 			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.UTC(),
 			SourceIP: sourceIP, SourcePort: uint16(source.Port),
-			Payload: append([]byte(nil), buffer[:size]...),
+			Payload: append([]byte(nil), buffer[:size]...), Timezone: timezone,
 		}
 		payload, _ := json.Marshal(record)
 		pending = append(pending, spool.Entry{
@@ -325,13 +337,26 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 }
 
 func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
+	location := time.UTC
+	if raw.Timezone != "" {
+		if parsed, err := time.LoadLocation(raw.Timezone); err == nil {
+			location = parsed
+		}
+	}
+	return ParseSyslogInLocation(raw, location)
+}
+
+func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.SyslogEvent {
+	if location == nil {
+		location = time.UTC
+	}
 	text := strings.TrimSpace(strings.Trim(string(raw.Payload), "\x00"))
 	text = strings.TrimPrefix(text, "\ufeff")
 	event := analytics.SyslogEvent{
 		EventID: raw.EventID, DeviceID: raw.DeviceID, ReceivedAt: raw.ReceivedAt,
 		SourceIP: net.ParseIP(raw.SourceIP), SourcePort: raw.SourcePort, Payload: raw.Payload,
 		HeaderFormat: "eltex", ParseStatus: "partial", Category: "unknown",
-		Message: text, Attributes: map[string]string{},
+		Message: text, Attributes: map[string]string{}, SourceTimezone: location.String(),
 	}
 	if match := priPattern.FindStringSubmatch(text); match != nil {
 		value, _ := strconv.ParseUint(match[1], 10, 16)
@@ -347,14 +372,14 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		text = strings.TrimSpace(strings.TrimPrefix(text, match[0]))
 		event.HeaderFormat = "eltex-trace"
 	}
-	if timestamp, severity, message, ok := parseEltexTrace(text, raw.ReceivedAt); ok {
+	if timestamp, severity, message, ok := parseEltexTrace(text, raw.ReceivedAt, location); ok {
 		if severity != "" {
 			event.Attributes["payload_severity"] = severity
 		}
 		event.Message = message
 		event.EventTime = timestamp
 		event.ParseStatus = "parsed"
-	} else if timestamp, application, processID, message, ok := parseRFC3164(text, raw.ReceivedAt); ok {
+	} else if timestamp, application, processID, message, ok := parseRFC3164(text, raw.ReceivedAt, location); ok {
 		event.HeaderFormat = "rfc3164"
 		event.EventTime = timestamp
 		event.Message = message
@@ -380,6 +405,12 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		extractRadiusAttributes(text, &event)
 	}
 	extractProtocolAttributes(text, &event)
+	offsetTime := raw.ReceivedAt.In(location)
+	if event.EventTime != nil {
+		offsetTime = event.EventTime.In(location)
+	}
+	_, offsetSeconds := offsetTime.Zone()
+	event.SourceUTCOffsetMinutes = int16(offsetSeconds / 60)
 	return event
 }
 
@@ -537,7 +568,9 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func parseEltexTrace(value string, received time.Time) (*time.Time, string, string, bool) {
+func parseEltexTrace(
+	value string, received time.Time, location *time.Location,
+) (*time.Time, string, string, bool) {
 	match := tracePattern.FindStringSubmatch(value)
 	if match == nil {
 		return nil, "", "", false
@@ -555,7 +588,7 @@ func parseEltexTrace(value string, received time.Time) (*time.Time, string, stri
 	if !strings.Contains(match[1], ".") && severity == "" && !strings.HasPrefix(message, "[") {
 		return nil, "", "", false
 	}
-	return parsePayloadTime(match[1], received), severity, message, true
+	return parsePayloadTime(match[1], received, location), severity, message, true
 }
 
 func eventCallContext(payload string) string {
@@ -566,7 +599,9 @@ func eventCallContext(payload string) string {
 	return match[1]
 }
 
-func parseRFC3164(value string, received time.Time) (*time.Time, string, string, string, bool) {
+func parseRFC3164(
+	value string, received time.Time, location *time.Location,
+) (*time.Time, string, string, string, bool) {
 	match := rfc3164Pattern.FindStringSubmatch(value)
 	if match == nil {
 		return nil, "", "", "", false
@@ -581,7 +616,7 @@ func parseRFC3164(value string, received time.Time) (*time.Time, string, string,
 	if appMatch == nil {
 		return nil, "", "", "", false
 	}
-	timestamp := parseRFC3164Time(match[1], match[2], match[3], received)
+	timestamp := parseRFC3164Time(match[1], match[2], match[3], received, location)
 	application := appMatch[1]
 	message := strings.TrimSpace(appMatch[3])
 	if strings.EqualFold(application, "WEBS") || strings.EqualFold(application, "SEC") {
@@ -591,31 +626,35 @@ func parseRFC3164(value string, received time.Time) (*time.Time, string, string,
 	return timestamp, application, appMatch[2], message, true
 }
 
-func parseRFC3164Time(month, day, clock string, received time.Time) *time.Time {
+func parseRFC3164Time(
+	month, day, clock string, received time.Time, location *time.Location,
+) *time.Time {
 	value := fmt.Sprintf("%s %s %s", month, day, clock)
-	parsed, err := time.ParseInLocation("Jan 2 15:04:05", value, received.Location())
+	parsed, err := time.ParseInLocation("Jan 2 15:04:05", value, location)
 	if err != nil {
 		return nil
 	}
-	result := time.Date(received.Year(), parsed.Month(), parsed.Day(),
-		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, received.Location()).UTC()
+	localReceived := received.In(location)
+	result := time.Date(localReceived.Year(), parsed.Month(), parsed.Day(),
+		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, location).UTC()
 	if result.After(received.Add(31 * 24 * time.Hour)) {
 		result = result.AddDate(-1, 0, 0)
 	}
 	return &result
 }
 
-func parsePayloadTime(value string, received time.Time) *time.Time {
+func parsePayloadTime(value string, received time.Time, location *time.Location) *time.Time {
 	layout := "15:04:05"
 	if strings.Contains(value, ".") {
 		layout = "15:04:05.999999"
 	}
-	parsed, err := time.ParseInLocation(layout, value, received.Location())
+	parsed, err := time.ParseInLocation(layout, value, location)
 	if err != nil {
 		return nil
 	}
-	result := time.Date(received.Year(), received.Month(), received.Day(),
-		parsed.Hour(), parsed.Minute(), parsed.Second(), parsed.Nanosecond(), received.Location()).UTC()
+	localReceived := received.In(location)
+	result := time.Date(localReceived.Year(), localReceived.Month(), localReceived.Day(),
+		parsed.Hour(), parsed.Minute(), parsed.Second(), parsed.Nanosecond(), location).UTC()
 	if result.After(received.Add(12 * time.Hour)) {
 		result = result.AddDate(0, 0, -1)
 	}

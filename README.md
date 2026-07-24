@@ -9,15 +9,17 @@
 
 - изолированная регистрация нескольких SMG по IP-источнику Syslog и отдельной FTP-учётной записи;
 - host-network UDP ingress с сохранением реального source IP/port, отдельным durable handoff spool, JetStream без silent eviction, DLQ/quarantine и сохранением исходного payload;
-- parser `smg-3.410-v5`: Eltex trace/RFC3164 envelope, все документированные
+- parser `smg-3.410-v6`: Eltex trace/RFC3164 envelope, все документированные
   alarm/calls/SIPT/ISUP/Q.931/H.323/RTP/HW/MSP/SMVP/RADIUS/IVR/IPNET и системные журналы;
 - приём CDR через SFTPGo FTP, неизменяемый raw-архив MinIO, UTF-8/Windows-1251 и динамический порядок колонок;
 - нормализация полного CDR, включая Acct-Session-Id, UniqueTag, SIP Call-ID, GCR, CIC и исходные поля;
 - stateful сборка RADIUS AntiFraud request/reply/accounting lifecycle с
   `check_call` Accept/Reject/timeout fail-open, server/latency/retry и completeness;
 - двусторонняя multi-leg корреляция CDR↔AntiFraud по device-scoped Acct-Session-Id,
-  exact SIP Call-ID/GCR и call-context evidence без автоматического склеивания по
-  неоднозначным номерам/времени;
+  exact SIP Call-ID/GCR и детерминированный one-to-one composite matching по
+  нормализованным номерам, маршрутам и времени; неоднозначность не auto-link;
+- IANA timezone каждого SMG — единое правило source wall clock для Syslog и CDR:
+  хранение остаётся UTC, UI/XLSX явно показывают время устройства;
 - ClickHouse для событий/вызовов, PostgreSQL для пользователей, устройств, ingest и аудита;
 - first-run создание администратора, Argon2id, серверные сессии, CSRF, lockout и RBAC;
 - компактный светлый русскоязычный интерфейс: отдельные RADIUS и AntiFraud lifecycle,

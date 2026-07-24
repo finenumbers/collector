@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 			private.Post("/auth/logout", s.logout)
 			private.Get("/devices", s.listDevices)
 			private.With(s.requireAdmin).Post("/devices", s.createDevice)
+			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
 			private.Get("/devices/{deviceID}/events", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
@@ -222,6 +223,46 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 		}
 	}
 	writeJSON(writer, http.StatusCreated, device)
+}
+
+func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(request, "deviceID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid device id")
+		return
+	}
+	var input store.DeviceUpdate
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	session := currentSession(request)
+	device, err := s.Store.UpdateDevice(
+		request.Context(), id, input, session.User, request.RemoteAddr,
+	)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.Analytics.InvalidateDeviceDerivedData(request.Context(), id); err != nil {
+		slog.Error("unable to schedule device data reprocessing", "device", id, "error", err)
+		writeError(writer, http.StatusInternalServerError,
+			"device saved, but historical data reprocessing could not be scheduled")
+		return
+	}
+	if err := s.Analytics.ReinterpretCDRTimes(
+		request.Context(), id, device.Timezone,
+	); err != nil {
+		slog.Error("unable to reinterpret historical CDR times", "device", id, "error", err)
+		writeError(writer, http.StatusInternalServerError,
+			"device saved, but historical CDR reprocessing failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, device)
 }
 
 func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request) {
@@ -423,12 +464,15 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 		"natsConsumerPending": natsConsumerPending, "breakdown": diagnostics.Breakdown,
 		"appliedMigrations": diagnostics.AppliedMigrations,
 		"rawEvents24h":      diagnostics.RawEvents24h, "classified24h": diagnostics.Classified24h,
-		"reprocessedV5":       diagnostics.ReprocessedV5,
-		"reprocessRemaining":  diagnostics.ReprocessRemaining,
-		"antifraudComplete":   diagnostics.AntifraudComplete,
-		"antifraudIncomplete": diagnostics.AntifraudIncomplete,
-		"antifraudOrphan":     diagnostics.AntifraudOrphan,
-		"ingress":             ingressStatus, "ingressAvailable": ingressAvailable,
+		"reprocessedCurrent":   diagnostics.ReprocessedCurrent,
+		"reprocessRemaining":   diagnostics.ReprocessRemaining,
+		"antifraudComplete":    diagnostics.AntifraudComplete,
+		"antifraudIncomplete":  diagnostics.AntifraudIncomplete,
+		"antifraudOrphan":      diagnostics.AntifraudOrphan,
+		"correlationExact":     diagnostics.CorrelationExact,
+		"correlationComposite": diagnostics.CorrelationComposite,
+		"correlationAmbiguous": diagnostics.CorrelationAmbiguous,
+		"ingress":              ingressStatus, "ingressAvailable": ingressAvailable,
 	})
 }
 
@@ -473,6 +517,16 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
+	device, err := s.Store.Device(request.Context(), deviceID)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return
+	}
+	location, err := time.LoadLocation(device.Timezone)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "invalid device timezone")
+		return
+	}
 	dataset := request.URL.Query().Get("dataset")
 	search := request.URL.Query().Get("q")
 	workbook := excelize.NewFile()
@@ -494,7 +548,9 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 			"Номер B вход", "Номер B выход", "Длительность, мс", "Q.850", "Результат", "Acct-Session-Id", "UniqueTag"}
 		_ = stream.SetRow("A1", headers)
 		for index, row := range rows {
-			values := []any{row.SetupTime, row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
+			values := []any{
+				formatTimeInLocation(row.SetupTime, location),
+				row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
 				row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS, row.ReleaseCause,
 				row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag}
 			cell, _ := excelize.CoordinatesToCellName(1, index+2)
@@ -507,6 +563,8 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 			"Latency, мс", "Повторы", "Calling", "Called", "Номер A вход",
 			"Номер B вход", "Номер A выход", "Номер B выход", "Входящий trunk",
 			"Исходящий trunk", "Accounting", "Q.850", "Полнота", "CDR legs", "Атрибуты",
+			"CDR setup", "CDR Acct-Session-Id", "Метод корреляции", "Confidence",
+			"Delta, мс", "Неоднозначность",
 		}
 		_ = stream.SetRow("A1", headers)
 		var cursor *analytics.AntifraudCursor
@@ -524,13 +582,18 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 				attributes, _ := json.Marshal(row.Attributes)
 				cell, _ := excelize.CoordinatesToCellName(1, rowNumber)
 				_ = stream.SetRow(cell, []any{
-					row.FirstEventAt, row.LastEventAt, row.CallContext, row.AcctSessionID,
+					formatTimeInLocation(&row.FirstEventAt, location),
+					formatTimeInLocation(&row.LastEventAt, location),
+					row.CallContext, row.AcctSessionID,
 					row.RequestType, row.RequestCode, row.ResponseCode, row.Decision,
 					row.DecisionReason, row.ServerAddress, row.LatencyMS, row.Retries,
 					row.CallingStationID, row.CalledStationID, row.SrcNumberIn,
 					row.DstNumberIn, row.SrcNumberOut, row.DstNumberOut,
 					row.InTrunkgroupLabel, row.OutTrunkgroupLabel, row.AccountingStatus,
 					row.Q850Cause, row.Completeness, row.LegCount, string(attributes),
+					formatTimeInLocation(row.CDRSetupTime, location), row.CDRSessionID,
+					row.CorrelationMethod, row.CorrelationConfidence,
+					row.CorrelationTimeDeltaMS, row.AmbiguityReason,
 				})
 			}
 			if !page.HasMore || len(page.Items) == 0 {
@@ -581,7 +644,12 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 				totalRows++
 				attributes, _ := json.Marshal(row.Attributes)
 				cell, _ := excelize.CoordinatesToCellName(1, rowInSheet)
-				_ = stream.SetRow(cell, []any{row.ReceivedAt, row.Category, row.Component, row.Message,
+				eventTime := row.EventTime
+				if eventTime == nil {
+					eventTime = &row.ReceivedAt
+				}
+				_ = stream.SetRow(cell, []any{
+					formatTimeInLocation(eventTime, location), row.Category, row.Component, row.Message,
 					row.RawPayload, row.Status, string(attributes)})
 			}
 			if !page.HasMore || len(page.Items) == 0 {
@@ -671,4 +739,11 @@ func remoteIP(request *http.Request) string {
 		return host
 	}
 	return strings.Trim(request.RemoteAddr, "[]")
+}
+
+func formatTimeInLocation(value *time.Time, location *time.Location) string {
+	if value == nil {
+		return ""
+	}
+	return value.In(location).Format("2006-01-02 15:04:05.000")
 }

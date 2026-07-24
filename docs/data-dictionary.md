@@ -34,11 +34,13 @@
 - source IP/port и transport;
 - неизменённый payload и SHA-256;
 - PRI/facility/severity, только если PRI реально присутствовал;
-- detected envelope (`eltex`, `rfc3164-or-pri`, далее `rfc5424`);
+- detected envelope (`eltex`, `rfc3164`, `rfc3164-or-pri`, далее `rfc5424`);
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
 Категории: `alarms`, `call_trace`, `sip`, `isup`, `q931`, `ip_connections`, `ip_modules`, `radius`, `config_history`, `system_journal`, `unknown`.
+
+Стандартные RFC3164-сообщения `application[pid]: component: message` сохраняют `application` и `process_id` в attributes. События `webapp: WEBS/SEC` относятся к `system_journal`. Любой неизвестный формат сохраняется без изменений и остаётся доступен одновременно в «Все Syslog» и «Нераспознанное».
 
 Уровни Eltex `0–99` являются детализацией трассировки, а не RFC severity.
 

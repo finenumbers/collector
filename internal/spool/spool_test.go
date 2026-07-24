@@ -46,3 +46,29 @@ func TestQueuePersistsAndDeletesInOrder(t *testing.T) {
 		t.Fatalf("got depth %d, want 1", depth)
 	}
 }
+
+func TestQueueQuarantinesWithoutDiscardingPayload(t *testing.T) {
+	queue, err := Open(filepath.Join(t.TempDir(), "syslog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queue.Close()
+	if err := queue.Enqueue(time.Now().UTC(), "broken", []byte{0xff, 0x00, 0x01}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := queue.Peek(1)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("unable to read queued item: %#v, %v", items, err)
+	}
+	if err := queue.Quarantine(items[0].Key, items[0].Data, "invalid envelope"); err != nil {
+		t.Fatal(err)
+	}
+	depth, err := queue.Depth()
+	if err != nil || depth != 0 {
+		t.Fatalf("got queue depth %d, want 0: %v", depth, err)
+	}
+	quarantineDepth, err := queue.QuarantineDepth()
+	if err != nil || quarantineDepth != 1 {
+		t.Fatalf("got quarantine depth %d, want 1: %v", quarantineDepth, err)
+	}
+}

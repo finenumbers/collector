@@ -110,13 +110,14 @@ th { position: sticky; top: 0; z-index: 2; height: 28px; padding: 0 8px; color: 
 td { height: 27px; max-width: 340px; padding: 3px 8px; border-bottom: 1px solid #222a34; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; color: #cbd2dc; }
 tbody tr:hover td { background: #1a2029; color: white; }
-tbody tr { cursor: default; }
+tbody tr { cursor: pointer; }
 .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 9.5px; }
 .right { text-align: right; }
 .message-cell { min-width: 320px; }
 .tag, .parse-status { display: inline-block; padding: 2px 5px; border-radius: 2px; background: #26303c; color: #b9c5d4; }
 .parse-status.parsed { color: #91ddb9; background: #19362a; }
 .parse-status.partial { color: #f0cb88; background: #3b3020; }
+.load-more { flex: none; align-self: center; margin-top: 8px; }
 
 .empty-devices { margin: auto; width: 420px; text-align: center; color: var(--muted); }
 .empty-devices h3 { color: var(--text); font-size: 16px; margin: 12px 0 5px; }
@@ -153,6 +154,8 @@ tbody tr { cursor: default; }
 .call-facts small { color: var(--muted); font-size: 9px; text-transform: uppercase; margin-bottom: 4px; }
 .call-facts strong { font-size: 11px; }
 .drawer h4 { margin: 18px 15px 10px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.raw-payload { margin: 0 15px; padding: 10px; overflow: auto; border: 1px solid var(--line);
+  background: #10141a; color: #cbd2dc; font: 10px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .timeline { padding: 0 15px 20px; }
 .timeline > p { color: var(--muted); font-size: 11px; }
 .timeline-item { display: grid; grid-template-columns: 12px 1fr; gap: 8px; min-height: 64px; }

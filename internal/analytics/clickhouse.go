@@ -45,8 +45,19 @@ type EventRow struct {
 	Category   string            `json:"category"`
 	Component  string            `json:"component"`
 	Message    string            `json:"message"`
+	RawPayload string            `json:"rawPayload"`
 	Status     string            `json:"parseStatus"`
 	Attributes map[string]string `json:"attributes"`
+}
+
+type EventCursor struct {
+	ReceivedAt time.Time
+	EventID    uuid.UUID
+}
+
+type EventPage struct {
+	Items   []EventRow
+	HasMore bool
 }
 
 type TimelineRow struct {
@@ -122,6 +133,14 @@ func Open(addr, database, username, password string) (*Client, error) {
 }
 
 func (c *Client) Migrate(ctx context.Context, directory string) error {
+	if err := c.Conn.Exec(ctx, `CREATE DATABASE IF NOT EXISTS collector`); err != nil {
+		return err
+	}
+	if err := c.Conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS collector.schema_migrations
+		(version String, applied_at DateTime64(3, 'UTC'))
+		ENGINE = ReplacingMergeTree(applied_at) ORDER BY version`); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err
@@ -129,6 +148,15 @@ func (c *Client) Migrate(ctx context.Context, directory string) error {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sql" {
+			continue
+		}
+		var applied uint64
+		if err := c.Conn.QueryRow(ctx,
+			`SELECT count() FROM collector.schema_migrations WHERE version=?`, entry.Name()).
+			Scan(&applied); err != nil {
+			return err
+		}
+		if applied > 0 {
 			continue
 		}
 		content, err := os.ReadFile(filepath.Join(directory, entry.Name()))
@@ -143,6 +171,11 @@ func (c *Client) Migrate(ctx context.Context, directory string) error {
 				return fmt.Errorf("%s: %w", entry.Name(), err)
 			}
 		}
+		if err := c.Conn.Exec(ctx,
+			`INSERT INTO collector.schema_migrations(version,applied_at) VALUES(?,now64(3))`,
+			entry.Name()); err != nil {
+			return fmt.Errorf("%s: recording migration: %w", entry.Name(), err)
+		}
 	}
 	return nil
 }
@@ -153,7 +186,7 @@ func (c *Client) InsertSyslog(ctx context.Context, event SyslogEvent) error {
 		(event_id,device_id,received_at,source_ip,source_port,transport,payload,payload_sha256,
 		 pri,facility,severity,header_format,parser_version,parse_status,category,event_time,
 		 component,message,attributes)
-		VALUES(?,?,?,?,?,'udp',?,?,?,?,?,?,'smg-3.410-v1',?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,'udp',?,?,?,?,?,?,'smg-3.410-v2',?,?,?,?,?,?)`,
 		event.EventID, event.DeviceID, event.ReceivedAt, event.SourceIP, event.SourcePort,
 		string(event.Payload), hex.EncodeToString(sum[:]), event.PRI, event.Facility, event.Severity,
 		event.HeaderFormat, event.ParseStatus, event.Category, event.EventTime, event.Component,
@@ -250,37 +283,61 @@ func (c *Client) InsertRadiusAndCorrelate(ctx context.Context, event SyslogEvent
 }
 
 func (c *Client) ListEvents(ctx context.Context, deviceID uuid.UUID, category, search string, limit uint64) ([]EventRow, error) {
+	page, err := c.ListEventsPage(ctx, deviceID, category, search, limit, nil)
+	return page.Items, err
+}
+
+func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, category, search string, limit uint64, cursor *EventCursor) (EventPage, error) {
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
-	query := `SELECT event_id,received_at,category,component,message,parse_status,attributes
+	query := `SELECT event_id,received_at,category,component,message,payload,parse_status,attributes
 		FROM collector.raw_syslog WHERE device_id=?`
 	args := []any{deviceID}
 	if category != "" && category != "all" {
-		query += ` AND category=?`
-		args = append(args, category)
+		switch category {
+		case "unknown":
+			query += ` AND (category='unknown' OR parse_status!='parsed')`
+		case "antifraud":
+			query += ` AND category='radius' AND
+				(attributes['xpgk_request_type']!='' OR positionCaseInsensitive(payload,'antifraud')>0)`
+		default:
+			query += ` AND category=?`
+			args = append(args, category)
+		}
 	}
 	if search != "" {
-		query += ` AND positionCaseInsensitive(message, ?) > 0`
+		query += ` AND positionCaseInsensitive(payload, ?) > 0`
 		args = append(args, search)
 	}
-	query += ` ORDER BY received_at DESC LIMIT ?`
-	args = append(args, limit)
+	if cursor != nil {
+		query += ` AND (received_at < ? OR (received_at = ? AND event_id < ?))`
+		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
+	}
+	query += ` ORDER BY received_at DESC,event_id DESC LIMIT ?`
+	args = append(args, limit+1)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return EventPage{}, err
 	}
 	defer rows.Close()
 	result := make([]EventRow, 0)
 	for rows.Next() {
 		var row EventRow
 		if err := rows.Scan(&row.EventID, &row.ReceivedAt, &row.Category, &row.Component,
-			&row.Message, &row.Status, &row.Attributes); err != nil {
-			return nil, err
+			&row.Message, &row.RawPayload, &row.Status, &row.Attributes); err != nil {
+			return EventPage{}, err
 		}
 		result = append(result, row)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return EventPage{}, err
+	}
+	hasMore := uint64(len(result)) > limit
+	if hasMore {
+		result = result[:limit]
+	}
+	return EventPage{Items: result, HasMore: hasMore}, nil
 }
 
 func (c *Client) ListCalls(ctx context.Context, deviceID uuid.UUID, search string, limit uint64) ([]CallRow, error) {
@@ -323,7 +380,7 @@ func (c *Client) ListCalls(ctx context.Context, deviceID uuid.UUID, search strin
 
 func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID) ([]TimelineRow, error) {
 	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,e.category,e.component,e.message,
-		e.parse_status,e.attributes,l.method,l.confidence
+		e.payload,e.parse_status,e.attributes,l.method,l.confidence
 		FROM collector.call_event_links l
 		INNER JOIN collector.raw_syslog e ON e.device_id=l.device_id AND e.event_id=l.event_id
 		WHERE l.device_id=? AND l.cdr_record_id=?
@@ -336,7 +393,7 @@ func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID)
 	for rows.Next() {
 		var row TimelineRow
 		if err := rows.Scan(&row.EventID, &row.ReceivedAt, &row.Category, &row.Component,
-			&row.Message, &row.Status, &row.Attributes, &row.Method, &row.Confidence); err != nil {
+			&row.Message, &row.RawPayload, &row.Status, &row.Attributes, &row.Method, &row.Confidence); err != nil {
 			return nil, err
 		}
 		result = append(result, row)

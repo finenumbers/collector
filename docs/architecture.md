@@ -26,15 +26,15 @@ flowchart LR
 - `collector`: один stateless image; HTTP API, UDP receiver, Syslog worker и CDR watcher запускаются как независимые goroutines с общим graceful shutdown.
 - `PostgreSQL`: control plane — users/sessions, devices, ingest file ledger, export jobs и audit.
 - `ClickHouse`: append-oriented raw Syslog, CDR, RADIUS facts, call-event links и агрегаты.
-- `durable spool`: локальная BoltDB-очередь; datagram фиксируется на диске до попытки публикации и переживает недоступность/restart NATS.
-- `NATS JetStream`: disk-backed work queue между spool publisher и parser; retention и duplicate window 72 часа, лимит 20 GiB.
-- `MinIO`: неизменяемые исходные CDR, далее — архивные Syslog batches и XLSX jobs.
+- `durable spool`: локальная BoltDB-очередь; datagram фиксируется на диске до попытки публикации и переживает недоступность/restart NATS; повреждённые envelopes атомарно переносятся в quarantine bucket.
+- `NATS JetStream`: disk-backed work queue между spool publisher и parser; без time-based eviction, duplicate window 72 часа, лимит 20 GiB и `discard=new`, чтобы переполнение оставляло данные в local spool. Некорректные envelopes сохраняются в отдельном `SYSLOG_DLQ`.
+- `MinIO`: неизменяемые исходные CDR. Архивация Syslog в MinIO пока не реализована; canonical raw-копия хранится в ClickHouse.
 - `SFTPGo`: FTP endpoint, динамическая отдельная учётная запись и home каждого SMG.
 - `Nginx Proxy Manager`: существующий внешний TLS/reverse proxy в Docker-сети `proxy`; Collector доступен ему как `smg-collector:8080`, но app port и инфраструктурные API наружу не публикуются.
 
 ## Границы надёжности
 
-UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в process. После записи в local spool сообщение не удаляется до JetStream acknowledgement; `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.
+UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в process. Запись в local spool повторяется до успеха; сообщение не удаляется до JetStream acknowledgement. `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 

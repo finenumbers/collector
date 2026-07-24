@@ -20,11 +20,16 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-const syslogSubject = "collector.raw.syslog"
+const (
+	syslogSubject    = "collector.raw.syslog"
+	syslogDLQSubject = "collector.dlq.syslog"
+)
 
 var (
 	priPattern       = regexp.MustCompile(`^<([0-9]{1,3})>`)
 	tracePattern     = regexp.MustCompile(`(?i)^(?:[A-Z][a-z]{2}\s+\d+\s+)?(\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\s+\[([A-Z ]+)\]\s*(.*)$`)
+	rfc3164Pattern   = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([0-9]{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
+	rfc3164App       = regexp.MustCompile(`^([A-Za-z0-9_.-]+)(?:\[([0-9]+)\])?:\s*(.*)$`)
 	componentPattern = regexp.MustCompile(`^([A-Za-z0-9_./ -]+?)(?::|\.)\s+(.*)$`)
 	radiusPair       = regexp.MustCompile(`(?i)(Acct-Session-Id|Calling-Station-Id|Called-Station-Id|User-Name|xpgk-request-type|NAS-IP-Address)\s*(?:\(\d+\))?\s*[=:]\s*["']?([^"',;\s]+)`)
 	radiusSession    = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
@@ -50,22 +55,38 @@ func EnsureStreams(nc *nats.Conn) error {
 	if err != nil {
 		return err
 	}
-	if _, err = js.StreamInfo("SYSLOG"); err == nil {
-		return nil
-	}
-	if !errors.Is(err, nats.ErrStreamNotFound) {
-		return err
-	}
-	_, err = js.AddStream(&nats.StreamConfig{
+	if err := ensureStream(js, &nats.StreamConfig{
 		Name:       "SYSLOG",
 		Subjects:   []string{syslogSubject},
 		Storage:    nats.FileStorage,
 		Retention:  nats.WorkQueuePolicy,
-		MaxAge:     72 * time.Hour,
 		MaxBytes:   20 << 30,
-		Discard:    nats.DiscardOld,
+		Discard:    nats.DiscardNew,
+		Duplicates: 72 * time.Hour,
+	}); err != nil {
+		return err
+	}
+	return ensureStream(js, &nats.StreamConfig{
+		Name:       "SYSLOG_DLQ",
+		Subjects:   []string{syslogDLQSubject},
+		Storage:    nats.FileStorage,
+		Retention:  nats.LimitsPolicy,
+		MaxBytes:   1 << 30,
+		Discard:    nats.DiscardNew,
 		Duplicates: 72 * time.Hour,
 	})
+}
+
+func ensureStream(js nats.JetStreamContext, config *nats.StreamConfig) error {
+	_, err := js.StreamInfo(config.Name)
+	if err == nil {
+		_, err = js.UpdateStream(config)
+		return err
+	}
+	if !errors.Is(err, nats.ErrStreamNotFound) {
+		return err
+	}
+	_, err = js.AddStream(config)
 	return err
 }
 
@@ -107,8 +128,18 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 			Payload: append([]byte(nil), buffer[:size]...),
 		}
 		payload, _ := json.Marshal(record)
-		if err := r.Spool.Enqueue(record.ReceivedAt, record.EventID.String(), payload); err != nil {
-			slog.Error("syslog durable spool failed", "event", record.EventID, "error", err)
+		for {
+			err = r.Spool.Enqueue(record.ReceivedAt, record.EventID.String(), payload)
+			if err == nil {
+				break
+			}
+			slog.Error("syslog durable spool failed; retrying without dropping current datagram",
+				"event", record.EventID, "error", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(250 * time.Millisecond):
+			}
 		}
 	}
 }
@@ -135,8 +166,10 @@ func RunSpoolPublisher(ctx context.Context, queue *spool.Queue, nc *nats.Conn) e
 		for _, item := range items {
 			var raw RawSyslog
 			if err := json.Unmarshal(item.Data, &raw); err != nil {
-				slog.Error("invalid durable spool record removed", "error", err)
-				processed = append(processed, item.Key)
+				if quarantineErr := queue.Quarantine(item.Key, item.Data, err.Error()); quarantineErr != nil {
+					return quarantineErr
+				}
+				slog.Error("invalid durable spool record moved to quarantine", "error", err)
 				continue
 			}
 			if _, err := js.Publish(syslogSubject, item.Data, nats.MsgId(raw.EventID.String())); err != nil {
@@ -173,6 +206,12 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 		for _, message := range messages {
 			var raw RawSyslog
 			if err := json.Unmarshal(message.Data, &raw); err != nil {
+				if _, publishErr := js.Publish(syslogDLQSubject, message.Data); publishErr != nil {
+					slog.Error("invalid NATS envelope could not be quarantined", "error", publishErr)
+					_ = message.NakWithDelay(5 * time.Second)
+					continue
+				}
+				slog.Error("invalid NATS envelope moved to dead-letter stream", "error", err)
 				_ = message.Term()
 				continue
 			}
@@ -219,6 +258,15 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 			event.EventTime = parsed
 		}
 		event.ParseStatus = "parsed"
+	} else if timestamp, application, processID, message, ok := parseRFC3164(text, raw.ReceivedAt); ok {
+		event.HeaderFormat = "rfc3164"
+		event.EventTime = timestamp
+		event.Message = message
+		event.Attributes["application"] = application
+		if processID != "" {
+			event.Attributes["process_id"] = processID
+		}
+		event.ParseStatus = "parsed"
 	} else {
 		event.Message = text
 	}
@@ -226,7 +274,7 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		event.Component = strings.TrimSpace(match[1])
 		event.Message = strings.TrimSpace(match[2])
 	}
-	event.Category = classify(event.Component + " " + event.Message)
+	event.Category = classify(event.Component, event.Attributes["application"], event.Message)
 	if event.Category != "unknown" && event.ParseStatus == "partial" {
 		event.ParseStatus = "parsed"
 	}
@@ -241,9 +289,13 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 	return event
 }
 
-func classify(value string) string {
-	upper := strings.ToUpper(value)
+func classify(component, application, message string) string {
+	upperComponent := strings.ToUpper(strings.TrimSpace(component))
+	upperApplication := strings.ToUpper(strings.TrimSpace(application))
+	upper := strings.Join([]string{upperComponent, upperApplication, strings.ToUpper(message)}, " ")
 	switch {
+	case upperApplication == "WEBAPP" || upperComponent == "WEBS" || upperComponent == "SEC":
+		return "system_journal"
 	case strings.Contains(upper, "RADIUS") || strings.Contains(upper, "ACCESS-REQUEST") || strings.Contains(upper, "ACCOUNTING-REQUEST"):
 		return "radius"
 	case strings.Contains(upper, "SS7") || strings.Contains(upper, "ISUP") || strings.Contains(upper, "IAM") || strings.Contains(upper, " RLC"):
@@ -264,9 +316,44 @@ func classify(value string) string {
 		return "system_journal"
 	case strings.Contains(upper, "CALL") || strings.Contains(upper, "PORT "):
 		return "call_trace"
+	case upperApplication != "":
+		return "system_journal"
 	default:
 		return "unknown"
 	}
+}
+
+func parseRFC3164(value string, received time.Time) (*time.Time, string, string, string, bool) {
+	match := rfc3164Pattern.FindStringSubmatch(value)
+	if match == nil {
+		return nil, "", "", "", false
+	}
+	remainder := strings.TrimSpace(match[4])
+	appMatch := rfc3164App.FindStringSubmatch(remainder)
+	if appMatch == nil {
+		if _, after, found := strings.Cut(remainder, " "); found {
+			appMatch = rfc3164App.FindStringSubmatch(strings.TrimSpace(after))
+		}
+	}
+	if appMatch == nil {
+		return nil, "", "", "", false
+	}
+	timestamp := parseRFC3164Time(match[1], match[2], match[3], received)
+	return timestamp, appMatch[1], appMatch[2], strings.TrimSpace(appMatch[3]), true
+}
+
+func parseRFC3164Time(month, day, clock string, received time.Time) *time.Time {
+	value := fmt.Sprintf("%s %s %s", month, day, clock)
+	parsed, err := time.ParseInLocation("Jan 2 15:04:05", value, received.Location())
+	if err != nil {
+		return nil
+	}
+	result := time.Date(received.Year(), parsed.Month(), parsed.Day(),
+		parsed.Hour(), parsed.Minute(), parsed.Second(), 0, received.Location()).UTC()
+	if result.After(received.Add(31 * 24 * time.Hour)) {
+		result = result.AddDate(-1, 0, 0)
+	}
+	return &result
 }
 
 func parsePayloadTime(value string, received time.Time) *time.Time {

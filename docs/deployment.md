@@ -76,6 +76,6 @@ Health endpoints:
 ## Инциденты
 
 - FTP недоступен: Eltex временно буферизует CDR в RAM (документировано до 30 MB); восстановите FTP до заполнения.
-- NATS недоступен: уже принятые datagrams остаются в `spool_data` и публикуются после восстановления; контролируйте заполнение диска.
+- NATS недоступен или достиг лимита 20 GiB: уже принятые datagrams остаются в `spool_data`; старые сообщения JetStream не вытесняются. Контролируйте оба диска и lag.
 - ClickHouse недоступен: JetStream удерживает Syslog; CDR-файл остаётся в volume и raw archive/ledger.
 - Unknown растёт после firmware upgrade: не удаляйте raw, зафиксируйте firmware и добавьте golden fixtures/versioned parser.

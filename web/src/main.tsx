@@ -29,6 +29,7 @@ type EventRow = {
   category: string
   component: string
   message: string
+  rawPayload: string
   parseStatus: string
   attributes: Record<string, string>
 }
@@ -52,7 +53,7 @@ type CallRow = {
   radiusSessionId: string
   uniqueTag: string
 }
-type Dataset = 'calls' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
+type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
   'q931' | 'ip_connections' | 'ip_modules' | 'radius' | 'config_history' |
   'system_journal' | 'unknown'
 
@@ -216,7 +217,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       </header>
       {error && <div className="global-error">{error}</div>}
       {!selected ? <EmptyDevices canCreate={user.role === 'admin'} onCreate={() => setShowCreate(true)} /> :
-        <DataView device={selected} dataset={dataset} />}
+        <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset} />}
     </main>
     {showCreate && <CreateDeviceDialog onClose={() => setShowCreate(false)} onCreated={(device) => {
       setShowCreate(false)
@@ -230,6 +231,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
 
 const navigation: { id: Dataset; label: string; icon: typeof Activity }[] = [
   { id: 'calls', label: 'Вызовы и CDR', icon: PhoneCall },
+  { id: 'syslog_all', label: 'Все Syslog', icon: FileClock },
   { id: 'antifraud', label: 'АнтиФрод', icon: ShieldCheck },
   { id: 'alarms', label: 'Аварии', icon: AlertTriangle },
   { id: 'call_trace', label: 'Обработка вызовов', icon: Activity },
@@ -256,9 +258,12 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
   const [rows, setRows] = useState<Array<EventRow | CallRow>>([])
   const [loading, setLoading] = useState(false)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
+  const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
   const [stats, setStats] = useState<DeviceStats | null>(null)
+  const [eventCursor, setEventCursor] = useState<{ receivedAt: string; eventId: string } | null>(null)
+  const [hasMore, setHasMore] = useState(false)
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
-  const category = dataset === 'antifraud' ? 'radius' : dataset
+  const category = dataset === 'syslog_all' ? 'all' : dataset
   const exportUrl = `/api/devices/${device.id}/export.xlsx?dataset=${dataset === 'calls' ? 'calls' : 'events'}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}`
   useEffect(() => {
     api<DeviceStats>(`/devices/${device.id}/stats`).then(setStats).catch(() => setStats(null))
@@ -268,21 +273,37 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
       setLoading(true)
       const path = dataset === 'calls'
         ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=500`
-        : `/devices/${device.id}/events?category=${dataset === 'antifraud' ? 'radius' : dataset}&q=${encodeURIComponent(query)}&limit=500`
-      api<{ items: Array<EventRow | CallRow> }>(path)
-        .then(({ items }) => setRows(items || []))
+        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=500`
+      api<{ items: Array<EventRow | CallRow>; hasMore?: boolean; nextCursor?: { receivedAt: string; eventId: string } }>(path)
+        .then(({ items, hasMore: more, nextCursor }) => {
+          setRows(items || [])
+          setHasMore(Boolean(more))
+          setEventCursor(nextCursor || null)
+        })
         .finally(() => setLoading(false))
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [device.id, dataset, query])
+  }, [category, device.id, dataset, query])
+  const loadMoreEvents = () => {
+    if (!eventCursor || loading || dataset === 'calls') return
+    setLoading(true)
+    const path = `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=500&before=${encodeURIComponent(eventCursor.receivedAt)}&before_id=${encodeURIComponent(eventCursor.eventId)}`
+    api<{ items: EventRow[]; hasMore: boolean; nextCursor?: { receivedAt: string; eventId: string } }>(path)
+      .then(({ items, hasMore: more, nextCursor }) => {
+        setRows((current) => [...current, ...(items || [])])
+        setHasMore(more)
+        setEventCursor(nextCursor || null)
+      })
+      .finally(() => setLoading(false))
+  }
   return <section className="data-view">
     {stats && <div className="stat-strip">
       <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Неуспешных</small><strong>{stats.failedCalls24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Средняя длительность</small><strong>{(stats.averageTalkMs / 1000).toFixed(1)} с</strong></span>
-      <span><small>Аварий</small><strong>{stats.alarms24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>RADIUS событий</small><strong>{stats.radius24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>Нераспознано</small><strong className={stats.unknown24h ? 'warning-text' : ''}>{stats.unknown24h.toLocaleString('ru-RU')}</strong></span>
+      <span><small>Аварий, 24 ч</small><strong>{stats.alarms24h.toLocaleString('ru-RU')}</strong></span>
+      <span><small>RADIUS, 24 ч</small><strong>{stats.radius24h.toLocaleString('ru-RU')}</strong></span>
+      <span><small>Нераспознано, 24 ч</small><strong className={stats.unknown24h ? 'warning-text' : ''}>{stats.unknown24h.toLocaleString('ru-RU')}</strong></span>
     </div>}
     <div className="toolbar">
       <div><h3>{title}</h3><span>{rows.length} записей в текущей выборке</span></div>
@@ -294,9 +315,13 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
     </div>
     <div className="table-shell">
       {loading && <div className="table-loading" />}
-      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} onSelect={setSelectedCall} /> : <EventsTable rows={rows as EventRow[]} />}
+      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} onSelect={setSelectedCall} /> :
+        <EventsTable rows={rows as EventRow[]} onSelect={setSelectedEvent} />}
     </div>
+    {dataset !== 'calls' && hasMore && <button className="load-more secondary" disabled={loading}
+      onClick={loadMoreEvents}>{loading ? 'Загрузка…' : 'Показать ещё 500'}</button>}
     {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
+    {selectedEvent && <EventDrawer event={selectedEvent} onClose={() => setSelectedEvent(null)} />}
   </section>
 }
 
@@ -341,15 +366,34 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
   </div>
 }
 
-function EventsTable({ rows }: { rows: EventRow[] }) {
+function EventsTable({ rows, onSelect }: { rows: EventRow[]; onSelect: (row: EventRow) => void }) {
   return <table><thead><tr><th>Получено</th><th>Раздел</th><th>Компонент</th>
     <th>Сообщение</th><th>Статус</th><th>Атрибуты</th></tr></thead>
-    <tbody>{rows.map((row) => <tr key={row.eventId}>
+    <tbody>{rows.map((row) => <tr key={row.eventId} onClick={() => onSelect(row)}>
       <td className="mono">{formatTime(row.receivedAt)}</td><td><span className="tag">{row.category}</span></td>
       <td className="mono">{row.component || '—'}</td><td className="message-cell">{row.message}</td>
       <td><span className={`parse-status ${row.parseStatus}`}>{row.parseStatus}</span></td>
       <td className="mono">{Object.entries(row.attributes || {}).map(([key, value]) => `${key}=${value}`).join(' · ') || '—'}</td>
     </tr>)}</tbody></table>
+}
+
+function EventDrawer({ event, onClose }: { event: EventRow; onClose: () => void }) {
+  return <div className="drawer">
+    <div className="drawer-header"><div><h3>Событие Syslog</h3><span className="mono">{event.eventId}</span></div>
+      <button onClick={onClose}>×</button></div>
+    <div className="call-facts">
+      <span><small>Получено</small><strong>{formatTime(event.receivedAt)}</strong></span>
+      <span><small>Раздел</small><strong>{event.category}</strong></span>
+      <span><small>Компонент</small><strong>{event.component || '—'}</strong></span>
+      <span><small>Разбор</small><strong>{event.parseStatus}</strong></span>
+    </div>
+    <h4>Сообщение</h4>
+    <pre className="raw-payload">{event.message}</pre>
+    <h4>Исходный Syslog без изменений</h4>
+    <pre className="raw-payload">{event.rawPayload}</pre>
+    <h4>Извлечённые атрибуты</h4>
+    <pre className="raw-payload">{JSON.stringify(event.attributes || {}, null, 2)}</pre>
+  </div>
 }
 
 function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (device: Device) => void }) {

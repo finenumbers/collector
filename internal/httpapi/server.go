@@ -255,13 +255,32 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
-	rows, err := s.Analytics.ListEvents(request.Context(), deviceID,
-		request.URL.Query().Get("category"), request.URL.Query().Get("q"), limit)
+	var cursor *analytics.EventCursor
+	before := request.URL.Query().Get("before")
+	beforeID := request.URL.Query().Get("before_id")
+	if before != "" || beforeID != "" {
+		receivedAt, timeErr := time.Parse(time.RFC3339Nano, before)
+		eventID, idErr := uuid.Parse(beforeID)
+		if timeErr != nil || idErr != nil {
+			writeError(writer, http.StatusBadRequest, "invalid event cursor")
+			return
+		}
+		cursor = &analytics.EventCursor{ReceivedAt: receivedAt, EventID: eventID}
+	}
+	page, err := s.Analytics.ListEventsPage(request.Context(), deviceID,
+		request.URL.Query().Get("category"), request.URL.Query().Get("q"), limit, cursor)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query events")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
+	var nextCursor any
+	if page.HasMore && len(page.Items) > 0 {
+		last := page.Items[len(page.Items)-1]
+		nextCursor = map[string]any{"receivedAt": last.ReceivedAt, "eventId": last.EventID}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
+	})
 }
 
 func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
@@ -343,17 +362,54 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 		}
 	} else {
 		category := request.URL.Query().Get("category")
-		rows, queryErr := s.Analytics.ListEvents(request.Context(), deviceID, category, search, 50000)
-		if queryErr != nil {
-			writeError(writer, http.StatusInternalServerError, "unable to export events")
-			return
+		headers := []any{"Получено", "Раздел", "Компонент", "Сообщение", "Исходный Syslog", "Статус", "Атрибуты"}
+		_ = stream.SetRow("A1", headers)
+		var cursor *analytics.EventCursor
+		rowInSheet := 1
+		totalRows := 0
+		sheetNumber := 1
+		for {
+			page, queryErr := s.Analytics.ListEventsPage(
+				request.Context(), deviceID, category, search, 10000, cursor,
+			)
+			if queryErr != nil {
+				writeError(writer, http.StatusInternalServerError, "unable to export events")
+				return
+			}
+			for _, row := range page.Items {
+				if rowInSheet >= 1000000 {
+					if err := stream.Flush(); err != nil {
+						writeError(writer, http.StatusInternalServerError, "unable to finalize export sheet")
+						return
+					}
+					sheetNumber++
+					sheet = fmt.Sprintf("Data %d", sheetNumber)
+					if _, err := workbook.NewSheet(sheet); err != nil {
+						writeError(writer, http.StatusInternalServerError, "unable to create export sheet")
+						return
+					}
+					stream, err = workbook.NewStreamWriter(sheet)
+					if err != nil {
+						writeError(writer, http.StatusInternalServerError, "unable to create export stream")
+						return
+					}
+					_ = stream.SetRow("A1", headers)
+					rowInSheet = 1
+				}
+				rowInSheet++
+				totalRows++
+				attributes, _ := json.Marshal(row.Attributes)
+				cell, _ := excelize.CoordinatesToCellName(1, rowInSheet)
+				_ = stream.SetRow(cell, []any{row.ReceivedAt, row.Category, row.Component, row.Message,
+					row.RawPayload, row.Status, string(attributes)})
+			}
+			if !page.HasMore || len(page.Items) == 0 {
+				break
+			}
+			last := page.Items[len(page.Items)-1]
+			cursor = &analytics.EventCursor{ReceivedAt: last.ReceivedAt, EventID: last.EventID}
 		}
-		_ = stream.SetRow("A1", []any{"Получено", "Раздел", "Компонент", "Сообщение", "Статус", "Атрибуты"})
-		for index, row := range rows {
-			attributes, _ := json.Marshal(row.Attributes)
-			cell, _ := excelize.CoordinatesToCellName(1, index+2)
-			_ = stream.SetRow(cell, []any{row.ReceivedAt, row.Category, row.Component, row.Message, row.Status, string(attributes)})
-		}
+		writer.Header().Set("X-Export-Rows", strconv.Itoa(totalRows))
 	}
 	if err := stream.Flush(); err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to finalize export")

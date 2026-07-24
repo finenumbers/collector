@@ -8,14 +8,14 @@
 ## Реализовано
 
 - изолированная регистрация нескольких SMG по IP-источнику Syslog и отдельной FTP-учётной записи;
-- UDP Syslog receiver с локальным disk spool перед NATS JetStream и сохранением исходного payload;
-- tolerant parser Eltex trace envelope, RFC PRI и категорий alarm/call/SIP/ISUP/Q.931/IP/RADIUS;
+- UDP Syslog receiver с retrying disk spool, JetStream без silent eviction, DLQ/quarantine и сохранением исходного payload;
+- tolerant parser Eltex trace envelope, RFC3164/PRI и категорий alarm/call/SIP/ISUP/Q.931/IP/RADIUS/system journal;
 - приём CDR через SFTPGo FTP, неизменяемый raw-архив MinIO, UTF-8/Windows-1251 и динамический порядок колонок;
 - нормализация полного CDR, включая Acct-Session-Id, UniqueTag, SIP Call-ID, GCR, CIC и исходные поля;
 - точная двусторонняя корреляция CDR↔RADIUS по `device_id + normalized Acct-Session-Id`;
 - ClickHouse для событий/вызовов, PostgreSQL для пользователей, устройств, ingest и аудита;
 - first-run создание администратора, Argon2id, серверные сессии, CSRF, lockout и RBAC;
-- компактный русскоязычный интерфейс, таблицы, поиск, карточка вызова/timeline и XLSX;
+- компактный русскоязычный интерфейс: логические разделы, «Все Syslog», cursor pagination всей истории, raw payload, поиск и потоковый многостраничный XLSX;
 - Docker Compose/Portainer stack для существующего Nginx Proxy Manager, health checks и закрытые внутренние сервисы.
 
 ## Установка через Portainer
@@ -59,4 +59,4 @@ docker compose --env-file .env.example -f deploy/compose.yml config --quiet
 
 ## Важное ограничение Syslog
 
-Eltex не публикует исчерпывающую грамматику всех debug-сообщений 3.410. Collector всегда сохраняет принятый raw payload и показывает неизвестные сообщения. Семантическое покрытие расширяется версионированными parser fixtures после накопления реального corpus. UDP не даёт подтверждения доставки, поэтому абсолютную полноту до точки приёма гарантировать невозможно.
+Eltex не публикует исчерпывающую грамматику всех debug-сообщений 3.410. Collector всегда сохраняет принятый raw payload; все записи доступны в «Все Syslog», а неизвестные дополнительно видны в «Нераспознанное». Семантическое покрытие расширяется версионированными parser fixtures после накопления реального corpus. UDP не даёт подтверждения доставки, поэтому абсолютную полноту до точки приёма гарантировать невозможно.

@@ -14,8 +14,9 @@ flowchart LR
     Spool --> NATS[NATS JetStream]
     NATS --> Parser[SMG 3.410 parser v6 + device timezone]
     Parser --> Functional[Typed functional events]
-    Functional --> Radius[RADIUS transaction assembler]
-    Radius --> Correlator[Evidence correlator]
+    Functional --> Radius[Batch RADIUS lifecycle assembler]
+    Radius --> Dirty[Durable dirty day buckets]
+    Dirty --> Correlator[One-to-one evidence correlator]
     FTP --> Watcher[CDR watcher]
     Watcher --> MinIO[Raw archive]
     Watcher --> CDR[Typed CDR legs]
@@ -50,20 +51,22 @@ UDP Syslog не имеет acknowledgement: packet может потерятьс
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 
 Parser version `smg-3.410-v6` разделяет envelope, component classification и typed
-attributes. После миграции background reprocess читает сохранённый raw payload и
-идемпотентно перестраивает только derived RADIUS/AntiFraud facts. Progress хранится в
-`syslog_reprocess_ledger`; исходный payload и CDR archive не изменяются.
+attributes. Durable rebuild последовательно читает raw по integer microsecond cursor,
+пакетно строит `syslog_facts`, `cdr_time_facts`, `radius_fragments` и
+`antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и
+остаётся read model до проверки counts и короткой catch-up фазы.
 
-Eltex/RFC3164 wall clock интерпретируется в IANA timezone устройства и переводится в
-UTC. Версионная interpretation-таблица хранит parser version, source timezone и offset.
-Смена timezone инвалидирует derived v6 и запускает идемпотентный replay raw.
+Eltex/RFC3164 и CDR wall clock интерпретируются в одной активной IANA timezone revision
+устройства и переводятся в canonical UTC instant. Raw wall clock, timezone и offset
+сохраняются отдельно. Смена timezone создаёт shadow revision; PostgreSQL переключает
+active timezone после полной сборки, затем ClickHouse атомарно публикует новый read model.
 
-Stateful RADIUS assembler восстанавливается из `antifraud_transactions FINAL`, поэтому
-рестарт между request и reply не теряет уже собранные fragments. Автоматическая связь
-использует device-scoped Acct-Session-Id, exact SIP Call-ID/GCR и transaction call
-context. Для lifecycle без exact ID применяется детерминированный one-to-one matching
-по нормализованным номерам, маршрутам и времени; только unique best с margin создаёт
-связь, остальные кандидаты остаются ambiguous.
+Batch RADIUS assembler переносит Acct-Session-Id из любого fragment и ограничивает
+повторное использование call context временным occurrence. Новые Syslog/CDR факты
+ставят только `device + revision + day` в durable dirty queue. Set-oriented exact
+Acct-Session-Id/SIP Call-ID/GCR и composite matching выполняются внутри малого day/signature
+набора. `call_assignments` хранит одну versioned assignment на lifecycle со состоянием
+`exact`, `composite`, `ambiguous` либо `orphan`; повторный запуск заменяет stale link.
 
 ## Изоляция устройств
 

@@ -53,13 +53,14 @@ var (
 )
 
 type RawSyslog struct {
-	EventID    uuid.UUID `json:"eventId"`
-	DeviceID   uuid.UUID `json:"deviceId"`
-	ReceivedAt time.Time `json:"receivedAt"`
-	SourceIP   string    `json:"sourceIp"`
-	SourcePort uint16    `json:"sourcePort"`
-	Payload    []byte    `json:"payload"`
-	Timezone   string    `json:"timezone,omitempty"`
+	EventID          uuid.UUID `json:"eventId"`
+	DeviceID         uuid.UUID `json:"deviceId"`
+	ReceivedAt       time.Time `json:"receivedAt"`
+	SourceIP         string    `json:"sourceIp"`
+	SourcePort       uint16    `json:"sourcePort"`
+	Payload          []byte    `json:"payload"`
+	Timezone         string    `json:"timezone,omitempty"`
+	TimezoneRevision uint64    `json:"timezoneRevision,omitempty"`
 }
 
 type SyslogReceiver struct {
@@ -129,6 +130,7 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 	type cachedDevice struct {
 		id       uuid.UUID
 		timezone string
+		revision uint64
 		expires  time.Time
 	}
 	const (
@@ -188,9 +190,11 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 		now := time.Now()
 		deviceID := uuid.Nil
 		timezone := ""
+		var timezoneRevision uint64
 		if cached, ok := deviceCache[sourceIP]; ok && now.Before(cached.expires) {
 			deviceID = cached.id
 			timezone = cached.timezone
+			timezoneRevision = cached.revision
 			err = nil
 		} else {
 			deviceID, err = r.Store.DeviceBySourceIP(ctx, sourceIP)
@@ -199,9 +203,11 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 				if deviceErr != nil {
 					err = deviceErr
 				} else {
-					timezone = device.Timezone
+					timezone = device.ActiveTimezone
+					timezoneRevision = uint64(device.ActiveTimezoneRevision)
 					deviceCache[sourceIP] = cachedDevice{
-						id: deviceID, timezone: timezone, expires: now.Add(cacheTTL),
+						id: deviceID, timezone: timezone, revision: timezoneRevision,
+						expires: now.Add(cacheTTL),
 					}
 				}
 			}
@@ -218,6 +224,7 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.UTC(),
 			SourceIP: sourceIP, SourcePort: uint16(source.Port),
 			Payload: append([]byte(nil), buffer[:size]...), Timezone: timezone,
+			TimezoneRevision: timezoneRevision,
 		}
 		payload, _ := json.Marshal(record)
 		pending = append(pending, spool.Entry{
@@ -276,7 +283,16 @@ func RunSpoolPublisher(ctx context.Context, queue *spool.Queue, nc *nats.Conn) e
 	return nil
 }
 
-func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Client) error {
+type DeviceTimeConfigResolver interface {
+	DeviceTimeConfig(context.Context, uuid.UUID) (store.DeviceTimeConfig, error)
+}
+
+func RunSyslogWorker(
+	ctx context.Context,
+	nc *nats.Conn,
+	client *analytics.Client,
+	timeResolver DeviceTimeConfigResolver,
+) error {
 	js, err := nc.JetStream()
 	if err != nil {
 		return err
@@ -286,6 +302,11 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 	if err != nil {
 		return err
 	}
+	type cachedTimeConfig struct {
+		config  store.DeviceTimeConfig
+		expires time.Time
+	}
+	timeConfigs := make(map[uuid.UUID]cachedTimeConfig)
 	for ctx.Err() == nil {
 		messages, err := subscription.Fetch(250, nats.MaxWait(time.Second))
 		if errors.Is(err, nats.ErrTimeout) {
@@ -312,6 +333,22 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 				_ = message.Term()
 				continue
 			}
+			if timeResolver != nil {
+				cached := timeConfigs[raw.DeviceID]
+				if time.Now().After(cached.expires) {
+					config, resolveErr := timeResolver.DeviceTimeConfig(ctx, raw.DeviceID)
+					if resolveErr != nil {
+						slog.Error("active device timezone resolution failed",
+							"device", raw.DeviceID, "error", resolveErr)
+						_ = message.NakWithDelay(5 * time.Second)
+						continue
+					}
+					cached = cachedTimeConfig{config: config, expires: time.Now().Add(5 * time.Second)}
+					timeConfigs[raw.DeviceID] = cached
+				}
+				raw.Timezone = cached.config.ActiveTimezone
+				raw.TimezoneRevision = uint64(cached.config.ActiveTimezoneRevision)
+			}
 			event := ParseSyslog(raw)
 			parsed = append(parsed, parsedMessage{message: message, event: event})
 			events = append(events, event)
@@ -323,6 +360,8 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 			}
 			continue
 		}
+		successful := make([]parsedMessage, 0, len(parsed))
+		successfulEvents := make([]analytics.SyslogEvent, 0, len(parsed))
 		for _, item := range parsed {
 			event := item.event
 			if err := client.ProcessSyslogDerived(ctx, event); err != nil {
@@ -330,6 +369,24 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 				_ = item.message.NakWithDelay(5 * time.Second)
 				continue
 			}
+			successful = append(successful, item)
+			successfulEvents = append(successfulEvents, event)
+		}
+		if err := client.ProcessSyslogShadowDerivedBatch(ctx, successfulEvents); err != nil {
+			slog.Error("Syslog shadow lifecycle batch failed", "error", err)
+			for _, item := range successful {
+				_ = item.message.NakWithDelay(5 * time.Second)
+			}
+			continue
+		}
+		if err := client.EnqueueDirtySyslogBuckets(ctx, successfulEvents); err != nil {
+			slog.Error("Syslog dirty bucket enqueue failed", "error", err)
+			for _, item := range successful {
+				_ = item.message.NakWithDelay(5 * time.Second)
+			}
+			continue
+		}
+		for _, item := range successful {
 			_ = item.message.Ack()
 		}
 	}
@@ -357,6 +414,10 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		SourceIP: net.ParseIP(raw.SourceIP), SourcePort: raw.SourcePort, Payload: raw.Payload,
 		HeaderFormat: "eltex", ParseStatus: "partial", Category: "unknown",
 		Message: text, Attributes: map[string]string{}, SourceTimezone: location.String(),
+		TimezoneRevision: raw.TimezoneRevision,
+	}
+	if event.TimezoneRevision == 0 {
+		event.TimezoneRevision = 1
 	}
 	if match := priPattern.FindStringSubmatch(text); match != nil {
 		value, _ := strconv.ParseUint(match[1], 10, 16)

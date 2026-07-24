@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ type AntifraudTransaction struct {
 	Attributes              map[string]string
 	RawEventIDs             []uuid.UUID
 	ParserVersion           string
+	TimezoneRevision        uint64
 }
 
 type AntifraudRow struct {
@@ -80,6 +82,12 @@ type AntifraudRow struct {
 	CorrelationTimeDeltaMS int64             `json:"correlationTimeDeltaMs"`
 	AmbiguityReason        string            `json:"ambiguityReason"`
 	CDRSessionID           string            `json:"cdrSessionId"`
+	CorrelationState       string            `json:"correlationState"`
+	MatchedFields          []string          `json:"matchedFields"`
+	SourceTimezone         string            `json:"sourceTimezone"`
+	FirstEventLocal        string            `json:"firstEventLocal"`
+	LastEventLocal         string            `json:"lastEventLocal"`
+	CDRSetupLocal          string            `json:"cdrSetupLocal"`
 }
 
 type AntifraudCursor struct {
@@ -100,6 +108,7 @@ type ReplaySyslogRow struct {
 	SourcePort     uint16
 	Payload        []byte
 	SourceTimezone string
+	ReceivedAtUS   int64
 }
 
 func (c *Client) ProcessSyslogDerived(ctx context.Context, event SyslogEvent) error {
@@ -173,29 +182,305 @@ func (c *Client) processRadiusEvent(ctx context.Context, event SyslogEvent) erro
 		return err
 	}
 
+	shard := &c.antifraudShards[int(transactionID[0])%len(c.antifraudShards)]
+	shard.Lock()
 	c.antifraudMu.Lock()
-	defer c.antifraudMu.Unlock()
 	transaction := c.antifraudActive[transactionID]
+	c.antifraudMu.Unlock()
+	shard.Unlock()
 	if transaction == nil {
 		loaded, err := c.loadAntifraudTransaction(ctx, transactionID)
 		if err != nil {
 			return err
 		}
-		transaction = loaded
+		shard.Lock()
+		c.antifraudMu.Lock()
+		transaction = c.antifraudActive[transactionID]
 		if transaction == nil {
-			transaction = &AntifraudTransaction{
-				TransactionID: transactionID, DeviceID: event.DeviceID,
-				FirstEventAt: occurredAt, Attributes: make(map[string]string),
-				ParserVersion: SyslogParserVersion,
+			transaction = loaded
+			if transaction == nil {
+				transaction = &AntifraudTransaction{
+					TransactionID: transactionID, DeviceID: event.DeviceID,
+					FirstEventAt: occurredAt, Attributes: make(map[string]string),
+					ParserVersion: SyslogParserVersion,
+				}
 			}
+			c.antifraudActive[transactionID] = transaction
+			c.pruneAntifraudCacheLocked(transactionID)
 		}
-		c.antifraudActive[transactionID] = transaction
+		c.antifraudMu.Unlock()
+	} else {
+		shard.Lock()
 	}
 	mergeAntifraudEvent(transaction, event, occurredAt, packetIdentifier, latency, retry, q850)
-	if err := c.insertAntifraudTransaction(ctx, transaction); err != nil {
+	snapshot := cloneAntifraudTransaction(transaction)
+	shard.Unlock()
+	if err := c.insertAntifraudTransaction(ctx, snapshot); err != nil {
 		return err
 	}
-	return c.linkAntifraudTransaction(ctx, transaction)
+	return nil
+}
+
+func (c *Client) ProcessSyslogShadowDerived(ctx context.Context, event SyslogEvent) error {
+	return c.ProcessSyslogShadowDerivedBatch(ctx, []SyslogEvent{event})
+}
+
+func (c *Client) ProcessSyslogShadowDerivedBatch(
+	ctx context.Context, events []SyslogEvent,
+) error {
+	type fragment struct {
+		event               SyslogEvent
+		occurredAt          time.Time
+		transactionID       uuid.UUID
+		packetTransactionID uuid.UUID
+		revision            uint64
+	}
+	fragments := make([]fragment, 0, len(events))
+	for _, event := range events {
+		if event.Category != "radius" {
+			continue
+		}
+		occurredAt := event.ReceivedAt
+		if event.EventTime != nil {
+			occurredAt = *event.EventTime
+		}
+		revision := event.TimezoneRevision
+		if revision == 0 {
+			revision = 1
+		}
+		transactionID := antifraudTransactionID(event, occurredAt)
+		fragments = append(fragments, fragment{
+			event: event, occurredAt: occurredAt, transactionID: transactionID,
+			packetTransactionID: antifraudPacketTransactionID(event, occurredAt, transactionID),
+			revision:            revision,
+		})
+	}
+	if len(fragments) == 0 {
+		return nil
+	}
+	radiusBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.radius_fragments
+		(device_id,timezone_revision,event_id,transaction_id,packet_transaction_id,
+		 occurred_at,call_context,acct_session_id,packet_identifier,request_type,
+		 packet_code,result,is_antifraud,attributes,inserted_at)`)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, item := range fragments {
+		requestType := strings.ToLower(item.event.Attributes["xpgk_request_type"])
+		packetCode := strings.ToLower(item.event.Attributes["packet_code"])
+		result := item.event.Attributes["result"]
+		if result == "" {
+			switch packetCode {
+			case "access-accept":
+				result = "accept"
+			case "access-reject":
+				result = "reject"
+			case "accounting-response":
+				result = "complete"
+			}
+		}
+		isAntifraud := requestType == "number" || requestType == "save_call" ||
+			requestType == "check_call" || item.event.Attributes["is_antifraud"] == "true"
+		if err := radiusBatch.Append(
+			item.event.DeviceID, item.revision, item.event.EventID, item.transactionID,
+			item.packetTransactionID, item.occurredAt, item.event.Attributes["call_context"],
+			item.event.Attributes["acct_session_id"],
+			parseUint8Attribute(item.event.Attributes["packet_identifier"]), requestType,
+			packetCode, result, boolToUInt8(isAntifraud), item.event.Attributes, now,
+		); err != nil {
+			return err
+		}
+	}
+	if err := radiusBatch.Send(); err != nil {
+		return err
+	}
+
+	type revisionGroup struct {
+		deviceID uuid.UUID
+		revision uint64
+	}
+	grouped := make(map[revisionGroup][]fragment)
+	for _, item := range fragments {
+		key := revisionGroup{item.event.DeviceID, item.revision}
+		grouped[key] = append(grouped[key], item)
+	}
+	lifecycleBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.antifraud_lifecycles
+		(device_id,timezone_revision,transaction_id,occurrence,updated_at,first_event_at,
+		 last_event_at,call_context,acct_session_id,acct_session_id_normalized,request_type,
+		 request_code,response_code,decision,decision_reason,server_address,retries,latency_ms,
+		 calling_station_id,called_station_id,src_number_in,dst_number_in,src_number_out,
+		 dst_number_out,in_trunkgroup_label,out_trunkgroup_label,accounting_status,q850_cause,
+		 is_antifraud,completeness,defect,attributes,raw_event_ids)`)
+	if err != nil {
+		return err
+	}
+	for key, group := range grouped {
+		ids := make([]uuid.UUID, 0, len(group))
+		seen := make(map[uuid.UUID]bool)
+		for _, item := range group {
+			if !seen[item.transactionID] {
+				seen[item.transactionID] = true
+				ids = append(ids, item.transactionID)
+			}
+		}
+		current, err := c.loadShadowAntifraudTransactions(
+			ctx, key.deviceID, key.revision, ids,
+		)
+		if err != nil {
+			return err
+		}
+		sort.Slice(group, func(i, j int) bool {
+			if !group[i].occurredAt.Equal(group[j].occurredAt) {
+				return group[i].occurredAt.Before(group[j].occurredAt)
+			}
+			return group[i].event.EventID.String() < group[j].event.EventID.String()
+		})
+		rawSessionPresent := make(map[uuid.UUID]bool)
+		for _, item := range group {
+			if strings.Contains(strings.ToLower(string(item.event.Payload)), "acct-session-id") {
+				rawSessionPresent[item.transactionID] = true
+			}
+			transaction := current[item.transactionID]
+			if transaction == nil {
+				transaction = &AntifraudTransaction{
+					TransactionID: item.transactionID, DeviceID: key.deviceID,
+					FirstEventAt: item.occurredAt, Attributes: make(map[string]string),
+					ParserVersion: SyslogParserVersion, TimezoneRevision: key.revision,
+				}
+				current[item.transactionID] = transaction
+			}
+			mergeAntifraudEvent(
+				transaction, item.event, item.occurredAt,
+				parseUint8Attribute(item.event.Attributes["packet_identifier"]),
+				parseUint32Attribute(item.event.Attributes["latency_ms"]),
+				valueOrZero(parseUint16Attribute(item.event.Attributes["retry"])),
+				parseUint16Attribute(item.event.Attributes["q850_cause"]),
+			)
+		}
+		for _, transaction := range current {
+			if !seen[transaction.TransactionID] {
+				continue
+			}
+			defect := ""
+			if transaction.AcctSessionID == "" && rawSessionPresent[transaction.TransactionID] {
+				defect = "acct_session_id_present_in_raw_but_missing_in_lifecycle"
+			}
+			if err := appendShadowLifecycle(lifecycleBatch, transaction, defect); err != nil {
+				return err
+			}
+		}
+	}
+	return lifecycleBatch.Send()
+}
+
+func (c *Client) loadShadowAntifraudTransactions(
+	ctx context.Context, deviceID uuid.UUID, revision uint64, ids []uuid.UUID,
+) (map[uuid.UUID]*AntifraudTransaction, error) {
+	result := make(map[uuid.UUID]*AntifraudTransaction)
+	if len(ids) == 0 {
+		return result, nil
+	}
+	rows, err := c.Conn.Query(ctx, `SELECT
+		transaction_id,argMax(updated_at,updated_at),argMax(first_event_at,updated_at),
+		argMax(last_event_at,updated_at),argMax(call_context,updated_at),
+		argMax(acct_session_id,updated_at),argMax(acct_session_id_normalized,updated_at),
+		argMax(request_type,updated_at),argMax(request_code,updated_at),
+		argMax(response_code,updated_at),argMax(decision,updated_at),
+		argMax(decision_reason,updated_at),argMax(server_address,updated_at),
+		argMax(retries,updated_at),argMax(latency_ms,updated_at),
+		argMax(calling_station_id,updated_at),argMax(called_station_id,updated_at),
+		argMax(src_number_in,updated_at),argMax(dst_number_in,updated_at),
+		argMax(src_number_out,updated_at),argMax(dst_number_out,updated_at),
+		argMax(in_trunkgroup_label,updated_at),argMax(out_trunkgroup_label,updated_at),
+		argMax(accounting_status,updated_at),argMax(q850_cause,updated_at),
+		argMax(is_antifraud,updated_at),argMax(completeness,updated_at),
+		argMax(attributes,updated_at),argMax(raw_event_ids,updated_at)
+		FROM collector.antifraud_lifecycles
+		WHERE device_id=? AND timezone_revision=? AND transaction_id IN ?
+		GROUP BY transaction_id`, deviceID, revision, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item := &AntifraudTransaction{
+			DeviceID: deviceID, TimezoneRevision: revision, ParserVersion: SyslogParserVersion,
+		}
+		if err := rows.Scan(
+			&item.TransactionID, &item.UpdatedAt, &item.FirstEventAt, &item.LastEventAt,
+			&item.CallContext, &item.AcctSessionID, &item.AcctSessionIDNormalized,
+			&item.RequestType, &item.RequestCode, &item.ResponseCode, &item.Decision,
+			&item.DecisionReason, &item.ServerAddress, &item.Retries, &item.LatencyMS,
+			&item.CallingStationID, &item.CalledStationID, &item.SrcNumberIn,
+			&item.DstNumberIn, &item.SrcNumberOut, &item.DstNumberOut,
+			&item.InTrunkgroupLabel, &item.OutTrunkgroupLabel, &item.AccountingStatus,
+			&item.Q850Cause, &item.IsAntifraud, &item.Completeness, &item.Attributes,
+			&item.RawEventIDs,
+		); err != nil {
+			return nil, err
+		}
+		result[item.TransactionID] = item
+	}
+	return result, rows.Err()
+}
+
+type lifecycleBatchAppender interface {
+	Append(...any) error
+}
+
+func appendShadowLifecycle(
+	batch lifecycleBatchAppender, item *AntifraudTransaction, defect string,
+) error {
+	return batch.Append(
+		item.DeviceID, item.TimezoneRevision, item.TransactionID, uint32(0), item.UpdatedAt,
+		item.FirstEventAt, item.LastEventAt, item.CallContext, item.AcctSessionID,
+		item.AcctSessionIDNormalized, item.RequestType, item.RequestCode, item.ResponseCode,
+		item.Decision, item.DecisionReason, item.ServerAddress, item.Retries, item.LatencyMS,
+		item.CallingStationID, item.CalledStationID, item.SrcNumberIn, item.DstNumberIn,
+		item.SrcNumberOut, item.DstNumberOut, item.InTrunkgroupLabel, item.OutTrunkgroupLabel,
+		item.AccountingStatus, item.Q850Cause, item.IsAntifraud, item.Completeness, defect,
+		item.Attributes, item.RawEventIDs)
+}
+
+func valueOrZero(value *uint16) uint16 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func (c *Client) pruneAntifraudCacheLocked(current uuid.UUID) {
+	if len(c.antifraudActive) <= 10_000 {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-6 * time.Hour)
+	for transactionID, transaction := range c.antifraudActive {
+		if transactionID != current && transaction.LastEventAt.Before(cutoff) {
+			delete(c.antifraudActive, transactionID)
+		}
+		if len(c.antifraudActive) <= 9_000 {
+			return
+		}
+	}
+	for transactionID := range c.antifraudActive {
+		if transactionID != current {
+			delete(c.antifraudActive, transactionID)
+		}
+		if len(c.antifraudActive) <= 9_000 {
+			return
+		}
+	}
+}
+
+func cloneAntifraudTransaction(source *AntifraudTransaction) *AntifraudTransaction {
+	clone := *source
+	clone.Attributes = make(map[string]string, len(source.Attributes))
+	for key, value := range source.Attributes {
+		clone.Attributes[key] = value
+	}
+	clone.RawEventIDs = append([]uuid.UUID(nil), source.RawEventIDs...)
+	return &clone
 }
 
 func mergeAntifraudEvent(
@@ -362,21 +647,10 @@ func (c *Client) insertAntifraudTransaction(ctx context.Context, item *Antifraud
 		item.Attributes, item.RawEventIDs, item.ParserVersion)
 }
 
-func (c *Client) linkAntifraudTransaction(ctx context.Context, item *AntifraudTransaction) error {
-	return c.ReconcileDevice(ctx, item.DeviceID, item.FirstEventAt.Add(-10*time.Minute))
-}
-
 func (c *Client) correlateExactProtocolEvent(ctx context.Context, event SyslogEvent) error {
 	occurredAt := event.ReceivedAt
 	if event.EventTime != nil {
 		occurredAt = *event.EventTime
-	}
-	if event.Category != "radius" && event.Attributes["call_context"] != "" {
-		if err := c.ReconcileDevice(
-			ctx, event.DeviceID, occurredAt.Add(-10*time.Minute),
-		); err != nil {
-			return err
-		}
 	}
 	if callID := event.Attributes["sip_call_id"]; callID != "" {
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
@@ -499,6 +773,13 @@ func (c *Client) ListAntifraudPage(
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
+	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
+		return AntifraudPage{}, err
+	} else if revision != 0 {
+		return c.listCurrentAntifraudPage(
+			ctx, deviceID, revision, search, limit, cursor,
+		)
+	}
 	query := `SELECT t.transaction_id,t.first_event_at,t.last_event_at,t.call_context,
 		t.acct_session_id,t.request_type,t.request_code,t.response_code,t.decision,
 		t.decision_reason,t.server_address,t.retries,t.latency_ms,t.calling_station_id,
@@ -523,11 +804,11 @@ func (c *Client) ListAntifraudPage(
 				ON d.device_id=l.device_id AND d.record_id=l.cdr_record_id
 			LEFT JOIN collector.cdr_time_interpretations AS ct FINAL
 				ON ct.device_id=d.device_id AND ct.record_id=d.record_id
-			WHERE l.parser_version=?
+			WHERE l.parser_version IN ('smg-3.410-v5','smg-3.410-v6')
 			GROUP BY l.device_id,l.transaction_id
 		) c ON c.device_id=t.device_id AND c.transaction_id=t.transaction_id
-		WHERE t.device_id=? AND t.is_antifraud=1 AND t.parser_version=?`
-	args := []any{SyslogParserVersion, deviceID, SyslogParserVersion}
+		WHERE t.device_id=? AND t.is_antifraud=1`
+	args := []any{deviceID}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(t.acct_session_id,?)>0
 			OR positionCaseInsensitive(t.calling_station_id,?)>0
@@ -580,6 +861,13 @@ func (c *Client) ListAntifraudPage(
 func (c *Client) AntifraudTimeline(
 	ctx context.Context, deviceID, transactionID uuid.UUID,
 ) ([]TimelineRow, error) {
+	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
+		return nil, err
+	} else if revision != 0 {
+		return c.currentAntifraudTimeline(
+			ctx, deviceID, revision, transactionID, "antifraud_transaction",
+		)
+	}
 	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,i.event_time,i.category,
 		i.component,i.message,e.payload,i.parse_status,i.attributes,i.source_timezone,
 		'antifraud_transaction',toFloat32(1.0)
@@ -665,11 +953,13 @@ func (c *Client) MarkSyslogReprocessedBatch(
 func antifraudTransactionID(event SyslogEvent, occurredAt time.Time) uuid.UUID {
 	key := ""
 	if contextValue := event.Attributes["call_context"]; contextValue != "" {
-		key = "context:" + contextValue
+		key = fmt.Sprintf("context:%s:%s", contextValue,
+			event.ReceivedAt.UTC().Truncate(30*time.Minute).Format(time.RFC3339))
+	} else if requestID := event.Attributes["packet_identifier"]; requestID != "" {
+		key = fmt.Sprintf("request:%s:%s:%s", event.Attributes["server_address"], requestID,
+			event.ReceivedAt.UTC().Truncate(10*time.Minute).Format(time.RFC3339))
 	} else if session := normalizeCorrelationValue(event.Attributes["acct_session_id"]); session != "" {
 		key = "session:" + session
-	} else if requestID := event.Attributes["packet_identifier"]; requestID != "" {
-		key = fmt.Sprintf("request:%s:%s", requestID, occurredAt.UTC().Truncate(10*time.Minute))
 	} else {
 		key = "event:" + event.EventID.String()
 	}

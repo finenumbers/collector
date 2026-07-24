@@ -63,20 +63,6 @@ func main() {
 		slog.Error("clickhouse migration failed", "error", err)
 		os.Exit(1)
 	}
-	if devices, listErr := control.ListDevices(ctx); listErr != nil {
-		slog.Error("device timezone initialization failed", "error", listErr)
-		os.Exit(1)
-	} else {
-		for _, device := range devices {
-			if reinterpretErr := warehouse.ReinterpretCDRTimes(
-				ctx, device.ID, device.Timezone,
-			); reinterpretErr != nil {
-				slog.Error("CDR timezone initialization failed",
-					"device", device.ID, "error", reinterpretErr)
-				os.Exit(1)
-			}
-		}
-	}
 	rawArchive, err := openArchive(ctx, cfg)
 	if err != nil {
 		slog.Error("object archive startup failed", "error", err)
@@ -136,7 +122,7 @@ func main() {
 		errs <- ingest.RunSpoolPublisher(ctx, durableSpool, nc)
 	}()
 	go func() {
-		errs <- ingest.RunSyslogWorker(ctx, nc, warehouse)
+		errs <- ingest.RunSyslogWorker(ctx, nc, warehouse, control)
 	}()
 	go func() {
 		watcher := ingest.CDRWatcher{
@@ -145,30 +131,36 @@ func main() {
 		errs <- watcher.Run(ctx)
 	}()
 	go func() {
-		if err := ingest.RunHistoricalSyslogReprocess(ctx, warehouse, control); err != nil &&
-			!errors.Is(err, context.Canceled) {
-			slog.Error("historical Syslog reprocess failed", "error", err)
+		for ctx.Err() == nil {
+			if err := ingest.RunDeviceRevisionRebuilds(ctx, warehouse, control); err != nil &&
+				!errors.Is(err, context.Canceled) {
+				slog.Error("versioned device rebuild failed; retrying", "error", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
 		}
 	}()
 	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for {
-			devices, err := control.ListDevices(ctx)
-			if err == nil {
-				for _, device := range devices {
-					if reconcileErr := warehouse.ReconcileDevice(
-						ctx, device.ID, time.Now().UTC().Add(-72*time.Hour),
-					); reconcileErr != nil {
-						slog.Error("call correlation reconciliation failed",
-							"device", device.ID, "error", reconcileErr)
+		for ctx.Err() == nil {
+			buckets, err := warehouse.ListPendingCorrelationBuckets(ctx, 20)
+			if err != nil {
+				slog.Error("dirty correlation queue read failed", "error", err)
+			} else {
+				for _, bucket := range buckets {
+					if err := warehouse.ReconcileDirtyBucket(ctx, bucket); err != nil {
+						slog.Error("dirty correlation bucket failed",
+							"device", bucket.DeviceID, "revision", bucket.Revision,
+							"bucket", bucket.Bucket, "error", err)
 					}
 				}
 			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-time.After(2 * time.Second):
 			}
 		}
 	}()

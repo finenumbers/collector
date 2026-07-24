@@ -2,11 +2,12 @@
 
 ## Время
 
-`received_at` — UTC instant приёма datagram Collector. `event_time` — wall clock из
-Eltex/RFC3164, интерпретированный в IANA timezone устройства и сохранённый как UTC
-instant. `source_timezone` и `source_utc_offset_minutes` — audit интерпретации parser
-v6. CDR setup/connect/disconnect проходят то же правило timezone устройства. UI и XLSX
-форматируют UTC instant обратно в timezone SMG, а не timezone браузера.
+`received_at` — UTC instant приёма datagram Collector. Raw wall clock из Eltex/RFC3164
+и CDR хранится отдельно от canonical `event_time_utc`/`setup_time_utc`.
+`source_timezone`, `source_utc_offset_minutes` и `timezone_revision` доказывают,
+каким правилом выполнена интерпретация. `syslog_facts` и `cdr_time_facts` имеют revision
+в ключе; API читает только атомарно активированную revision и возвращает одновременно
+UTC RFC3339 и локальный RFC3339 с offset. UI не зависит от timezone браузера.
 
 ## Нормативные источники
 
@@ -88,11 +89,16 @@ v6. CDR setup/connect/disconnect проходят то же правило timez
 - setup/connect/disconnect, Q.850 disconnect cause и адрес RADIUS-сервера, когда они
   присутствуют в trace.
 
-`radius_events` — один разобранный фрагмент/пакет, ссылающийся на исходный
-`raw_event_id`. `antifraud_transactions` — собранный lifecycle одного call context:
+`radius_fragments` — один разобранный фрагмент/пакет, ссылающийся на исходный
+`event_id`. `antifraud_lifecycles` — versioned lifecycle одного bounded context occurrence:
 request/reply, операция, решение, сервер, latency/retry, accounting и список исходных
 event IDs. Раздел «RADIUS» показывает полный технический поток; «АнтиФрод» показывает
 только structured lifecycle с `xpgk-request-type` либо доказанным AntiFraud flow.
+
+`call_assignments` содержит ровно одно текущее назначение lifecycle: linked
+`cdr_record_id` либо явное состояние `ambiguous`/`orphan`, method, confidence, delta,
+matched fields и reason. Повторная сверка той же dirty day bucket заменяет старое
+назначение, поэтому stale links не накапливаются.
 
 Решения:
 

@@ -21,11 +21,11 @@ type fakeDeviceResolver struct {
 
 func (r fakeDeviceResolver) DeviceIdentityBySourceIP(
 	_ context.Context, sourceIP string,
-) (uuid.UUID, string, error) {
+) (uuid.UUID, string, int64, error) {
 	if id, ok := r.devices[sourceIP]; ok {
-		return id, "Asia/Novosibirsk", nil
+		return id, "Asia/Novosibirsk", 7, nil
 	}
-	return uuid.Nil, "", store.ErrNotFound
+	return uuid.Nil, "", 0, store.ErrNotFound
 }
 
 func TestHandoffPreservesSourceAndIsolatesDevices(t *testing.T) {
@@ -91,7 +91,8 @@ func TestHandoffPreservesSourceAndIsolatesDevices(t *testing.T) {
 	if records["5.227.161.181"].DeviceID != firstDevice ||
 		records["5.227.161.181"].SourcePort != 10003 ||
 		string(records["5.227.161.181"].Payload) != "SIP" ||
-		records["5.227.161.181"].Timezone != "Asia/Novosibirsk" {
+		records["5.227.161.181"].Timezone != "Asia/Novosibirsk" ||
+		records["5.227.161.181"].TimezoneRevision != 7 {
 		t.Fatalf("first device metadata changed: %#v", records["5.227.161.181"])
 	}
 	if records["5.227.161.188"].DeviceID != secondDevice ||

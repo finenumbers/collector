@@ -20,10 +20,11 @@ import (
 var sequencePattern = regexp.MustCompile(`^([0-9]{14})-([0-9]+)$`)
 
 type CDRParser struct {
-	DeviceID       uuid.UUID
-	FileID         uuid.UUID
-	Location       *time.Location
-	ExpectedHeader []string
+	DeviceID         uuid.UUID
+	FileID           uuid.UUID
+	Location         *time.Location
+	TimezoneRevision uint64
+	ExpectedHeader   []string
 }
 
 type CDRResult struct {
@@ -162,6 +163,7 @@ func (p CDRParser) mapRecord(row uint64, fields map[string]string) (analytics.CD
 		TransferMark: fields["call_transfer_mark"], RejectingRadiusServer: fields["rejecting_radius_server_address"],
 		RawFields: fields, SourceTimezone: p.Location.String(),
 		SourceUTCOffsetMinutes: int16(offsetSeconds / 60),
+		TimezoneRevision:       p.TimezoneRevision,
 	}, nil
 }
 

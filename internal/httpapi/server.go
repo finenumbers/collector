@@ -222,6 +222,15 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
+	if err := s.Analytics.ScheduleDeviceRebuild(
+		request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
+	); err != nil {
+		slog.Error("unable to initialize device derived revision",
+			"device", device.ID, "error", err)
+		writeError(writer, http.StatusInternalServerError,
+			"device created, but derived revision initialization failed")
+		return
+	}
 	writeJSON(writer, http.StatusCreated, device)
 }
 
@@ -248,19 +257,16 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.Analytics.InvalidateDeviceDerivedData(request.Context(), id); err != nil {
-		slog.Error("unable to schedule device data reprocessing", "device", id, "error", err)
-		writeError(writer, http.StatusInternalServerError,
-			"device saved, but historical data reprocessing could not be scheduled")
-		return
-	}
-	if err := s.Analytics.ReinterpretCDRTimes(
-		request.Context(), id, device.Timezone,
-	); err != nil {
-		slog.Error("unable to reinterpret historical CDR times", "device", id, "error", err)
-		writeError(writer, http.StatusInternalServerError,
-			"device saved, but historical CDR reprocessing failed")
-		return
+	if device.TimezoneRevision != device.ActiveTimezoneRevision {
+		if err := s.Analytics.ScheduleDeviceRebuild(
+			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
+		); err != nil {
+			slog.Error("unable to schedule device timezone revision",
+				"device", device.ID, "revision", device.TimezoneRevision, "error", err)
+			writeError(writer, http.StatusInternalServerError,
+				"device saved; timezone rebuild could not be scheduled")
+			return
+		}
 	}
 	writeJSON(writer, http.StatusOK, device)
 }
@@ -522,7 +528,7 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusNotFound, "device not found")
 		return
 	}
-	location, err := time.LoadLocation(device.Timezone)
+	location, err := time.LoadLocation(device.ActiveTimezone)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "invalid device timezone")
 		return

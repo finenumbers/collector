@@ -75,18 +75,20 @@ Health endpoints:
 - `http://127.0.0.1:18081` на Docker-хосте — source-preserving ingress.
 
 В административной строке «Диагностика Syslog» отдельно показываются ingress
-accepted/handoff/spool, app accepted/rejected, classified/raw coverage, progress
-historical reprocess и AntiFraud complete/incomplete/orphan. После обновления на parser
-v6 `reprocessRemaining` должен монотонно дойти до нуля; Collector можно перезапускать,
-ledger продолжит с необработанных event IDs. Обязательные алерты: container restart,
+accepted/handoff/spool, app accepted/rejected, classified/raw coverage, active/building
+timezone revision, Syslog/CDR replay counts, missing CDR time facts, lifecycle coverage
+и инвариант `exact + composite + ambiguous + orphan = total`. Durable integer cursor
+продолжает rebuild после рестарта. Обязательные алерты: container restart,
 оба local spool depth/size (`ingress.db`, `syslog.db`), handoff errors, NATS lag/storage,
 unknown source Syslog, unknown parser rate, persistent reprocess backlog, AntiFraud
 orphan/incomplete rate, CDR ingest age, disk >75/85%, ClickHouse insert errors,
 SFTPGo unavailable, backup age.
 
-IANA timezone редактируется в настройках конкретного SMG. Сохранение инвалидирует
-только derived v6, после чего непрерывный replay пересобирает interpretation, lifecycle
-и links из неизменяемого raw Syslog. Контролируйте correlation coverage
+IANA timezone редактируется в настройках конкретного SMG. Сохранение создаёт новую
+shadow revision и не удаляет текущие строки. UI продолжает использовать active timezone,
+пока background rebuild пакетно пересобирает Syslog/CDR/lifecycle, проходит coverage и
+catch-up. Только затем active revision переключается атомарно. Контролируйте replay
+counts, ClickHouse read rows/CPU и correlation coverage
 `exact/composite/ambiguous/orphan`.
 
 ## Инциденты

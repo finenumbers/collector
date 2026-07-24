@@ -13,6 +13,9 @@ type Device = {
   model: string
   firmware: string
   timezone: string
+  activeTimezone: string
+  timezoneRevision: number
+  activeTimezoneRevision: number
   syslogSourceIp: string
   managementIp?: string
   deviceSign: string
@@ -76,6 +79,19 @@ type SyslogDiagnostics = {
   correlationExact: number
   correlationComposite: number
   correlationAmbiguous: number
+  activeRevision: number
+  buildingRevision: number
+  revisionTimezone: string
+  revisionStatus: string
+  replayProcessed: number
+  replayTotal: number
+  cdrReplayProcessed: number
+  cdrReplayTotal: number
+  missingCdrInterpretations: number
+  radiusRawFragments: number
+  lifecycleDerived: number
+  correlationTotal: number
+  correlationOrphan: number
   ingressAvailable: boolean
   ingress: IngressStatus
 }
@@ -128,6 +144,12 @@ type AntifraudRow = {
   correlationTimeDeltaMs: number
   ambiguityReason: string
   cdrSessionId: string
+  correlationState: 'exact' | 'composite' | 'ambiguous' | 'orphan'
+  matchedFields: string[]
+  sourceTimezone: string
+  firstEventLocal: string
+  lastEventLocal: string
+  cdrSetupLocal: string
 }
 type PageCursor = { before: string; beforeId: string }
 type PageResponse = {
@@ -444,6 +466,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const showRadiusEmpty = !loading && rows.length === 0 && dataset === 'radius'
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
   return <section className="data-view">
+    {device.timezoneRevision !== device.activeTimezoneRevision && <div className="timezone-rebuild">
+      Часовой пояс {device.timezone} пересобирается в фоне. До атомарного переключения
+      показана активная ревизия {device.activeTimezoneRevision} ({activeDeviceTimezone(device)}).
+    </div>}
     {stats && <div className="stat-strip">
       <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Неуспешных</small><strong>{stats.failedCalls24h.toLocaleString('ru-RU')}</strong></span>
@@ -466,12 +492,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
-      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} timezone={device.timezone}
+      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} timezone={activeDeviceTimezone(device)}
         onSelect={setSelectedCall} /> :
         dataset === 'antifraud'
-          ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={device.timezone}
+          ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedAntifraud} />
-          : <EventsTable rows={rows as EventRow[]} timezone={device.timezone}
+          : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedEvent} />}
       {showRadiusEmpty && <RadiusEmptyState />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
@@ -482,7 +508,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
     {selectedAntifraud && <AntifraudDrawer device={device} row={selectedAntifraud}
       onClose={() => setSelectedAntifraud(null)} />}
-    {selectedEvent && <EventDrawer event={selectedEvent} timezone={device.timezone}
+    {selectedEvent && <EventDrawer event={selectedEvent} timezone={activeDeviceTimezone(device)}
       onClose={() => setSelectedEvent(null)} />}
   </section>
 }
@@ -514,12 +540,20 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>Classified, 24 ч: <strong>{value.classified24h.toLocaleString('ru-RU')} / {value.rawEvents24h.toLocaleString('ru-RU')}</strong></span>
       <span>Reprocess current: <strong>{value.reprocessedCurrent.toLocaleString('ru-RU')}</strong></span>
       <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
+      <span>Active / building revision: <strong>{value.activeRevision || '—'} / {value.buildingRevision || '—'}</strong></span>
+      <span>Revision timezone / status: <strong>{value.revisionTimezone || '—'} / {value.revisionStatus || '—'}</strong></span>
+      <span>Replay Syslog: <strong>{value.replayProcessed.toLocaleString('ru-RU')} / {value.replayTotal.toLocaleString('ru-RU')}</strong></span>
+      <span>Replay CDR: <strong>{value.cdrReplayProcessed.toLocaleString('ru-RU')} / {value.cdrReplayTotal.toLocaleString('ru-RU')}</strong></span>
+      <span>CDR без time fact: <strong>{value.missingCdrInterpretations.toLocaleString('ru-RU')}</strong></span>
+      <span>RADIUS raw / lifecycle: <strong>{value.radiusRawFragments.toLocaleString('ru-RU')} / {value.lifecycleDerived.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud complete: <strong>{value.antifraudComplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud incomplete: <strong>{value.antifraudIncomplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud без CDR: <strong>{value.antifraudOrphan.toLocaleString('ru-RU')}</strong></span>
       <span>Exact links: <strong>{value.correlationExact.toLocaleString('ru-RU')}</strong></span>
       <span>Composite links: <strong>{value.correlationComposite.toLocaleString('ru-RU')}</strong></span>
       <span>Ambiguous: <strong>{value.correlationAmbiguous.toLocaleString('ru-RU')}</strong></span>
+      <span>Coverage invariant: <strong>{value.correlationExact + value.correlationComposite +
+        value.correlationAmbiguous + value.correlationOrphan} / {value.correlationTotal}</strong></span>
       <span>Миграции: <strong>{value.appliedMigrations.join(', ') || '—'}</strong></span>
     </div>
     <div className="diagnostic-breakdown">
@@ -573,7 +607,8 @@ function AntifraudTable({ rows, timezone, onSelect }: {
     <td className="mono">{row.serverAddress || '—'}</td>
     <td className="right">{row.latencyMs == null ? '—' : `${row.latencyMs} мс`}</td>
     <td>{row.accountingStatus || '—'}</td>
-    <td>{row.correlationMethod || row.ambiguityReason || 'нет CDR'}</td>
+    <td><span className={`parse-status ${row.correlationState || 'orphan'}`}>
+      {row.correlationState || 'orphan'}</span> {row.correlationMethod}</td>
     <td className="right">{row.legCount || 'нет CDR'}</td>
     <td><span className={`parse-status ${row.completeness}`}>
       {row.completeness}</span></td>
@@ -606,10 +641,17 @@ function AntifraudDrawer({ device, row, onClose }: {
       <span><small>Latency / retries</small><strong>{row.latencyMs == null ? '—' : `${row.latencyMs} мс`} / {row.retries}</strong></span>
       <span><small>Accounting</small><strong>{row.accountingStatus || '—'}</strong></span>
       <span><small>CDR legs</small><strong>{row.legCount}</strong></span>
-      <span><small>CDR setup</small><strong>{formatTime(row.cdrSetupTime, device.timezone)}</strong></span>
-      <span><small>Корреляция</small><strong>{row.correlationMethod || row.ambiguityReason || 'нет CDR'}</strong></span>
+      <span><small>SMG timezone</small><strong>{row.sourceTimezone || activeDeviceTimezone(device)}</strong></span>
+      <span><small>AntiFraud local / UTC</small><strong>{row.firstEventLocal || formatTime(row.firstEventAt, activeDeviceTimezone(device))}
+        {' / '}{row.firstEventAt}</strong></span>
+      <span><small>CDR setup local / UTC</small><strong>{row.cdrSetupLocal || formatTime(row.cdrSetupTime, activeDeviceTimezone(device))}
+        {' / '}{row.cdrSetupTime || '—'}</strong></span>
+      <span><small>Состояние корреляции</small><strong>{row.correlationState || 'orphan'}</strong></span>
+      <span><small>Метод</small><strong>{row.correlationMethod || '—'}</strong></span>
       <span><small>Confidence / delta</small><strong>
         {row.correlationMethod ? `${row.correlationConfidence.toFixed(2)} / ${row.correlationTimeDeltaMs} мс` : '—'}</strong></span>
+      <span><small>Matched fields</small><strong>{row.matchedFields?.join(', ') || '—'}</strong></span>
+      <span><small>Причина ambiguity/orphan</small><strong>{row.ambiguityReason || '—'}</strong></span>
       <span><small>Acct-Session-Id</small><strong className="mono">{row.acctSessionId || '—'}</strong></span>
       <span><small>CDR Acct-Session-Id</small><strong className="mono">{row.cdrSessionId || '—'}</strong></span>
       <span><small>Call context</small><strong className="mono">{row.callContext || '—'}</strong></span>
@@ -625,8 +667,8 @@ function AntifraudDrawer({ device, row, onClose }: {
     </div>
     <h4>CDR legs</h4>
     {row.linkedRecordIds.length === 0
-      ? <p className="warning-text">CDR не найден. Lifecycle сохранён как orphan/incomplete
-        и будет автоматически сверён после поступления CDR.</p>
+      ? <p className="warning-text">CDR не назначен: {row.correlationState || 'orphan'}.
+        {row.ambiguityReason ? ` ${row.ambiguityReason}` : ' Сверка повторится после новых фактов.'}</p>
       : <div className="timeline">{row.linkedRecordIds.map((recordId, index) =>
         <div className="timeline-item" key={recordId}><i /><div>
           <strong>Leg {index + 1}</strong><p className="mono">{recordId}</p>
@@ -634,7 +676,7 @@ function AntifraudDrawer({ device, row, onClose }: {
     <h4>Исходные события RADIUS</h4>
     <div className="timeline">{timeline.length === 0 && <p>События пока не найдены.</p>}
       {timeline.map((event) => <div className="timeline-item" key={event.eventId}>
-        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, device.timezone)}</time>
+        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, activeDeviceTimezone(device))}</time>
           <strong>{event.component || 'RADIUS'} · {event.attributes.packet_code || 'fragment'}</strong>
           <p>{event.message}</p></div>
       </div>)}
@@ -674,7 +716,7 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
     <div className="drawer-header"><div><h3>Карточка вызова</h3><span className="mono">{call.recordId}</span></div>
       <button onClick={onClose}>×</button></div>
     <div className="call-facts">
-      <span><small>Установка</small><strong>{formatTime(call.setupTime, device.timezone)}</strong></span>
+      <span><small>Установка</small><strong>{formatTime(call.setupTime, activeDeviceTimezone(device))}</strong></span>
       <span><small>Длительность</small><strong>{call.durationMs == null ? '—' : `${(call.durationMs / 1000).toFixed(3)} c`}</strong></span>
       <span><small>Q.850</small><strong>{call.releaseCause ?? '—'} · {call.releaseInfo || '—'}</strong></span>
       <span><small>Acct-Session-Id</small><strong className="mono">{call.radiusSessionId || '—'}</strong></span>
@@ -682,7 +724,7 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
     <h4>Связанные события АнтиФрод и Syslog</h4>
     <div className="timeline">{timeline.length === 0 && <p>Связанные события пока не найдены.</p>}
       {timeline.map((event) => <div className="timeline-item" key={event.eventId}>
-        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, device.timezone)}</time><strong>{event.category} · {event.component || 'SMG'}</strong>
+        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, activeDeviceTimezone(device))}</time><strong>{event.category} · {event.component || 'SMG'}</strong>
           <p>{event.message}</p><small>{event.method} · confidence {event.confidence.toFixed(2)}</small></div>
       </div>)}
     </div>
@@ -863,6 +905,10 @@ function EmptyDevices({ canCreate, onCreate }: { canCreate: boolean; onCreate: (
 
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="centered">{children}</div>
+}
+
+function activeDeviceTimezone(device: Device) {
+  return device.activeTimezone || device.timezone
 }
 
 function formatTime(value?: string, timezone = 'UTC') {

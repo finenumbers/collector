@@ -19,7 +19,11 @@
   exact SIP Call-ID/GCR и детерминированный one-to-one composite matching по
   нормализованным номерам, маршрутам и времени; неоднозначность не auto-link;
 - IANA timezone каждого SMG — единое правило source wall clock для Syslog и CDR:
-  хранение остаётся UTC, UI/XLSX явно показывают время устройства;
+  хранение остаётся UTC, UI/API/XLSX явно показывают UTC и время устройства;
+- timezone revision и derived facts пересобираются пакетно в shadow-слое; активная
+  история остаётся видимой до проверки coverage и атомарного переключения;
+- lifecycle и one-to-one correlation выполняются по durable dirty day buckets без
+  device-wide reconcile в ingestion hot path;
 - ClickHouse для событий/вызовов, PostgreSQL для пользователей, устройств, ingest и аудита;
 - first-run создание администратора, Argon2id, серверные сессии, CSRF, lockout и RBAC;
 - компактный светлый русскоязычный интерфейс: отдельные RADIUS и AntiFraud lifecycle,

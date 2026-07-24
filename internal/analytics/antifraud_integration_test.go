@@ -517,4 +517,63 @@ func TestChunkedRevisionReplayUsesDurableCursor(t *testing.T) {
 	if err != nil || !done || job.CDRProcessed != 1 {
 		t.Fatalf("CDR replay chunk failed: job=%#v done=%v err=%v", job, done, err)
 	}
+	var rebuiltSetup time.Time
+	var rebuiltSource string
+	if err := client.Conn.QueryRow(ctx, `SELECT argMax(setup_time_utc,interpreted_at),
+		argMax(source_timezone,interpreted_at)
+		FROM collector.cdr_time_facts
+		WHERE device_id=? AND timezone_revision=?`, deviceID, uint64(2)).
+		Scan(&rebuiltSetup, &rebuiltSource); err != nil {
+		t.Fatal(err)
+	}
+	wantSetup := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	if !rebuiltSetup.Equal(wantSetup) || rebuiltSource != "UTC" {
+		t.Fatalf("CDR source time shifted during rebuild: %v/%s", rebuiltSetup, rebuiltSource)
+	}
+	job.Status = "cutover"
+	sealed, changed, err := client.RefreshDeviceRevisionHighWatermarks(ctx, job)
+	if err != nil || !changed || sealed.CutoverSealed != 1 {
+		t.Fatalf("cutover watermark was not sealed: %#v changed=%v err=%v", sealed, changed, err)
+	}
+	late := SyslogEvent{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.Add(time.Hour),
+		SourceIP: net.ParseIP("10.0.0.19"), SourcePort: 10003,
+		Payload: []byte("WEBS: after seal"), ParseStatus: "parsed",
+		Category: "system_journal", SourceTimezone: "UTC", TimezoneRevision: 2,
+	}
+	if err := client.InsertSyslog(ctx, late); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, changed, err := client.RefreshDeviceRevisionHighWatermarks(ctx, sealed)
+	if err != nil || changed || unchanged.HighWatermarkUS != sealed.HighWatermarkUS {
+		t.Fatalf("sealed cutover chased live traffic: %#v changed=%v err=%v", unchanged, changed, err)
+	}
+	boundary := time.Date(2026, 7, 25, 0, 2, 0, 0, time.UTC)
+	if err := client.EnqueueDirtySyslogBuckets(ctx, []SyslogEvent{{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: boundary,
+		EventTime: &boundary, Category: "radius", TimezoneRevision: 2,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var boundaryBuckets uint64
+	if err := client.Conn.QueryRow(ctx, `SELECT countDistinct(bucket)
+		FROM collector.correlation_dirty_buckets
+		WHERE device_id=? AND timezone_revision=? AND bucket IN (?,?)`,
+		deviceID, uint64(2), boundary.Add(-24*time.Hour), boundary).
+		Scan(&boundaryBuckets); err != nil {
+		t.Fatal(err)
+	}
+	if boundaryBuckets != 2 {
+		t.Fatalf("midnight event did not dirty both UTC days: %d", boundaryBuckets)
+	}
+	ready, err := client.MarkDeviceRevisionReady(ctx, sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ActivateDeviceRevision(ctx, ready); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := client.ActiveDeviceRevision(ctx, deviceID); err != nil || active != 2 {
+		t.Fatalf("revision activation failed: active=%d err=%v", active, err)
+	}
 }

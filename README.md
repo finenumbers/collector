@@ -15,14 +15,15 @@
 - нормализация полного CDR, включая Acct-Session-Id, UniqueTag, SIP Call-ID, GCR, CIC и исходные поля;
 - stateful сборка RADIUS AntiFraud request/reply/accounting lifecycle с
   `check_call` Accept/Reject/timeout fail-open, server/latency/retry и completeness;
-- двусторонняя multi-leg корреляция CDR↔AntiFraud по device-scoped Acct-Session-Id,
-  exact SIP Call-ID/GCR и детерминированный one-to-one composite matching по
-  нормализованным номерам, маршрутам и времени; неоднозначность не auto-link;
-- IANA timezone каждого SMG — единое правило source wall clock для Syslog и CDR:
-  хранение остаётся UTC, UI/API/XLSX явно показывают UTC и время устройства;
+- двусторонняя multi-operation корреляция CDR↔AntiFraud по device-scoped
+  Acct-Session-Id, exact SIP Call-ID/GCR и детерминированный composite matching:
+  одна AntiFraud-операция получает максимум один CDR, один вызов может содержать
+  несколько RADIUS/AntiFraud-операций; неоднозначность не auto-link;
+- timestamp исходного CDR SMG интерпретируется как UTC, а Syslog wall clock — в IANA
+  timezone устройства; UI/API явно показывают canonical UTC и локальное время SMG;
 - timezone revision и derived facts пересобираются пакетно в shadow-слое; активная
   история остаётся видимой до проверки coverage и атомарного переключения;
-- lifecycle и one-to-one correlation выполняются по durable dirty day buckets без
+- lifecycle и correlation выполняются по durable dirty day buckets без
   device-wide reconcile в ingestion hot path;
 - ClickHouse для событий/вызовов, PostgreSQL для пользователей, устройств, ingest и аудита;
 - first-run создание администратора, Argon2id, серверные сессии, CSRF, lockout и RBAC;

@@ -16,6 +16,7 @@ type Device = {
   activeTimezone: string
   timezoneRevision: number
   activeTimezoneRevision: number
+  cdrSourceTimezone: string
   syslogSourceIp: string
   managementIp?: string
   deviceSign: string
@@ -92,12 +93,22 @@ type SyslogDiagnostics = {
   lifecycleDerived: number
   correlationTotal: number
   correlationOrphan: number
+  ingestRevision: number
+  revisionAligned: boolean
+  latestRawAt: string
+  latestFactAt: string
+  latestLifecycleAt: string
+  latestAssignmentAt: string
+  pendingDirtyBuckets: number
+  oldestDirtyAt: string
   ingressAvailable: boolean
   ingress: IngressStatus
 }
 type CallRow = {
   recordId: string
   setupTime?: string
+  setupTimeLocal?: string
+  sourceTimezone?: string
   durationMs?: number
   releaseCause?: number
   releaseInfo: string
@@ -492,8 +503,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
-      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} timezone={activeDeviceTimezone(device)}
-        onSelect={setSelectedCall} /> :
+      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]} onSelect={setSelectedCall} /> :
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedAntifraud} />
@@ -541,11 +551,15 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>Reprocess current: <strong>{value.reprocessedCurrent.toLocaleString('ru-RU')}</strong></span>
       <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
       <span>Active / building revision: <strong>{value.activeRevision || '—'} / {value.buildingRevision || '—'}</strong></span>
+      <span>Read / ingest revision: <strong>{value.activeRevision || '—'} / {value.ingestRevision || '—'} · {value.revisionAligned ? 'aligned' : 'SPLIT'}</strong></span>
       <span>Revision timezone / status: <strong>{value.revisionTimezone || '—'} / {value.revisionStatus || '—'}</strong></span>
       <span>Replay Syslog: <strong>{formatCount(value.replayProcessed)} / {formatCount(value.replayTotal)}</strong></span>
       <span>Replay CDR: <strong>{formatCount(value.cdrReplayProcessed)} / {formatCount(value.cdrReplayTotal)}</strong></span>
       <span>CDR без time fact: <strong>{formatCount(value.missingCdrInterpretations)}</strong></span>
       <span>RADIUS raw / lifecycle: <strong>{formatCount(value.radiusRawFragments)} / {formatCount(value.lifecycleDerived)}</strong></span>
+      <span>Последний raw / fact: <strong>{formatTime(value.latestRawAt, 'UTC')} / {formatTime(value.latestFactAt, 'UTC')}</strong></span>
+      <span>Последний lifecycle / link: <strong>{formatTime(value.latestLifecycleAt, 'UTC')} / {formatTime(value.latestAssignmentAt, 'UTC')}</strong></span>
+      <span>Dirty buckets: <strong>{formatCount(value.pendingDirtyBuckets)} · oldest {formatTime(value.oldestDirtyAt, 'UTC')}</strong></span>
       <span>AntiFraud complete: <strong>{value.antifraudComplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud incomplete: <strong>{value.antifraudIncomplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud без CDR: <strong>{value.antifraudOrphan.toLocaleString('ru-RU')}</strong></span>
@@ -687,17 +701,16 @@ function AntifraudDrawer({ device, row, onClose }: {
   </div>
 }
 
-function CallsTable({ rows, timezone, onSelect }: {
+function CallsTable({ rows, onSelect }: {
   rows: CallRow[]
-  timezone: string
   onSelect: (row: CallRow) => void
 }) {
   return <table><thead><tr>
-    <th>Установка</th><th>Входящий маршрут</th><th>Исходящий маршрут</th><th>Номер A: вход</th>
+    <th>Установка UTC</th><th>Входящий маршрут</th><th>Исходящий маршрут</th><th>Номер A: вход</th>
     <th>Номер A: выход</th><th>Номер B: вход</th><th>Номер B: выход</th><th>Длит.</th>
     <th>Q.850</th><th>Результат</th><th>Acct-Session-Id</th><th>UniqueTag</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId} onClick={() => onSelect(row)}>
-    <td className="mono">{formatTime(row.setupTime, timezone)}</td>
+    <td className="mono">{formatTime(row.setupTime, 'UTC')}</td>
     <td>{row.incomingDescription || '—'}</td><td>{row.outgoingDescription || '—'}</td>
     <td className="mono">{row.incomingCgpn || '—'}</td><td className="mono">{row.outgoingCgpn || '—'}</td>
     <td className="mono">{row.incomingCdpn || '—'}</td><td className="mono">{row.outgoingCdpn || '—'}</td>
@@ -717,7 +730,7 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
     <div className="drawer-header"><div><h3>Карточка вызова</h3><span className="mono">{call.recordId}</span></div>
       <button onClick={onClose}>×</button></div>
     <div className="call-facts">
-      <span><small>Установка</small><strong>{formatTime(call.setupTime, activeDeviceTimezone(device))}</strong></span>
+      <span><small>Установка UTC / SMG local</small><strong>{formatTime(call.setupTime, 'UTC')} / {call.setupTimeLocal || formatTime(call.setupTime, activeDeviceTimezone(device))}</strong></span>
       <span><small>Длительность</small><strong>{call.durationMs == null ? '—' : `${(call.durationMs / 1000).toFixed(3)} c`}</strong></span>
       <span><small>Q.850</small><strong>{call.releaseCause ?? '—'} · {call.releaseInfo || '—'}</strong></span>
       <span><small>Acct-Session-Id</small><strong className="mono">{call.radiusSessionId || '—'}</strong></span>

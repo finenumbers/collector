@@ -13,10 +13,7 @@ func TestCDRParserFullEltexRow(t *testing.T) {
 Device Sign;Setup time;Connect time;Disconnect time;Duration;Release cause;Call release info;Incoming IP-address;Incoming type;Incoming description;Outgoing IP-address;Outgoing type;Outgoing description;Incoming CgPN;Outgoing CgPN;Incoming CdPN;Outgoing CdPN;Redirecting mark;Pickup mark;Release side mark;Incoming SS7 CIC;Incoming SIP Call-ID;Outgoing SS7 CIC;Outgoing SIP Call-ID;Incoming SS7 category;Incoming Calling party category (RUS);Outgoing SS7 category;Outgoing Calling party category (RUS);Incoming E1 stream;Incoming E1 channel;Outgoing E1 stream;Outgoing E1 channel;Sequence number;Incoming redirecting number;Outgoing redirecting number;RADIUS Accounting-Session-Id;Global Callref;Incoming numplan;Outgoing numplan;UniqueTag identifier;Calling NAI;Called NAI;Incoming redirecting NAI;Outgoing redirecting NAI;Call transfer mark;Call record path;IVR call record path;Rejecting RADIUS server address;Calling NAI original;Called NAI original;
 mts;2026-07-23 23:58:33.237;2026-07-23 23:58:37.191;2026-07-23 23:58:46.657;9.466;16;user answer;5.227.161.180;trunk-SIP;PSTN_Novosibirsk_MTS_Local;11.254.255.131;trunk-SIP;11369_Novosibirsk_MTS;73832888803;3832888803;73832188654;3832188654;normal;normal;originate;;6957b57c86f211f1a421005056a36854;;1784-851113-222573;10;1;225;2;;;;;20260628183403-155881;;;11000307 6a62aaa9 c9f5297a 4f6a3001;;0;0;110003076a62aaa9c9f5297a4f6a3001;2;2;2;2;;;;;3;3;
 `
-	location, err := time.LoadLocation("Asia/Novosibirsk")
-	if err != nil {
-		t.Fatal(err)
-	}
+	location := time.UTC
 	deviceID := uuid.New()
 	result, err := (CDRParser{DeviceID: deviceID, FileID: uuid.New(), Location: location}).Parse(strings.NewReader(sample))
 	if err != nil {
@@ -41,9 +38,13 @@ mts;2026-07-23 23:58:33.237;2026-07-23 23:58:37.191;2026-07-23 23:58:46.657;9.46
 	if record.UniqueTag != "110003076a62aaa9c9f5297a4f6a3001" {
 		t.Fatalf("unique tag parsed incorrectly: %q", record.UniqueTag)
 	}
-	if record.SourceTimezone != "Asia/Novosibirsk" || record.SourceUTCOffsetMinutes != 420 {
+	if record.SourceTimezone != "UTC" || record.SourceUTCOffsetMinutes != 0 {
 		t.Fatalf("source time audit parsed incorrectly: %q/%d",
 			record.SourceTimezone, record.SourceUTCOffsetMinutes)
+	}
+	wantSetup := time.Date(2026, 7, 23, 23, 58, 33, 237_000_000, time.UTC)
+	if record.SetupTime == nil || !record.SetupTime.Equal(wantSetup) {
+		t.Fatalf("UTC CDR timestamp shifted: got %v want %v", record.SetupTime, wantSetup)
 	}
 	replayed, err := (CDRParser{
 		DeviceID: deviceID, FileID: uuid.New(), Location: location,

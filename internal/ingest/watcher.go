@@ -116,13 +116,13 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, err.Error())
 		return os.Remove(path)
 	}
-	location, err := time.LoadLocation(device.ActiveTimezone)
+	location, err := time.LoadLocation(device.CDRSourceTimezone)
 	if err != nil {
 		_ = w.Store.CompleteIngestFile(
 			ctx, fileID, "quarantined", 0, 0,
-			fmt.Sprintf("invalid active device timezone %q: %v", device.ActiveTimezone, err),
+			fmt.Sprintf("invalid CDR source timezone %q: %v", device.CDRSourceTimezone, err),
 		)
-		return fmt.Errorf("invalid active device timezone %q: %w", device.ActiveTimezone, err)
+		return fmt.Errorf("invalid CDR source timezone %q: %w", device.CDRSourceTimezone, err)
 	}
 	var columns []string
 	_ = json.Unmarshal(device.CDRColumns, &columns)

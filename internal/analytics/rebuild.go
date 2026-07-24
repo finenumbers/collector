@@ -14,7 +14,9 @@ type DeviceRevisionJob struct {
 	DeviceID            uuid.UUID
 	Revision            uint64
 	Timezone            string
+	CDRSourceTimezone   string
 	Status              string
+	CutoverSealed       uint8
 	CursorReceivedAt    time.Time
 	CursorEventID       uuid.UUID
 	CursorReceivedUS    int64
@@ -36,9 +38,17 @@ type DeviceRevisionJob struct {
 
 func (c *Client) ScheduleDeviceRebuild(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, timezone string,
+	cdrSourceTimezones ...string,
 ) error {
 	if _, err := time.LoadLocation(timezone); err != nil {
 		return fmt.Errorf("invalid device timezone %q: %w", timezone, err)
+	}
+	cdrSourceTimezone := "UTC"
+	if len(cdrSourceTimezones) != 0 && cdrSourceTimezones[0] != "" {
+		cdrSourceTimezone = cdrSourceTimezones[0]
+	}
+	if _, err := time.LoadLocation(cdrSourceTimezone); err != nil {
+		return fmt.Errorf("invalid CDR source timezone %q: %w", cdrSourceTimezone, err)
 	}
 	var existingStatus string
 	err := c.Conn.QueryRow(ctx, `SELECT status
@@ -56,14 +66,14 @@ func (c *Client) ScheduleDeviceRebuild(
 	job := DeviceRevisionJob{}
 	if err := c.Conn.QueryRow(ctx, `SELECT
 		coalesce(max(received_at),toDateTime64(0,6,'UTC')),
-		ifNull(max(toUnixTimestamp64Micro(received_at)),0),count()
+		ifNull(max(toUnixTimestamp64Micro(received_at)),0),countDistinct(event_id)
 		FROM collector.raw_syslog WHERE device_id=?`, deviceID).
 		Scan(&syslogHigh, &job.HighWatermarkUS, &rawTotal); err != nil {
 		return err
 	}
 	if err := c.Conn.QueryRow(ctx, `SELECT
 		coalesce(max(ingested_at),toDateTime64(0,6,'UTC')),
-		ifNull(max(toUnixTimestamp64Micro(ingested_at)),0),count()
+		ifNull(max(toUnixTimestamp64Micro(ingested_at)),0),countDistinct(record_id)
 		FROM collector.cdr_records WHERE device_id=?`, deviceID).
 		Scan(&cdrHigh, &job.CDRHighWatermarkUS, &cdrTotal); err != nil {
 		return err
@@ -71,6 +81,7 @@ func (c *Client) ScheduleDeviceRebuild(
 	job.DeviceID = deviceID
 	job.Revision = revision
 	job.Timezone = timezone
+	job.CDRSourceTimezone = cdrSourceTimezone
 	job.Status = "building"
 	job.HighWatermark = syslogHigh
 	job.CDRHighWatermark = cdrHigh
@@ -82,7 +93,8 @@ func (c *Client) ScheduleDeviceRebuild(
 
 func (c *Client) ListBuildingDeviceRevisions(ctx context.Context) ([]DeviceRevisionJob, error) {
 	rows, err := c.Conn.Query(ctx, `SELECT
-		device_id,revision,timezone,status,cursor_received_at,cursor_event_id,
+		device_id,revision,timezone,cdr_source_timezone,status,cutover_sealed,
+		cursor_received_at,cursor_event_id,
 		cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
 		cdr_cursor_ingested_us,high_watermark,high_watermark_us,
 		cdr_high_watermark,cdr_high_watermark_us,
@@ -97,7 +109,8 @@ func (c *Client) ListBuildingDeviceRevisions(ctx context.Context) ([]DeviceRevis
 	for rows.Next() {
 		var item DeviceRevisionJob
 		if err := rows.Scan(
-			&item.DeviceID, &item.Revision, &item.Timezone, &item.Status,
+			&item.DeviceID, &item.Revision, &item.Timezone, &item.CDRSourceTimezone, &item.Status,
+			&item.CutoverSealed,
 			&item.CursorReceivedAt, &item.CursorEventID, &item.CursorReceivedUS,
 			&item.CDRCursorIngestedAt, &item.CDRCursorRecordID,
 			&item.CDRCursorIngestedUS, &item.HighWatermark, &item.HighWatermarkUS,
@@ -122,7 +135,7 @@ func (c *Client) NextDeviceRevisionSyslogBatch(
 		WHERE device_id=? AND toUnixTimestamp64Micro(received_at)<=?
 		  AND (toUnixTimestamp64Micro(received_at)>?
 			OR (toUnixTimestamp64Micro(received_at)=? AND event_id>?))
-		ORDER BY received_at,event_id LIMIT ?`,
+		ORDER BY received_at,event_id LIMIT 1 BY event_id LIMIT ?`,
 		job.DeviceID, job.HighWatermarkUS, job.CursorReceivedUS, job.CursorReceivedUS,
 		job.CursorEventID, limit)
 	if err != nil {
@@ -229,8 +242,9 @@ func (c *Client) RebuildCDRTimeChunk(
 			OR (toUnixTimestamp64Micro(ingested_at)=? AND record_id>?))
 		  AND (toUnixTimestamp64Micro(ingested_at)<?
 			OR (toUnixTimestamp64Micro(ingested_at)=? AND record_id<=?))`,
-		job.Revision, job.Timezone, job.Timezone, job.Timezone, job.Timezone,
-		job.Timezone, job.DeviceID, job.CDRHighWatermarkUS, job.CDRCursorIngestedUS,
+		job.Revision, job.CDRSourceTimezone, job.CDRSourceTimezone,
+		job.CDRSourceTimezone, job.CDRSourceTimezone,
+		job.CDRSourceTimezone, job.DeviceID, job.CDRHighWatermarkUS, job.CDRCursorIngestedUS,
 		job.CDRCursorIngestedUS, job.CDRCursorRecordID, upperUS, upperUS, upperID,
 	); err != nil {
 		return job, false, err
@@ -295,30 +309,28 @@ func (c *Client) SupersedeDeviceRevision(
 func (c *Client) RefreshDeviceRevisionHighWatermarks(
 	ctx context.Context, job DeviceRevisionJob,
 ) (DeviceRevisionJob, bool, error) {
+	if job.CutoverSealed != 0 {
+		return job, false, nil
+	}
 	var syslogHigh, cdrHigh time.Time
 	var rawTotal, cdrTotal uint64
 	if err := c.Conn.QueryRow(ctx, `SELECT
 		coalesce(max(received_at),toDateTime64(0,6,'UTC')),
-		ifNull(max(toUnixTimestamp64Micro(received_at)),0),count()
+		ifNull(max(toUnixTimestamp64Micro(received_at)),0),countDistinct(event_id)
 		FROM collector.raw_syslog WHERE device_id=?`, job.DeviceID).
 		Scan(&syslogHigh, &job.HighWatermarkUS, &rawTotal); err != nil {
 		return job, false, err
 	}
 	if err := c.Conn.QueryRow(ctx, `SELECT
 		coalesce(max(ingested_at),toDateTime64(0,6,'UTC')),
-		ifNull(max(toUnixTimestamp64Micro(ingested_at)),0),count()
+		ifNull(max(toUnixTimestamp64Micro(ingested_at)),0),countDistinct(record_id)
 		FROM collector.cdr_records WHERE device_id=?`, job.DeviceID).
 		Scan(&cdrHigh, &job.CDRHighWatermarkUS, &cdrTotal); err != nil {
 		return job, false, err
 	}
-	changed := rawTotal != job.RawTotal || cdrTotal != job.CDRTotal ||
-		job.HighWatermarkUS > job.CursorReceivedUS ||
-		job.CDRHighWatermarkUS > job.CDRCursorIngestedUS
-	if !changed {
-		return job, false, nil
-	}
 	job.HighWatermark, job.RawTotal = syslogHigh, rawTotal
 	job.CDRHighWatermark, job.CDRTotal = cdrHigh, cdrTotal
+	job.CutoverSealed = 1
 	job.UpdatedAt = time.Now().UTC()
 	return job, true, c.writeDeviceRevisionJob(ctx, job)
 }
@@ -329,18 +341,37 @@ func (c *Client) ActivateDeviceRevision(ctx context.Context, job DeviceRevisionJ
 	if err := c.writeDeviceRevisionJob(ctx, job); err != nil {
 		return err
 	}
+	if err := c.Conn.Exec(ctx, `INSERT INTO collector.device_derived_revisions
+		(device_id,revision,timezone,status,cursor_received_at,cursor_event_id,
+		 cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
+		 cdr_cursor_ingested_us,high_watermark,high_watermark_us,
+		 cdr_high_watermark,cdr_high_watermark_us,raw_total,cdr_total,processed,
+		 cdr_processed,lifecycle_count,error,updated_at,cdr_source_timezone,cutover_sealed)
+		SELECT device_id,revision,timezone,'superseded',cursor_received_at,cursor_event_id,
+			cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
+			cdr_cursor_ingested_us,high_watermark,high_watermark_us,
+			cdr_high_watermark,cdr_high_watermark_us,raw_total,cdr_total,processed,
+			cdr_processed,lifecycle_count,'replaced by newer active revision',now64(6),
+			cdr_source_timezone,cutover_sealed
+		FROM collector.device_derived_revisions FINAL
+		WHERE device_id=? AND revision!=? AND status='active'`,
+		job.DeviceID, job.Revision); err != nil {
+		return err
+	}
 	return c.EnqueueDeviceDirtyDays(ctx, job.DeviceID, job.Revision)
 }
 
 func (c *Client) writeDeviceRevisionJob(ctx context.Context, job DeviceRevisionJob) error {
 	return c.Conn.Exec(ctx, `INSERT INTO collector.device_derived_revisions
-		(device_id,revision,timezone,status,cursor_received_at,cursor_event_id,
+		(device_id,revision,timezone,cdr_source_timezone,status,cutover_sealed,
+		 cursor_received_at,cursor_event_id,
 		 cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
 		 cdr_cursor_ingested_us,high_watermark,high_watermark_us,
 		 cdr_high_watermark,cdr_high_watermark_us,
 		 raw_total,cdr_total,processed,cdr_processed,lifecycle_count,error,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		job.DeviceID, job.Revision, job.Timezone, job.Status, job.CursorReceivedAt,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		job.DeviceID, job.Revision, job.Timezone, job.CDRSourceTimezone, job.Status,
+		job.CutoverSealed, job.CursorReceivedAt,
 		job.CursorEventID, job.CursorReceivedUS, job.CDRCursorIngestedAt,
 		job.CDRCursorRecordID, job.CDRCursorIngestedUS, job.HighWatermark,
 		job.HighWatermarkUS, job.CDRHighWatermark, job.CDRHighWatermarkUS,

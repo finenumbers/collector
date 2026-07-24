@@ -360,18 +360,8 @@ func RunSyslogWorker(
 			}
 			continue
 		}
-		successful := make([]parsedMessage, 0, len(parsed))
-		successfulEvents := make([]analytics.SyslogEvent, 0, len(parsed))
-		for _, item := range parsed {
-			event := item.event
-			if err := client.ProcessSyslogDerived(ctx, event); err != nil {
-				slog.Error("Syslog derived processing failed", "event", event.EventID, "error", err)
-				_ = item.message.NakWithDelay(5 * time.Second)
-				continue
-			}
-			successful = append(successful, item)
-			successfulEvents = append(successfulEvents, event)
-		}
+		successful := parsed
+		successfulEvents := events
 		if err := client.ProcessSyslogShadowDerivedBatch(ctx, successfulEvents); err != nil {
 			slog.Error("Syslog shadow lifecycle batch failed", "error", err)
 			for _, item := range successful {

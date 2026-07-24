@@ -20,8 +20,12 @@ func RunDeviceRevisionRebuilds(
 		return err
 	}
 	for _, device := range devices {
+		if device.TimezoneRevision == device.ActiveTimezoneRevision {
+			continue
+		}
 		if err := client.ScheduleDeviceRebuild(
 			ctx, device.ID, uint64(device.TimezoneRevision), device.Timezone,
+			device.CDRSourceTimezone,
 		); err != nil {
 			return err
 		}
@@ -79,13 +83,6 @@ func RunDeviceRevisionRebuilds(
 			if !cdrDone {
 				continue
 			}
-			job, changed, err := client.RefreshDeviceRevisionHighWatermarks(ctx, job)
-			if err != nil {
-				return err
-			}
-			if changed {
-				continue
-			}
 			if job.Status == "building" {
 				if err := control.ActivateDeviceTimezoneRevision(
 					ctx, job.DeviceID, int64(job.Revision),
@@ -105,7 +102,14 @@ func RunDeviceRevisionRebuilds(
 				}
 				continue
 			}
-			if time.Since(job.UpdatedAt) < 6*time.Second {
+			if job.CutoverSealed == 0 {
+				if time.Since(job.UpdatedAt) < 6*time.Second {
+					continue
+				}
+				job, _, err = client.RefreshDeviceRevisionHighWatermarks(ctx, job)
+				if err != nil {
+					return err
+				}
 				continue
 			}
 			job, err = client.MarkDeviceRevisionReady(ctx, job)

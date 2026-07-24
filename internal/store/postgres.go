@@ -42,6 +42,7 @@ type Device struct {
 	ActiveTimezone         string          `json:"activeTimezone"`
 	TimezoneRevision       int64           `json:"timezoneRevision"`
 	ActiveTimezoneRevision int64           `json:"activeTimezoneRevision"`
+	CDRSourceTimezone      string          `json:"cdrSourceTimezone"`
 	ManagementIP           *string         `json:"managementIp,omitempty"`
 	SyslogSourceIP         string          `json:"syslogSourceIp"`
 	DeviceSign             string          `json:"deviceSign"`
@@ -243,7 +244,7 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.DB.Query(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
-		timezone_revision,active_timezone_revision,management_ip::text,
+		timezone_revision,active_timezone_revision,cdr_source_timezone,management_ip::text,
 		syslog_source_ip::text,COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
 		ftp_username,ftp_home,cdr_columns,enabled,created_at FROM devices ORDER BY name`)
 	if err != nil {
@@ -255,7 +256,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		var device Device
 		if err := rows.Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-			&device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
+			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt); err != nil {
 			return nil, err
@@ -293,12 +294,12 @@ func (s *Store) DeviceIdentityBySourceIP(
 func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
 	err := s.DB.QueryRow(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
-		timezone_revision,active_timezone_revision,management_ip::text,
+		timezone_revision,active_timezone_revision,cdr_source_timezone,management_ip::text,
 		syslog_source_ip::text,COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
 		ftp_username,ftp_home,cdr_columns,enabled,created_at FROM devices WHERE id=$1`, id).
 		Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-			&device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
+			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -397,7 +398,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		 antifraud_enabled,antifraud_mode,ftp_username,ftp_home,cdr_columns)
 		VALUES($1,$2,$3,$4,$5,$5,1,1,NULLIF($6,'')::inet,$7,$8,$9,$10,$11,$12,$13)
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
-		 active_timezone_revision,management_ip::text,syslog_source_ip::text,
+		 active_timezone_revision,cdr_source_timezone,management_ip::text,syslog_source_ip::text,
 		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
 		 cdr_columns,enabled,created_at`,
 		id, strings.TrimSpace(input.Name), input.Model, input.Firmware, input.Timezone,
@@ -405,7 +406,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		input.AntifraudMode, ftpUsername, ftpHome, columns,
 	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-		&device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
+		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt)
 	if err != nil {
@@ -454,7 +455,7 @@ func (s *Store) UpdateDevice(
 		enabled=$10
 		WHERE id=$1
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
-			active_timezone_revision,management_ip::text,syslog_source_ip::text,
+			active_timezone_revision,cdr_source_timezone,management_ip::text,syslog_source_ip::text,
 			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
 			cdr_columns,enabled,created_at`,
 		id, strings.TrimSpace(input.Name), input.Firmware, input.Timezone,
@@ -462,7 +463,7 @@ func (s *Store) UpdateDevice(
 		input.AntifraudEnabled, input.AntifraudMode, input.Enabled,
 	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-		&device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
+		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

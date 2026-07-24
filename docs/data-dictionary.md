@@ -9,6 +9,10 @@
 в ключе; API читает только атомарно активированную revision и возвращает одновременно
 UTC RFC3339 и локальный RFC3339 с offset. UI не зависит от timezone браузера.
 
+Для SMG-1016M timestamp исходного CDR имеет `source_timezone=UTC`. Syslog wall clock
+имеет `source_timezone`, равный IANA timezone устройства. Эти два source-правила не
+смешиваются; корреляция выполняется только по canonical UTC instant.
+
 ## Нормативные источники
 
 - Eltex «SMG-1016M/2016/3016/3116. Руководство пользователя, ПО 3.410.0», разделы

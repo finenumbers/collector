@@ -77,18 +77,21 @@ Health endpoints:
 В административной строке «Диагностика Syslog» отдельно показываются ingress
 accepted/handoff/spool, app accepted/rejected, classified/raw coverage, active/building
 timezone revision, Syslog/CDR replay counts, missing CDR time facts, lifecycle coverage
-и инвариант `exact + composite + ambiguous + orphan = total`. Durable integer cursor
+и инвариант `exact + composite + ambiguous + orphan = total`. Также показываются
+read/ingest revision, newest raw/fact/lifecycle/assignment и возраст dirty queue.
+Durable integer cursor
 продолжает rebuild после рестарта. Обязательные алерты: container restart,
 оба local spool depth/size (`ingress.db`, `syslog.db`), handoff errors, NATS lag/storage,
 unknown source Syslog, unknown parser rate, persistent reprocess backlog, AntiFraud
 orphan/incomplete rate, CDR ingest age, disk >75/85%, ClickHouse insert errors,
 SFTPGo unavailable, backup age.
 
-IANA timezone редактируется в настройках конкретного SMG. Сохранение создаёт новую
-shadow revision и не удаляет текущие строки. UI продолжает использовать active timezone,
-пока background rebuild пакетно пересобирает Syslog/CDR/lifecycle, проходит coverage и
-catch-up. Только затем active revision переключается атомарно. Контролируйте replay
-counts, ClickHouse read rows/CPU и correlation coverage
+IANA timezone редактируется в настройках конкретного SMG и применяется к Syslog wall
+clock; CDR source timestamp SMG интерпретируется как UTC. Сохранение создаёт новую shadow
+revision и не удаляет текущие строки. UI продолжает использовать active revision, пока
+background rebuild пакетно пересобирает facts/lifecycle. Cutover фиксирует конечный
+watermark и не требует остановки Syslog. Контролируйте replay counts, revision alignment,
+ClickHouse read rows/CPU и correlation coverage
 `exact/composite/ambiguous/orphan`.
 
 ## Инциденты

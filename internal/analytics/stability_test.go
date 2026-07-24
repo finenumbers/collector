@@ -10,33 +10,30 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestCorrelationIsOrderIndependentAndStrictOneToOne(t *testing.T) {
+func TestCorrelationAllowsMultipleAntifraudOperationsPerCDR(t *testing.T) {
 	at := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
 	transactions := []correlationTransaction{
-		{ID: uuid.New(), FirstEventAt: at, Calling: "73832888803", Called: "74951234567", InRoute: "TG-A"},
-		{ID: uuid.New(), FirstEventAt: at.Add(time.Second), Calling: "73832888803", Called: "74951234567", InRoute: "TG-A"},
+		{ID: uuid.New(), FirstEventAt: at, Session: "shared-session"},
+		{ID: uuid.New(), FirstEventAt: at.Add(time.Second), Session: "shared-session"},
 	}
 	cdrs := []correlationCDR{
-		{ID: uuid.New(), SetupTime: at, IncomingCgPN: "+7 (383) 288-88-03", IncomingCdPN: "84951234567", IncomingRoute: "TG-A"},
-		{ID: uuid.New(), SetupTime: at.Add(time.Second), IncomingCgPN: "83832888803", IncomingCdPN: "+74951234567", IncomingRoute: "TG-A"},
+		{ID: uuid.New(), SetupTime: at, Session: "shared-session"},
 	}
 	forward := correlateBucket(transactions, cdrs)
 	reverse := correlateBucket(
 		[]correlationTransaction{transactions[1], transactions[0]},
-		[]correlationCDR{cdrs[1], cdrs[0]},
+		cdrs,
 	)
 	if len(forward) != 2 || len(reverse) != 2 {
 		t.Fatalf("unexpected assignment counts: %d/%d", len(forward), len(reverse))
 	}
-	used := make(map[uuid.UUID]bool)
 	for transactionID, edge := range forward {
 		if edge.cdr.ID == uuid.Nil || edge.ambiguous {
 			t.Fatalf("transaction %s was not deterministically linked: %#v", transactionID, edge)
 		}
-		if used[edge.cdr.ID] {
-			t.Fatalf("CDR %s assigned more than once", edge.cdr.ID)
+		if edge.cdr.ID != cdrs[0].ID {
+			t.Fatalf("transaction %s linked to unexpected CDR %s", transactionID, edge.cdr.ID)
 		}
-		used[edge.cdr.ID] = true
 		if reverse[transactionID].cdr.ID != edge.cdr.ID {
 			t.Fatalf("input order changed assignment for %s", transactionID)
 		}

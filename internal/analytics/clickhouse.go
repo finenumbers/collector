@@ -128,6 +128,12 @@ type SyslogDiagnostics struct {
 	LifecycleDerived     uint64               `json:"lifecycleDerived"`
 	CorrelationTotal     uint64               `json:"correlationTotal"`
 	CorrelationOrphan    uint64               `json:"correlationOrphan"`
+	LatestRawAt          time.Time            `json:"latestRawAt"`
+	LatestFactAt         time.Time            `json:"latestFactAt"`
+	LatestLifecycleAt    time.Time            `json:"latestLifecycleAt"`
+	LatestAssignmentAt   time.Time            `json:"latestAssignmentAt"`
+	PendingDirtyBuckets  uint64               `json:"pendingDirtyBuckets"`
+	OldestDirtyAt        time.Time            `json:"oldestDirtyAt"`
 }
 
 type CallRow struct {

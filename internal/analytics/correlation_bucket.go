@@ -39,6 +39,14 @@ func (c *Client) EnqueueDirtySyslogBuckets(
 		}
 		day := occurredAt.UTC().Truncate(24 * time.Hour)
 		dirty[key{event.DeviceID, revision, day.Format("2006-01-02")}] = day
+		if occurredAt.UTC().Sub(day) < 10*time.Minute {
+			previous := day.Add(-24 * time.Hour)
+			dirty[key{event.DeviceID, revision, previous.Format("2006-01-02")}] = previous
+		}
+		if day.Add(24*time.Hour).Sub(occurredAt.UTC()) <= 10*time.Minute {
+			next := day.Add(24 * time.Hour)
+			dirty[key{event.DeviceID, revision, next.Format("2006-01-02")}] = next
+		}
 	}
 	if len(dirty) == 0 {
 		return nil
@@ -81,7 +89,11 @@ func (c *Client) ListPendingCorrelationBuckets(
 ) ([]DirtyCorrelationBucket, error) {
 	rows, err := c.Conn.Query(ctx, `SELECT device_id,timezone_revision,bucket,attempts
 		FROM collector.correlation_dirty_buckets FINAL
-		WHERE status='pending' ORDER BY updated_at LIMIT ?`, limit)
+		WHERE status='pending' AND updated_at<=now64(6)-INTERVAL 2 SECOND
+		  AND (device_id,timezone_revision) IN
+			(SELECT device_id,revision FROM collector.device_derived_revisions FINAL
+			 WHERE status='active')
+		ORDER BY bucket DESC,updated_at LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -193,8 +205,8 @@ func (c *Client) failDirtyBucket(
 func (c *Client) loadBucketTransactions(
 	ctx context.Context, bucket DirtyCorrelationBucket,
 ) ([]correlationTransaction, error) {
-	from := bucket.Bucket.UTC()
-	to := from.Add(24 * time.Hour)
+	from := bucket.Bucket.UTC().Add(-10 * time.Minute)
+	to := bucket.Bucket.UTC().Add(24*time.Hour + 10*time.Minute)
 	rows, err := c.Conn.Query(ctx, `SELECT
 		transaction_id,argMax(first_event_at,updated_at),argMax(last_event_at,updated_at),
 		argMax(acct_session_id_normalized,updated_at),argMax(call_context,updated_at),
@@ -297,7 +309,6 @@ func correlateBucket(
 			numberIndex[number][record.ID] = record
 		}
 	}
-	used := make(map[uuid.UUID]bool)
 	ordered := append([]correlationTransaction(nil), transactions...)
 	sort.Slice(ordered, func(i, j int) bool {
 		if !ordered[i].FirstEventAt.Equal(ordered[j].FirstEventAt) {
@@ -312,29 +323,15 @@ func correlateBucket(
 				return abs64(candidates[i].SetupTime.Sub(transaction.FirstEventAt).Milliseconds()) <
 					abs64(candidates[j].SetupTime.Sub(transaction.FirstEventAt).Milliseconds())
 			})
-			for _, record := range candidates {
-				if used[record.ID] {
-					continue
-				}
-				used[record.ID] = true
-				result[transaction.ID] = correlationEdge{
-					transaction: transaction, cdr: record, method: "exact_acct_session",
-					confidence:  1,
-					timeDeltaMS: record.SetupTime.Sub(transaction.FirstEventAt).Milliseconds(),
-					evidence: map[string]string{
-						"matched_fields":  "acct_session_id",
-						"acct_session_id": transaction.Session,
-					},
-				}
-				break
-			}
-			if _, ok := result[transaction.ID]; ok {
-				continue
-			}
+			record := candidates[0]
 			result[transaction.ID] = correlationEdge{
-				transaction: transaction, ambiguous: true,
-				method: "exact_acct_session", reason: "session candidate already assigned",
-				evidence: map[string]string{"matched_fields": "acct_session_id"},
+				transaction: transaction, cdr: record, method: "exact_acct_session",
+				confidence:  1,
+				timeDeltaMS: record.SetupTime.Sub(transaction.FirstEventAt).Milliseconds(),
+				evidence: map[string]string{
+					"matched_fields":  "acct_session_id",
+					"acct_session_id": transaction.Session,
+				},
 			}
 			continue
 		}
@@ -353,9 +350,6 @@ func correlateBucket(
 		}
 		protocolEdges := make([]correlationEdge, 0, len(protocolCandidates))
 		for _, record := range protocolCandidates {
-			if used[record.ID] {
-				continue
-			}
 			if edge, ok := exactProtocolCorrelationEdge(transaction, record); ok {
 				protocolEdges = append(protocolEdges, edge)
 			}
@@ -365,7 +359,6 @@ func correlateBucket(
 				return abs64(protocolEdges[i].timeDeltaMS) < abs64(protocolEdges[j].timeDeltaMS)
 			})
 			best := protocolEdges[0]
-			used[best.cdr.ID] = true
 			result[transaction.ID] = best
 			continue
 		}
@@ -375,9 +368,7 @@ func correlateBucket(
 			transaction.DstIn, transaction.SrcOut, transaction.DstOut,
 		) {
 			for id, record := range numberIndex[number] {
-				if !used[id] {
-					group[id] = record
-				}
+				group[id] = record
 			}
 		}
 		edges := make([]correlationEdge, 0, len(group))
@@ -409,7 +400,6 @@ func correlateBucket(
 			result[transaction.ID] = best
 			continue
 		}
-		used[best.cdr.ID] = true
 		result[transaction.ID] = best
 	}
 	return result

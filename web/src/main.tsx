@@ -290,13 +290,20 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [credentials, setCredentials] = useState<Device | null>(null)
   const [error, setError] = useState('')
 
-  const loadDevices = () => api<{ items: Device[] }>('/devices').then(({ items }) => {
+  const loadDevices = useCallback(() => api<{ items: Device[] }>('/devices').then(({ items }) => {
     setDevices(items || [])
     setActiveDevice((current) => current || items?.[0]?.id || '')
-  }).catch((reason) => setError(reason.message))
+  }).catch((reason) => setError(reason.message)), [])
   useEffect(() => {
     void loadDevices()
-  }, [])
+  }, [loadDevices])
+  const hasTimezoneRebuild = devices.some((device) =>
+    device.timezoneRevision !== device.activeTimezoneRevision)
+  useEffect(() => {
+    if (!hasTimezoneRebuild) return
+    const timer = window.setInterval(() => void loadDevices(), 5000)
+    return () => window.clearInterval(timer)
+  }, [hasTimezoneRebuild, loadDevices])
   const selected = devices.find((device) => device.id === activeDevice)
 
   return <div className="workspace">
@@ -856,7 +863,8 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
         <label>IP управления<input placeholder="10.0.0.10" value={form.managementIp} onChange={(e) => update('managementIp', e.target.value)} /></label>
         <label>IP-источник Syslog<input required placeholder="10.0.0.10" value={form.syslogSourceIp} onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
         <label>Прошивка<input required value={form.firmware} onChange={(e) => update('firmware', e.target.value)} /></label>
-        <label>Часовой пояс<input required value={form.timezone} onChange={(e) => update('timezone', e.target.value)} /></label>
+        <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
+          onChange={(value) => update('timezone', value)} /></label>
         <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
           onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
         <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled} value={form.antifraudMode}
@@ -913,8 +921,8 @@ function EditDeviceDialog({ device, onClose, onSaved }: {
           onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
         <label>Прошивка<input required value={form.firmware}
           onChange={(e) => update('firmware', e.target.value)} /></label>
-        <label>Часовой пояс IANA<input required placeholder="Asia/Novosibirsk"
-          value={form.timezone} onChange={(e) => update('timezone', e.target.value)} /></label>
+        <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
+          onChange={(value) => update('timezone', value)} /></label>
         <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
           onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
         <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled}
@@ -944,6 +952,58 @@ function CredentialsDialog({ device, onClose }: { device: Device; onClose: () =>
     </dl>
     <div className="dialog-actions"><button className="primary" onClick={onClose}>Готово</button></div>
   </Modal>
+}
+
+const primaryTimezones = [
+  'UTC',
+  'Europe/Kaliningrad',
+  'Europe/Moscow',
+  'Europe/Samara',
+  'Europe/Saratov',
+  'Europe/Ulyanovsk',
+  'Europe/Astrakhan',
+  'Asia/Yekaterinburg',
+  'Asia/Omsk',
+  'Asia/Novosibirsk',
+  'Asia/Barnaul',
+  'Asia/Tomsk',
+  'Asia/Novokuznetsk',
+  'Asia/Krasnoyarsk',
+  'Asia/Irkutsk',
+  'Asia/Chita',
+  'Asia/Yakutsk',
+  'Asia/Vladivostok',
+  'Asia/Magadan',
+  'Asia/Sakhalin',
+  'Asia/Kamchatka',
+  'Asia/Anadyr',
+]
+
+const availableTimezones = (() => {
+  try {
+    const intl = Intl as typeof Intl & {
+      supportedValuesOf?: (key: 'timeZone') => string[]
+    }
+    return intl.supportedValuesOf?.('timeZone') || primaryTimezones
+  } catch {
+    return primaryTimezones
+  }
+})()
+
+function TimezoneSelect({ value, onChange }: {
+  value: string
+  onChange: (value: string) => void
+}) {
+  const primary = Array.from(new Set([value, ...primaryTimezones]))
+  const remaining = availableTimezones.filter((timezone) => !primary.includes(timezone))
+  return <select required value={value} onChange={(event) => onChange(event.target.value)}>
+    <optgroup label="Основные часовые пояса">
+      {primary.map((timezone) => <option key={timezone} value={timezone}>{timezone}</option>)}
+    </optgroup>
+    {remaining.length > 0 && <optgroup label="Все часовые пояса IANA">
+      {remaining.map((timezone) => <option key={timezone} value={timezone}>{timezone}</option>)}
+    </optgroup>}
+  </select>
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {

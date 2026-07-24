@@ -244,8 +244,8 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.DB.Query(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
-		timezone_revision,active_timezone_revision,cdr_source_timezone,management_ip::text,
-		syslog_source_ip::text,COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
+		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
+		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
 		ftp_username,ftp_home,cdr_columns,enabled,created_at FROM devices ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -294,8 +294,8 @@ func (s *Store) DeviceIdentityBySourceIP(
 func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
 	err := s.DB.QueryRow(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
-		timezone_revision,active_timezone_revision,cdr_source_timezone,management_ip::text,
-		syslog_source_ip::text,COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
+		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
+		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
 		ftp_username,ftp_home,cdr_columns,enabled,created_at FROM devices WHERE id=$1`, id).
 		Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
@@ -360,8 +360,17 @@ func (s *Store) CompleteIngestFile(ctx context.Context, id uuid.UUID, status str
 }
 
 func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, remoteIP string) (Device, error) {
-	if strings.TrimSpace(input.Name) == "" || net.ParseIP(input.SyslogSourceIP) == nil {
+	syslogSourceIP, ok := normalizeHostIP(input.SyslogSourceIP)
+	if strings.TrimSpace(input.Name) == "" || !ok {
 		return Device{}, errors.New("name and valid syslogSourceIp are required")
+	}
+	input.SyslogSourceIP = syslogSourceIP
+	if input.ManagementIP != "" {
+		managementIP, valid := normalizeHostIP(input.ManagementIP)
+		if !valid {
+			return Device{}, errors.New("managementIp must be empty or a valid IP")
+		}
+		input.ManagementIP = managementIP
 	}
 	if input.Model == "" {
 		input.Model = "SMG-1016M"
@@ -398,7 +407,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		 antifraud_enabled,antifraud_mode,ftp_username,ftp_home,cdr_columns)
 		VALUES($1,$2,$3,$4,$5,$5,1,1,$5,NULLIF($6,'')::inet,$7,$8,$9,$10,$11,$12,$13)
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
-		 active_timezone_revision,cdr_source_timezone,management_ip::text,syslog_source_ip::text,
+		 active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
 		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
 		 cdr_columns,enabled,created_at`,
 		id, strings.TrimSpace(input.Name), input.Model, input.Firmware, input.Timezone,
@@ -428,14 +437,20 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 func (s *Store) UpdateDevice(
 	ctx context.Context, id uuid.UUID, input DeviceUpdate, actor User, remoteIP string,
 ) (Device, error) {
-	if strings.TrimSpace(input.Name) == "" || net.ParseIP(input.SyslogSourceIP) == nil {
+	syslogSourceIP, ok := normalizeHostIP(input.SyslogSourceIP)
+	if strings.TrimSpace(input.Name) == "" || !ok {
 		return Device{}, errors.New("name and valid syslogSourceIp are required")
 	}
+	input.SyslogSourceIP = syslogSourceIP
 	if _, err := time.LoadLocation(input.Timezone); err != nil {
 		return Device{}, fmt.Errorf("invalid IANA timezone %q", input.Timezone)
 	}
-	if input.ManagementIP != "" && net.ParseIP(input.ManagementIP) == nil {
-		return Device{}, errors.New("managementIp must be empty or a valid IP")
+	if input.ManagementIP != "" {
+		managementIP, valid := normalizeHostIP(input.ManagementIP)
+		if !valid {
+			return Device{}, errors.New("managementIp must be empty or a valid IP")
+		}
+		input.ManagementIP = managementIP
 	}
 	if input.Firmware == "" {
 		return Device{}, errors.New("firmware is required")
@@ -455,7 +470,7 @@ func (s *Store) UpdateDevice(
 		enabled=$10
 		WHERE id=$1
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
-			active_timezone_revision,cdr_source_timezone,management_ip::text,syslog_source_ip::text,
+			active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
 			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
 			cdr_columns,enabled,created_at`,
 		id, strings.TrimSpace(input.Name), input.Firmware, input.Timezone,
@@ -557,6 +572,22 @@ func nullableIP(value string) any {
 		return nil
 	}
 	return value
+}
+
+func normalizeHostIP(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.String(), true
+	}
+	ip, network, err := net.ParseCIDR(value)
+	if err != nil {
+		return "", false
+	}
+	ones, bits := network.Mask.Size()
+	if ones != bits {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 func equalBytes(left, right []byte) bool {

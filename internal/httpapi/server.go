@@ -18,11 +18,14 @@ import (
 	"collector/internal/analytics"
 	"collector/internal/config"
 	ftpclient "collector/internal/ftp"
+	"collector/internal/ingest"
+	"collector/internal/spool"
 	"collector/internal/store"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -34,6 +37,10 @@ type Server struct {
 	Analytics *analytics.Client
 	FTP       *ftpclient.Provisioner
 	StaticDir string
+	Version   string
+	Metrics   *ingest.Metrics
+	Spool     *spool.Queue
+	NATS      *nats.Conn
 }
 
 type contextKey string
@@ -44,7 +51,7 @@ func (s *Server) Handler() http.Handler {
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, s.securityHeaders)
 	router.Get("/health/live", func(writer http.ResponseWriter, _ *http.Request) {
-		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok", "version": s.Version})
 	})
 	router.Get("/health/ready", s.ready)
 	router.Route("/api", func(api chi.Router) {
@@ -61,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 			private.Get("/devices/{deviceID}/events", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
 			private.Get("/devices/{deviceID}/stats", s.deviceStats)
+			private.With(s.requireAdmin).Get("/devices/{deviceID}/syslog-diagnostics", s.syslogDiagnostics)
 			private.Get("/devices/{deviceID}/calls/{recordID}/timeline", s.callTimeline)
 			private.Get("/devices/{deviceID}/export.xlsx", s.exportXLSX)
 		})
@@ -329,6 +337,47 @@ func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusOK, stats)
+}
+
+func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	diagnostics, err := s.Analytics.SyslogDiagnostics(request.Context(), deviceID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to query Syslog diagnostics")
+		return
+	}
+	var spoolDepth, quarantineDepth uint64
+	if s.Spool != nil {
+		if spoolDepth, err = s.Spool.Depth(); err != nil {
+			writeError(writer, http.StatusInternalServerError, "unable to query Syslog spool")
+			return
+		}
+		if quarantineDepth, err = s.Spool.QuarantineDepth(); err != nil {
+			writeError(writer, http.StatusInternalServerError, "unable to query Syslog quarantine")
+			return
+		}
+	}
+	var natsStreamMessages, natsConsumerPending uint64
+	if s.NATS != nil {
+		if js, natsErr := s.NATS.JetStream(); natsErr == nil {
+			if info, infoErr := js.StreamInfo("SYSLOG"); infoErr == nil {
+				natsStreamMessages = info.State.Msgs
+			}
+			if consumer, consumerErr := js.ConsumerInfo("SYSLOG", "syslog-parser"); consumerErr == nil {
+				natsConsumerPending = consumer.NumPending + uint64(consumer.NumAckPending)
+			}
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"version": s.Version, "parserVersion": analytics.SyslogParserVersion,
+		"runtime": s.Metrics.Snapshot(), "spoolDepth": spoolDepth,
+		"quarantineDepth": quarantineDepth, "natsStreamMessages": natsStreamMessages,
+		"natsConsumerPending": natsConsumerPending, "breakdown": diagnostics.Breakdown,
+		"appliedMigrations": diagnostics.AppliedMigrations,
+	})
 }
 
 func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request) {

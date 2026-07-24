@@ -179,6 +179,91 @@ func TestParseProductionWebsppIntoSystemJournal(t *testing.T) {
 	}
 }
 
+func TestParseWebsppAlarmPathStaysInSystemJournal(t *testing.T) {
+	raw := RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 8, 10, 56, 0, time.UTC),
+		SourceIP:   "5.227.161.181", SourcePort: 514,
+		Payload: []byte(
+			`<38>Jul 24 08:10:55 webspp[590]: WEBS: search handler for "/jx/alarm" path`,
+		),
+	}
+	event := ParseSyslog(raw)
+	if event.Category != "system_journal" || event.Component != "WEBS" {
+		t.Fatalf("WEBS alarm URL was misclassified: %#v", event)
+	}
+}
+
+func TestParseBareRFC3164WebsWithoutSpace(t *testing.T) {
+	raw := RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 8, 10, 56, 0, time.UTC),
+		SourceIP:   "5.227.161.181", SourcePort: 514,
+		Payload: []byte(`<38>Jul 24 08:10:55 WEBS:websDone[0] "(null)"`),
+	}
+	event := ParseSyslog(raw)
+	if event.Category != "system_journal" || event.Component != "WEBS" ||
+		event.ParseStatus != "parsed" {
+		t.Fatalf("bare WEBS event not parsed: %#v", event)
+	}
+}
+
+func TestParseEltexTraceWithoutSeverity(t *testing.T) {
+	raw := RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(),
+		ReceivedAt: time.Date(2026, 7, 24, 8, 10, 56, 0, time.UTC),
+		SourceIP:   "5.227.161.181", SourcePort: 10003,
+		Payload: []byte(
+			`<14> <smg1016m> 08:10:54.784750 [C0270AD] SIP. INVITE sip:74951234567@example.net`,
+		),
+	}
+	event := ParseSyslog(raw)
+	if event.Category != "sip" || event.Component != "SIP" ||
+		event.Attributes["call_context"] != "C0270AD" || event.ParseStatus != "parsed" {
+		t.Fatalf("severity-less trace not parsed: %#v", event)
+	}
+}
+
+func TestClassifiesEverySMGFunctionalSection(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		category string
+	}{
+		{"radius", `<14> <smg1016m> 08:10:54.1 [INFO] [C1] RADIUS. Access-Request`, "radius"},
+		{"isup", `<14> <smg1016m> 08:10:54.1 [INFO] [C1] SS7/ISUP. IAM- received`, "isup"},
+		{"q931", `<14> <smg1016m> 08:10:54.1 [INFO] [C1] Q.931. SETUP received`, "q931"},
+		{"sip", `<14> <smg1016m> 08:10:54.1 [INFO] [C1] PBXIPC-SIP. INVITE received`, "sip"},
+		{"ip connections", `<14> <smg1016m> 08:10:54.1 [INFO] [C1] IP-CONN. RTP connection opened`, "ip_connections"},
+		{"ip modules", `<14> <smg1016m> 08:10:54.1 [INFO] SM-VP. DSP module ready`, "ip_modules"},
+		{"alarms", `<14> <smg1016m> 08:10:54.1 [WARN] ALARM. E1 link lost`, "alarms"},
+		{"configuration", `<14> <smg1016m> 08:10:54.1 [INFO] CONFIG. User command committed`, "config_history"},
+		{"call trace", `<14> <smg1016m> 08:10:54.1 [INFO] [C0270AD] Media resources allocated`, "call_trace"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := ParseSyslog(RawSyslog{
+				EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+				SourceIP: "5.227.161.181", SourcePort: 10003, Payload: []byte(test.payload),
+			})
+			if event.Category != test.category {
+				t.Fatalf("got %q, want %q: %#v", event.Category, test.category, event)
+			}
+		})
+	}
+}
+
+func TestKnownBodyDoesNotHidePartialEnvelope(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "5.227.161.181", Payload: []byte(`SIP INVITE without an envelope`),
+	})
+	if event.Category != "sip" || event.ParseStatus != "partial" ||
+		event.Attributes["parse_warning"] == "" {
+		t.Fatalf("parse quality was hidden: %#v", event)
+	}
+}
+
 func TestParseRFC3164SecurityAccessWithHostname(t *testing.T) {
 	raw := RawSyslog{
 		EventID: uuid.New(), DeviceID: uuid.New(),

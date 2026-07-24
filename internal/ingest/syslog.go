@@ -26,16 +26,21 @@ const (
 )
 
 var (
-	priPattern       = regexp.MustCompile(`^<([0-9]{1,3})>`)
-	eltexHostPattern = regexp.MustCompile(`^<([^<>\s]{1,128})>\s+`)
-	tracePattern     = regexp.MustCompile(`(?i)^(?:[A-Z][a-z]{2}\s+\d+\s+)?(\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\s+\[([A-Z ]+)\]\s*(.*)$`)
-	rfc3164Pattern   = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([0-9]{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
-	rfc3164App       = regexp.MustCompile(`^([A-Za-z0-9_.-]+)(?:\[([0-9]+)\])?:\s*(.*)$`)
-	callContext      = regexp.MustCompile(`^\[([A-Za-z0-9_-]+)\]\s*(.*)$`)
-	componentPattern = regexp.MustCompile(`^([A-Za-z0-9_./ -]+?)(?::|\.)\s+(.*)$`)
-	radiusPair       = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
-	radiusSession    = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
-	radiusVSAPair    = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id)=([^'"\s]+)`)
+	priPattern        = regexp.MustCompile(`^<([0-9]{1,3})>`)
+	eltexHostPattern  = regexp.MustCompile(`^<([^<>\s]{1,128})>\s+`)
+	tracePattern      = regexp.MustCompile(`(?i)^(?:[A-Z][a-z]{2}\s+\d+\s+)?(\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\s+(?:\[([A-Z][A-Z0-9 _-]*)\]\s*)?(.*)$`)
+	rfc3164Pattern    = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([0-9]{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
+	rfc3164App        = regexp.MustCompile(`^([A-Za-z0-9_.-]+)(?:\[([0-9]+)\])?:\s*(.*)$`)
+	callContext       = regexp.MustCompile(`^\[([A-Za-z0-9_-]+)\]\s*(.*)$`)
+	callContextAny    = regexp.MustCompile(`\[(C[A-Za-z0-9_-]+)\]`)
+	componentPattern  = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_./ -]{0,127}?)(?::|\.)\s*(.*)$`)
+	radiusPair        = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
+	radiusSession     = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
+	radiusVSAPair     = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id)=([^'"\s]+)`)
+	systemAppPattern  = regexp.MustCompile(`(?i)\b(?:webapp|webspp)(?:\[[0-9]+\])?:\s*(?:WEBS|SEC)\s*:`)
+	systemBodyPattern = regexp.MustCompile(`(?i)^\s*(?:WEBS|SEC)\s*:`)
+	alarmPattern      = regexp.MustCompile(`(?i)(?:^|[\s:;,])ALARMS?(?:$|[\s:;,])|АВАР`)
+	callPattern       = regexp.MustCompile(`(?i)(?:^|[\s:;,])CALL(?:$|[\s:;,])|(?:^|[\s:;,])PORT\s+[0-9]`)
 )
 
 type RawSyslog struct {
@@ -48,9 +53,10 @@ type RawSyslog struct {
 }
 
 type SyslogReceiver struct {
-	Addr  string
-	Store *store.Store
-	Spool *spool.Queue
+	Addr    string
+	Store   *store.Store
+	Spool   *spool.Queue
+	Metrics *Metrics
 }
 
 func EnsureStreams(nc *nats.Conn) error {
@@ -133,6 +139,7 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 			}
 			slog.Error("syslog durable spool batch failed; retrying without dropping datagrams",
 				"count", len(pending), "error", err)
+			r.Metrics.RecordSpoolError()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -164,6 +171,9 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 			continue
 		}
 		sourceIP := source.IP.String()
+		if ipv4 := source.IP.To4(); ipv4 != nil {
+			sourceIP = ipv4.String()
+		}
 		now := time.Now()
 		deviceID := uuid.Nil
 		if cached, ok := deviceCache[sourceIP]; ok && now.Before(cached.expires) {
@@ -176,6 +186,7 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 			}
 		}
 		if err != nil || deviceID == uuid.Nil {
+			r.Metrics.RecordRejected()
 			if last := rejectedLog[sourceIP]; now.Sub(last) >= time.Minute {
 				slog.Warn("syslog from unknown source rejected", "source", sourceIP, "source_port", source.Port)
 				rejectedLog[sourceIP] = now
@@ -191,6 +202,7 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 		pending = append(pending, spool.Entry{
 			ReceivedAt: record.ReceivedAt, EventID: record.EventID.String(), Payload: payload,
 		})
+		r.Metrics.RecordAccepted()
 		if len(pending) == 1 {
 			flushAt = now.Add(batchWindow)
 		}
@@ -306,7 +318,8 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 }
 
 func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
-	text := strings.TrimSpace(string(raw.Payload))
+	text := strings.TrimSpace(strings.Trim(string(raw.Payload), "\x00"))
+	text = strings.TrimPrefix(text, "\ufeff")
 	event := analytics.SyslogEvent{
 		EventID: raw.EventID, DeviceID: raw.DeviceID, ReceivedAt: raw.ReceivedAt,
 		SourceIP: net.ParseIP(raw.SourceIP), SourcePort: raw.SourcePort, Payload: raw.Payload,
@@ -327,12 +340,12 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		text = strings.TrimSpace(strings.TrimPrefix(text, match[0]))
 		event.HeaderFormat = "eltex-trace"
 	}
-	if match := tracePattern.FindStringSubmatch(text); match != nil {
-		event.Attributes["payload_severity"] = strings.TrimSpace(match[2])
-		event.Message = strings.TrimSpace(match[3])
-		if parsed := parsePayloadTime(match[1], raw.ReceivedAt); parsed != nil {
-			event.EventTime = parsed
+	if timestamp, severity, message, ok := parseEltexTrace(text, raw.ReceivedAt); ok {
+		if severity != "" {
+			event.Attributes["payload_severity"] = severity
 		}
+		event.Message = message
+		event.EventTime = timestamp
 		event.ParseStatus = "parsed"
 	} else if timestamp, application, processID, message, ok := parseRFC3164(text, raw.ReceivedAt); ok {
 		event.HeaderFormat = "rfc3164"
@@ -345,6 +358,7 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		event.ParseStatus = "parsed"
 	} else {
 		event.Message = text
+		event.Attributes["parse_warning"] = "unrecognized_envelope"
 	}
 	if match := callContext.FindStringSubmatch(event.Message); match != nil {
 		event.Attributes["call_context"] = match[1]
@@ -354,10 +368,7 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		event.Component = strings.TrimSpace(match[1])
 		event.Message = strings.TrimSpace(match[2])
 	}
-	event.Category = classify(event.Component, event.Attributes["application"], event.Message)
-	if event.Category != "unknown" && event.ParseStatus == "partial" {
-		event.ParseStatus = "parsed"
-	}
+	event.Category = classify(event.Component, event.Attributes["application"], event.Message, string(raw.Payload))
 	if event.Category == "radius" {
 		for _, match := range radiusPair.FindAllStringSubmatch(text, -1) {
 			value := match[2]
@@ -379,12 +390,15 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 	return event
 }
 
-func classify(component, application, message string) string {
+func classify(component, application, message, payload string) string {
 	upperComponent := strings.ToUpper(strings.TrimSpace(component))
 	upperApplication := strings.ToUpper(strings.TrimSpace(application))
-	upper := strings.Join([]string{upperComponent, upperApplication, strings.ToUpper(message)}, " ")
+	upper := strings.ToUpper(strings.Join([]string{component, application, message, payload}, " "))
 	switch {
-	case upperApplication == "WEBAPP" || upperComponent == "WEBS" || upperComponent == "SEC":
+	case upperApplication == "WEBAPP" || upperApplication == "WEBSPP" ||
+		upperApplication == "WEBS" || upperApplication == "SEC" ||
+		upperComponent == "WEBS" || upperComponent == "SEC" ||
+		systemAppPattern.MatchString(payload) || systemBodyPattern.MatchString(message):
 		return "system_journal"
 	case strings.Contains(upper, "RADIUS") ||
 		strings.Contains(upper, "ANTIFRAUD") || strings.Contains(upper, "ACCS-REQUEST") ||
@@ -400,7 +414,8 @@ func classify(component, application, message string) string {
 		strings.Contains(upper, "USER-NAME") || strings.Contains(upper, "PASSWORD") ||
 		upperComponent == "RC":
 		return "radius"
-	case strings.Contains(upper, "SS7") || strings.Contains(upper, "ISUP") || strings.Contains(upper, "IAM") || strings.Contains(upper, " RLC"):
+	case strings.Contains(upper, "SS7") || strings.Contains(upper, "ISUP") ||
+		strings.Contains(upper, "IAM-") || strings.Contains(upper, "RLC-"):
 		return "isup"
 	case strings.Contains(upper, "Q.931") || strings.Contains(upper, "Q931") || strings.Contains(upper, "DSS1"):
 		return "q931"
@@ -408,21 +423,50 @@ func classify(component, application, message string) string {
 		return "sip"
 	case strings.Contains(upper, "IP-CONN") || strings.Contains(upper, "RTP") || strings.Contains(upper, "RTCP") || strings.Contains(upper, "CONN["):
 		return "ip_connections"
-	case strings.Contains(upper, "SM-VP") || strings.Contains(upper, " MSP"):
+	case strings.Contains(upper, "SM-VP") || strings.Contains(upper, "MSP"):
 		return "ip_modules"
-	case strings.Contains(upper, "ALARM") || strings.Contains(upper, "АВАР"):
+	case upperComponent == "ALARM" || upperComponent == "ALARMS" || alarmPattern.MatchString(upper):
 		return "alarms"
 	case strings.Contains(upper, "CONFIG") || strings.Contains(upper, "COMMAND") || strings.Contains(upper, "USERLOG"):
 		return "config_history"
 	case strings.Contains(upper, "AUTH") || strings.Contains(upper, "LOGIN") || strings.Contains(upper, "LOGOUT"):
 		return "system_journal"
-	case strings.Contains(upper, "CALL") || strings.Contains(upper, "PORT "):
+	case strings.HasPrefix(eventCallContext(payload), "C") || callPattern.MatchString(upper):
 		return "call_trace"
 	case upperApplication != "":
 		return "system_journal"
 	default:
 		return "unknown"
 	}
+}
+
+func parseEltexTrace(value string, received time.Time) (*time.Time, string, string, bool) {
+	match := tracePattern.FindStringSubmatch(value)
+	if match == nil {
+		return nil, "", "", false
+	}
+	severity := strings.TrimSpace(match[2])
+	message := strings.TrimSpace(match[3])
+	if strings.HasPrefix(strings.ToUpper(severity), "C") && strings.IndexFunc(severity, func(value rune) bool {
+		return value >= '0' && value <= '9'
+	}) >= 0 {
+		message = "[" + severity + "] " + message
+		severity = ""
+	}
+	// A plain RFC3164 body also starts with HH:MM:SS. Eltex trace is
+	// distinguishable by microseconds, a severity, or a call-context bracket.
+	if !strings.Contains(match[1], ".") && severity == "" && !strings.HasPrefix(message, "[") {
+		return nil, "", "", false
+	}
+	return parsePayloadTime(match[1], received), severity, message, true
+}
+
+func eventCallContext(payload string) string {
+	match := callContextAny.FindStringSubmatch(payload)
+	if match == nil {
+		return ""
+	}
+	return match[1]
 }
 
 func parseRFC3164(value string, received time.Time) (*time.Time, string, string, string, bool) {
@@ -441,7 +485,13 @@ func parseRFC3164(value string, received time.Time) (*time.Time, string, string,
 		return nil, "", "", "", false
 	}
 	timestamp := parseRFC3164Time(match[1], match[2], match[3], received)
-	return timestamp, appMatch[1], appMatch[2], strings.TrimSpace(appMatch[3]), true
+	application := appMatch[1]
+	message := strings.TrimSpace(appMatch[3])
+	if strings.EqualFold(application, "WEBS") || strings.EqualFold(application, "SEC") {
+		message = application + ": " + message
+		application = ""
+	}
+	return timestamp, application, appMatch[2], message, true
 }
 
 func parseRFC3164Time(month, day, clock string, received time.Time) *time.Time {

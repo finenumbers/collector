@@ -22,6 +22,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+var version = "dev"
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	cfg, err := config.Load()
@@ -75,6 +77,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer durableSpool.Close()
+	ingestMetrics := &ingest.Metrics{}
 
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
@@ -82,6 +85,10 @@ func main() {
 			Config: cfg, Store: control, Analytics: warehouse,
 			FTP:       ftpclient.NewProvisioner(cfg.SFTPGoURL, cfg.SFTPGoAdmin, cfg.SFTPGoPassword),
 			StaticDir: "/app/web",
+			Version:   version,
+			Metrics:   ingestMetrics,
+			Spool:     durableSpool,
+			NATS:      nc,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -96,7 +103,9 @@ func main() {
 		errs <- server.ListenAndServe()
 	}()
 	go func() {
-		receiver := ingest.SyslogReceiver{Addr: cfg.SyslogAddr, Store: control, Spool: durableSpool}
+		receiver := ingest.SyslogReceiver{
+			Addr: cfg.SyslogAddr, Store: control, Spool: durableSpool, Metrics: ingestMetrics,
+		}
 		slog.Info("syslog receiver listening", "address", cfg.SyslogAddr)
 		errs <- receiver.Run(ctx)
 	}()

@@ -93,6 +93,11 @@ main { min-width: 0; display: flex; flex-direction: column; background: var(--bg
 .stat-strip small { color: var(--muted); font-size: 8.5px; text-transform: uppercase; letter-spacing: .04em; }
 .stat-strip strong { margin-top: 2px; font-size: 13px; font-weight: 600; }
 .warning-text { color: var(--warn); }
+.diagnostic-panel { margin: -2px 0 9px; border: 1px solid var(--line); background: var(--panel); font-size: 10px; }
+.diagnostic-panel summary { padding: 6px 9px; color: #475467; cursor: pointer; }
+.diagnostic-facts { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 7px 9px; border-top: 1px solid var(--line); }
+.diagnostic-breakdown { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.diagnostic-breakdown span { padding: 5px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-bottom: 1px solid #e8ecf2; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
 .toolbar h3 { font-size: 14px; margin: 0 0 2px; }
 .toolbar > div > span { color: var(--muted); font-size: 10px; }

@@ -16,6 +16,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const SyslogParserVersion = "smg-3.410-v4"
+
 type Client struct {
 	Conn clickhouse.Conn
 }
@@ -73,6 +75,21 @@ type DeviceStats struct {
 	Alarms24h      uint64  `json:"alarms24h"`
 	Radius24h      uint64  `json:"radius24h"`
 	Unknown24h     uint64  `json:"unknown24h"`
+}
+
+type SyslogBreakdownRow struct {
+	Category       string    `json:"category"`
+	ParseStatus    string    `json:"parseStatus"`
+	ParserVersion  string    `json:"parserVersion"`
+	HeaderFormat   string    `json:"headerFormat"`
+	SourcePort     uint16    `json:"sourcePort"`
+	Count          uint64    `json:"count"`
+	LastReceivedAt time.Time `json:"lastReceivedAt"`
+}
+
+type SyslogDiagnostics struct {
+	Breakdown         []SyslogBreakdownRow `json:"breakdown"`
+	AppliedMigrations []string             `json:"appliedMigrations"`
 }
 
 type CallRow struct {
@@ -211,7 +228,7 @@ func (c *Client) InsertSyslogBatch(ctx context.Context, events []SyslogEvent) er
 		if err := batch.Append(
 			event.EventID, event.DeviceID, event.ReceivedAt, event.SourceIP, event.SourcePort, "udp",
 			string(event.Payload), hex.EncodeToString(sum[:]), event.PRI, event.Facility, event.Severity,
-			event.HeaderFormat, "smg-3.410-v3", event.ParseStatus, event.Category, event.EventTime,
+			event.HeaderFormat, SyslogParserVersion, event.ParseStatus, event.Category, event.EventTime,
 			event.Component, event.Message, event.Attributes,
 		); err != nil {
 			return err
@@ -324,7 +341,7 @@ func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, categor
 	if category != "" && category != "all" {
 		switch category {
 		case "unknown":
-			query += ` AND (category='unknown' OR parse_status!='parsed')`
+			query += ` AND category='unknown'`
 		case "antifraud":
 			query += ` AND category='radius'`
 		default:
@@ -457,8 +474,48 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 		return DeviceStats{}, err
 	}
 	err = c.Conn.QueryRow(ctx, `SELECT countIf(category='alarms'),countIf(category='radius'),
-		countIf(category='unknown' OR parse_status!='parsed')
+		countIf(category='unknown')
 		FROM collector.raw_syslog WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR`, deviceID).
 		Scan(&result.Alarms24h, &result.Radius24h, &result.Unknown24h)
 	return result, err
+}
+
+func (c *Client) SyslogDiagnostics(ctx context.Context, deviceID uuid.UUID) (SyslogDiagnostics, error) {
+	rows, err := c.Conn.Query(ctx, `SELECT category,parse_status,parser_version,header_format,source_port,
+		count(),max(received_at)
+		FROM collector.raw_syslog
+		WHERE device_id=? AND received_at>=now()-INTERVAL 24 HOUR
+		GROUP BY category,parse_status,parser_version,header_format,source_port
+		ORDER BY count() DESC`, deviceID)
+	if err != nil {
+		return SyslogDiagnostics{}, err
+	}
+	defer rows.Close()
+	result := SyslogDiagnostics{Breakdown: make([]SyslogBreakdownRow, 0)}
+	for rows.Next() {
+		var item SyslogBreakdownRow
+		if err := rows.Scan(&item.Category, &item.ParseStatus, &item.ParserVersion,
+			&item.HeaderFormat, &item.SourcePort, &item.Count, &item.LastReceivedAt); err != nil {
+			return SyslogDiagnostics{}, err
+		}
+		result.Breakdown = append(result.Breakdown, item)
+	}
+	if err := rows.Err(); err != nil {
+		return SyslogDiagnostics{}, err
+	}
+	migrationRows, err := c.Conn.Query(ctx,
+		`SELECT version FROM collector.schema_migrations FINAL ORDER BY version`)
+	if err != nil {
+		return SyslogDiagnostics{}, err
+	}
+	defer migrationRows.Close()
+	result.AppliedMigrations = make([]string, 0)
+	for migrationRows.Next() {
+		var version string
+		if err := migrationRows.Scan(&version); err != nil {
+			return SyslogDiagnostics{}, err
+		}
+		result.AppliedMigrations = append(result.AppliedMigrations, version)
+	}
+	return result, migrationRows.Err()
 }

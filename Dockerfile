@@ -6,13 +6,14 @@ COPY web/ ./
 RUN npm run build
 
 FROM golang:1.25-alpine AS backend
+ARG VERSION=dev
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/collector ./cmd/collector
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/collector ./cmd/collector
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata && \

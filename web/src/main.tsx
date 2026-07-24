@@ -38,6 +38,21 @@ type DeviceStats = {
   calls24h: number; failedCalls24h: number; averageTalkMs: number
   alarms24h: number; radius24h: number; unknown24h: number
 }
+type SyslogBreakdown = {
+  category: string; parseStatus: string; parserVersion: string; headerFormat: string
+  sourcePort: number; count: number; lastReceivedAt: string
+}
+type SyslogDiagnostics = {
+  version: string
+  parserVersion: string
+  runtime: { acceptedDatagrams: number; rejectedDatagrams: number; spoolWriteErrors: number }
+  spoolDepth: number
+  quarantineDepth: number
+  natsStreamMessages: number
+  natsConsumerPending: number
+  breakdown: SyslogBreakdown[]
+  appliedMigrations: string[]
+}
 type CallRow = {
   recordId: string
   setupTime?: string
@@ -224,7 +239,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       </header>
       {error && <div className="global-error">{error}</div>}
       {!selected ? <EmptyDevices canCreate={user.role === 'admin'} onCreate={() => setShowCreate(true)} /> :
-        <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset} />}
+        <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
+          admin={user.role === 'admin'} />}
     </main>
     {showCreate && <CreateDeviceDialog onClose={() => setShowCreate(false)} onCreated={(device) => {
       setShowCreate(false)
@@ -260,13 +276,14 @@ function DeviceNavigation({ active, onChange }: { active: Dataset; onChange: (va
   </nav>
 }
 
-function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
+function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
   const [rows, setRows] = useState<Array<EventRow | CallRow>>([])
   const [loading, setLoading] = useState(false)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
   const [stats, setStats] = useState<DeviceStats | null>(null)
+  const [diagnostics, setDiagnostics] = useState<SyslogDiagnostics | null>(null)
   const [cursor, setCursor] = useState<PageCursor | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const tableShellRef = useRef<HTMLDivElement>(null)
@@ -290,7 +307,11 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
   }, [])
   useEffect(() => {
     api<DeviceStats>(`/devices/${device.id}/stats`).then(setStats).catch(() => setStats(null))
-  }, [device.id])
+    if (admin) {
+      api<SyslogDiagnostics>(`/devices/${device.id}/syslog-diagnostics`)
+        .then(setDiagnostics).catch(() => setDiagnostics(null))
+    }
+  }, [admin, device.id])
   useEffect(() => {
     const generation = ++generationRef.current
     let active = true
@@ -351,6 +372,7 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
       <span><small>RADIUS, 24 ч</small><strong>{stats.radius24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Нераспознано, 24 ч</small><strong className={stats.unknown24h ? 'warning-text' : ''}>{stats.unknown24h.toLocaleString('ru-RU')}</strong></span>
     </div>}
+    {admin && diagnostics && <SyslogDiagnosticPanel value={diagnostics} />}
     <div className="toolbar">
       <div><h3>{title}</h3><span>{rows.length} записей в текущей выборке</span></div>
       <div className="toolbar-actions">
@@ -371,6 +393,34 @@ function DataView({ device, dataset }: { device: Device; dataset: Dataset }) {
     {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
     {selectedEvent && <EventDrawer event={selectedEvent} onClose={() => setSelectedEvent(null)} />}
   </section>
+}
+
+function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
+  const trace = value.breakdown.filter((row) => row.sourcePort === 10003)
+    .reduce((sum, row) => sum + row.count, 0)
+  return <details className="diagnostic-panel">
+    <summary>
+      Диагностика Syslog · Collector {value.version} · parser {value.parserVersion} ·
+      порт 10003: {trace.toLocaleString('ru-RU')} · spool: {value.spoolDepth.toLocaleString('ru-RU')}
+    </summary>
+    <div className="diagnostic-facts">
+      <span>Принято после запуска: <strong>{value.runtime.acceptedDatagrams.toLocaleString('ru-RU')}</strong></span>
+      <span>Отклонено: <strong>{value.runtime.rejectedDatagrams.toLocaleString('ru-RU')}</strong></span>
+      <span>Ошибок spool: <strong>{value.runtime.spoolWriteErrors.toLocaleString('ru-RU')}</strong></span>
+      <span>NATS stream: <strong>{value.natsStreamMessages.toLocaleString('ru-RU')}</strong></span>
+      <span>NATS pending: <strong>{value.natsConsumerPending.toLocaleString('ru-RU')}</strong></span>
+      <span>Quarantine: <strong>{value.quarantineDepth.toLocaleString('ru-RU')}</strong></span>
+      <span>Миграции: <strong>{value.appliedMigrations.join(', ') || '—'}</strong></span>
+    </div>
+    <div className="diagnostic-breakdown">
+      {value.breakdown.map((row) => <span key={[
+        row.category, row.parseStatus, row.parserVersion, row.headerFormat, row.sourcePort,
+      ].join(':')}>
+        <strong>{row.category}</strong> · {row.parseStatus} · {row.parserVersion} ·
+        {row.headerFormat} · UDP/{row.sourcePort}: {row.count.toLocaleString('ru-RU')}
+      </span>)}
+    </div>
+  </details>
 }
 
 function RadiusEmptyState() {

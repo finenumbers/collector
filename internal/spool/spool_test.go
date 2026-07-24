@@ -72,3 +72,27 @@ func TestQueueQuarantinesWithoutDiscardingPayload(t *testing.T) {
 		t.Fatalf("got quarantine depth %d, want 1: %v", quarantineDepth, err)
 	}
 }
+
+func TestQueueEnqueuesBatchAtomically(t *testing.T) {
+	queue, err := Open(filepath.Join(t.TempDir(), "syslog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queue.Close()
+	now := time.Now().UTC()
+	if err := queue.EnqueueBatch([]Entry{
+		{ReceivedAt: now, EventID: "first", Payload: []byte("one")},
+		{ReceivedAt: now.Add(time.Nanosecond), EventID: "second", Payload: []byte("two")},
+		{ReceivedAt: now.Add(2 * time.Nanosecond), EventID: "third", Payload: []byte("three")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := queue.Peek(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || string(items[0].Data) != "one" ||
+		string(items[1].Data) != "two" || string(items[2].Data) != "three" {
+		t.Fatalf("unexpected batch contents: %#v", items)
+	}
+}

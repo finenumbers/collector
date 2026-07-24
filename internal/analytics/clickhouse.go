@@ -192,16 +192,32 @@ func (c *Client) Migrate(ctx context.Context, directory string) error {
 }
 
 func (c *Client) InsertSyslog(ctx context.Context, event SyslogEvent) error {
-	sum := sha256.Sum256(event.Payload)
-	return c.Conn.Exec(ctx, `INSERT INTO collector.raw_syslog
+	return c.InsertSyslogBatch(ctx, []SyslogEvent{event})
+}
+
+func (c *Client) InsertSyslogBatch(ctx context.Context, events []SyslogEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.raw_syslog
 		(event_id,device_id,received_at,source_ip,source_port,transport,payload,payload_sha256,
 		 pri,facility,severity,header_format,parser_version,parse_status,category,event_time,
-		 component,message,attributes)
-		VALUES(?,?,?,?,?,'udp',?,?,?,?,?,?,'smg-3.410-v2',?,?,?,?,?,?)`,
-		event.EventID, event.DeviceID, event.ReceivedAt, event.SourceIP, event.SourcePort,
-		string(event.Payload), hex.EncodeToString(sum[:]), event.PRI, event.Facility, event.Severity,
-		event.HeaderFormat, event.ParseStatus, event.Category, event.EventTime, event.Component,
-		event.Message, event.Attributes)
+		 component,message,attributes)`)
+	if err != nil {
+		return err
+	}
+	for _, event := range events {
+		sum := sha256.Sum256(event.Payload)
+		if err := batch.Append(
+			event.EventID, event.DeviceID, event.ReceivedAt, event.SourceIP, event.SourcePort, "udp",
+			string(event.Payload), hex.EncodeToString(sum[:]), event.PRI, event.Facility, event.Severity,
+			event.HeaderFormat, "smg-3.410-v3", event.ParseStatus, event.Category, event.EventTime,
+			event.Component, event.Message, event.Attributes,
+		); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
 }
 
 func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error {

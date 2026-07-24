@@ -27,12 +27,15 @@ const (
 
 var (
 	priPattern       = regexp.MustCompile(`^<([0-9]{1,3})>`)
+	eltexHostPattern = regexp.MustCompile(`^<([^<>\s]{1,128})>\s+`)
 	tracePattern     = regexp.MustCompile(`(?i)^(?:[A-Z][a-z]{2}\s+\d+\s+)?(\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\s+\[([A-Z ]+)\]\s*(.*)$`)
 	rfc3164Pattern   = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([0-9]{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$`)
 	rfc3164App       = regexp.MustCompile(`^([A-Za-z0-9_.-]+)(?:\[([0-9]+)\])?:\s*(.*)$`)
+	callContext      = regexp.MustCompile(`^\[([A-Za-z0-9_-]+)\]\s*(.*)$`)
 	componentPattern = regexp.MustCompile(`^([A-Za-z0-9_./ -]+?)(?::|\.)\s+(.*)$`)
 	radiusPair       = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
 	radiusSession    = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
+	radiusVSAPair    = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id)=([^'"\s]+)`)
 )
 
 type RawSyslog struct {
@@ -107,38 +110,93 @@ func (r *SyslogReceiver) Run(ctx context.Context) error {
 		<-ctx.Done()
 		_ = conn.Close()
 	}()
+	type cachedDevice struct {
+		id      uuid.UUID
+		expires time.Time
+	}
+	const (
+		maxBatch    = 256
+		batchWindow = 2 * time.Millisecond
+		cacheTTL    = 30 * time.Second
+	)
+	deviceCache := make(map[string]cachedDevice)
+	rejectedLog := make(map[string]time.Time)
+	pending := make([]spool.Entry, 0, maxBatch)
+	var flushAt time.Time
+	flush := func() error {
+		for len(pending) > 0 {
+			err := r.Spool.EnqueueBatch(pending)
+			if err == nil {
+				pending = pending[:0]
+				flushAt = time.Time{}
+				return nil
+			}
+			slog.Error("syslog durable spool batch failed; retrying without dropping datagrams",
+				"count", len(pending), "error", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+		return nil
+	}
 	buffer := make([]byte, 64*1024)
 	for {
+		if len(pending) > 0 {
+			_ = conn.SetReadDeadline(flushAt)
+		} else {
+			_ = conn.SetReadDeadline(time.Time{})
+		}
 		size, source, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			if ctx.Err() != nil {
+				_ = flush()
 				return nil
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				if err := flush(); err != nil && !errors.Is(err, context.Canceled) {
+					return err
+				}
+				continue
 			}
 			slog.Error("syslog read failed", "error", err)
 			continue
 		}
-		deviceID, err := r.Store.DeviceBySourceIP(ctx, source.IP.String())
-		if err != nil {
-			slog.Warn("syslog from unknown source rejected", "source", source.IP)
+		sourceIP := source.IP.String()
+		now := time.Now()
+		deviceID := uuid.Nil
+		if cached, ok := deviceCache[sourceIP]; ok && now.Before(cached.expires) {
+			deviceID = cached.id
+			err = nil
+		} else {
+			deviceID, err = r.Store.DeviceBySourceIP(ctx, sourceIP)
+			if err == nil {
+				deviceCache[sourceIP] = cachedDevice{id: deviceID, expires: now.Add(cacheTTL)}
+			}
+		}
+		if err != nil || deviceID == uuid.Nil {
+			if last := rejectedLog[sourceIP]; now.Sub(last) >= time.Minute {
+				slog.Warn("syslog from unknown source rejected", "source", sourceIP, "source_port", source.Port)
+				rejectedLog[sourceIP] = now
+			}
 			continue
 		}
 		record := RawSyslog{
-			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: time.Now().UTC(),
-			SourceIP: source.IP.String(), SourcePort: uint16(source.Port),
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.UTC(),
+			SourceIP: sourceIP, SourcePort: uint16(source.Port),
 			Payload: append([]byte(nil), buffer[:size]...),
 		}
 		payload, _ := json.Marshal(record)
-		for {
-			err = r.Spool.Enqueue(record.ReceivedAt, record.EventID.String(), payload)
-			if err == nil {
-				break
-			}
-			slog.Error("syslog durable spool failed; retrying without dropping current datagram",
-				"event", record.EventID, "error", err)
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(250 * time.Millisecond):
+		pending = append(pending, spool.Entry{
+			ReceivedAt: record.ReceivedAt, EventID: record.EventID.String(), Payload: payload,
+		})
+		if len(pending) == 1 {
+			flushAt = now.Add(batchWindow)
+		}
+		if len(pending) >= maxBatch {
+			if err := flush(); err != nil && !errors.Is(err, context.Canceled) {
+				return err
 			}
 		}
 	}
@@ -203,6 +261,12 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 		if err != nil {
 			return err
 		}
+		type parsedMessage struct {
+			message *nats.Msg
+			event   analytics.SyslogEvent
+		}
+		parsed := make([]parsedMessage, 0, len(messages))
+		events := make([]analytics.SyslogEvent, 0, len(messages))
 		for _, message := range messages {
 			var raw RawSyslog
 			if err := json.Unmarshal(message.Data, &raw); err != nil {
@@ -216,19 +280,26 @@ func RunSyslogWorker(ctx context.Context, nc *nats.Conn, client *analytics.Clien
 				continue
 			}
 			event := ParseSyslog(raw)
-			if err := client.InsertSyslog(ctx, event); err != nil {
-				slog.Error("syslog persistence failed", "event", raw.EventID, "error", err)
-				_ = message.NakWithDelay(5 * time.Second)
-				continue
+			parsed = append(parsed, parsedMessage{message: message, event: event})
+			events = append(events, event)
+		}
+		if err := client.InsertSyslogBatch(ctx, events); err != nil {
+			slog.Error("syslog batch persistence failed", "count", len(events), "error", err)
+			for _, item := range parsed {
+				_ = item.message.NakWithDelay(5 * time.Second)
 			}
+			continue
+		}
+		for _, item := range parsed {
+			event := item.event
 			if event.Category == "radius" {
 				if err := client.InsertRadiusAndCorrelate(ctx, event); err != nil {
-					slog.Error("RADIUS correlation failed", "event", raw.EventID, "error", err)
-					_ = message.NakWithDelay(5 * time.Second)
+					slog.Error("RADIUS correlation failed", "event", event.EventID, "error", err)
+					_ = item.message.NakWithDelay(5 * time.Second)
 					continue
 				}
 			}
-			_ = message.Ack()
+			_ = item.message.Ack()
 		}
 	}
 	return nil
@@ -251,6 +322,11 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		text = strings.TrimSpace(strings.TrimPrefix(text, match[0]))
 		event.HeaderFormat = "rfc3164-or-pri"
 	}
+	if match := eltexHostPattern.FindStringSubmatch(text); match != nil {
+		event.Attributes["hostname"] = match[1]
+		text = strings.TrimSpace(strings.TrimPrefix(text, match[0]))
+		event.HeaderFormat = "eltex-trace"
+	}
 	if match := tracePattern.FindStringSubmatch(text); match != nil {
 		event.Attributes["payload_severity"] = strings.TrimSpace(match[2])
 		event.Message = strings.TrimSpace(match[3])
@@ -269,6 +345,10 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		event.ParseStatus = "parsed"
 	} else {
 		event.Message = text
+	}
+	if match := callContext.FindStringSubmatch(event.Message); match != nil {
+		event.Attributes["call_context"] = match[1]
+		event.Message = strings.TrimSpace(match[2])
 	}
 	if match := componentPattern.FindStringSubmatch(event.Message); match != nil {
 		event.Component = strings.TrimSpace(match[1])
@@ -292,6 +372,9 @@ func ParseSyslog(raw RawSyslog) analytics.SyslogEvent {
 		if match := radiusSession.FindStringSubmatch(text); match != nil {
 			event.Attributes["acct_session_id"] = strings.TrimSpace(match[1])
 		}
+		for _, match := range radiusVSAPair.FindAllStringSubmatch(text, -1) {
+			event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(match[2])
+		}
 	}
 	return event
 }
@@ -304,11 +387,18 @@ func classify(component, application, message string) string {
 	case upperApplication == "WEBAPP" || upperComponent == "WEBS" || upperComponent == "SEC":
 		return "system_journal"
 	case strings.Contains(upper, "RADIUS") ||
+		strings.Contains(upper, "ANTIFRAUD") || strings.Contains(upper, "ACCS-REQUEST") ||
 		strings.Contains(upper, "ACCESS-REQUEST") || strings.Contains(upper, "ACCESS-ACCEPT") ||
 		strings.Contains(upper, "ACCESS-REJECT") || strings.Contains(upper, "ACCOUNTING-REQUEST") ||
 		strings.Contains(upper, "ACCOUNTING-RESPONSE") || strings.Contains(upper, "ACCT-SESSION-ID") ||
 		strings.Contains(upper, "CALLING-STATION-ID") || strings.Contains(upper, "CALLED-STATION-ID") ||
-		strings.Contains(upper, "XPGK-"):
+		strings.Contains(upper, "XPGK-") || strings.Contains(upper, "CISCO-AVPAIR") ||
+		strings.Contains(upper, "ELTEX-AVPAIR") || strings.Contains(upper, "H323-CONF-ID") ||
+		strings.Contains(upper, "H323-CREDIT-TIME") || strings.Contains(upper, "H323-CALL-ORIGIN") ||
+		strings.Contains(upper, "H323-CALL-TYPE") || strings.Contains(upper, "NAS-PORT-ID") ||
+		strings.Contains(upper, "NAS-PORT-TYPE") || strings.Contains(upper, "FRAMED-IP-ADDRESS") ||
+		strings.Contains(upper, "USER-NAME") || strings.Contains(upper, "PASSWORD") ||
+		upperComponent == "RC":
 		return "radius"
 	case strings.Contains(upper, "SS7") || strings.Contains(upper, "ISUP") || strings.Contains(upper, "IAM") || strings.Contains(upper, " RLC"):
 		return "isup"

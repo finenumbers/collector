@@ -25,6 +25,12 @@ type Item struct {
 	Data []byte
 }
 
+type Entry struct {
+	ReceivedAt time.Time
+	EventID    string
+	Payload    []byte
+}
+
 func Open(path string) (*Queue, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, err
@@ -67,9 +73,22 @@ func (q *Queue) Close() error {
 }
 
 func (q *Queue) Enqueue(receivedAt time.Time, eventID string, payload []byte) error {
-	key := []byte(fmt.Sprintf("%020d/%s", receivedAt.UnixNano(), eventID))
+	return q.EnqueueBatch([]Entry{{ReceivedAt: receivedAt, EventID: eventID, Payload: payload}})
+}
+
+func (q *Queue) EnqueueBatch(entries []Entry) error {
+	if len(entries) == 0 {
+		return nil
+	}
 	return q.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketName).Put(key, payload)
+		bucket := tx.Bucket(bucketName)
+		for _, entry := range entries {
+			key := []byte(fmt.Sprintf("%020d/%s", entry.ReceivedAt.UnixNano(), entry.EventID))
+			if err := bucket.Put(key, entry.Payload); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

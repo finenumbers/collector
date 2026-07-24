@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const SyslogParserVersion = "smg-3.410-v6"
+const SyslogParserVersion = "smg-3.410-v7"
 
 type Client struct {
 	Conn            clickhouse.Conn

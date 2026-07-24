@@ -129,6 +129,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	result, err := (CDRParser{
 		DeviceID: device.ID, FileID: fileID, Location: location,
 		TimezoneRevision: uint64(device.ActiveTimezoneRevision), ExpectedHeader: columns,
+		ExpectedDeviceSign: device.DeviceSign,
 	}).Parse(bytes.NewReader(decoded))
 	if err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, err.Error())

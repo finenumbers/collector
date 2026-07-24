@@ -93,3 +93,35 @@ func TestCDRRequiresProfileWithoutHeader(t *testing.T) {
 		t.Fatal("expected an error for a headerless CDR without a configured profile")
 	}
 }
+
+func TestCDRRejectsAnotherDeviceSign(t *testing.T) {
+	const sample = `Device Sign;Setup time;Connect time;Disconnect time;Sequence number
+fixer;2026-07-24 12:00:00;;;20260724120000-1
+`
+	_, err := (CDRParser{
+		DeviceID: uuid.New(), FileID: uuid.New(), Location: time.UTC,
+		ExpectedDeviceSign: "mts",
+	}).Parse(strings.NewReader(sample))
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("got %v, want device_sign mismatch", err)
+	}
+}
+
+func TestCDRSequenceNumberIsIsolatedByDevice(t *testing.T) {
+	const sample = `Device Sign;Setup time;Connect time;Disconnect time;Sequence number
+smg;2026-07-24 12:00:00;;;20260724120000-1
+`
+	parse := func(deviceID uuid.UUID) uuid.UUID {
+		result, err := (CDRParser{
+			DeviceID: deviceID, FileID: uuid.New(), Location: time.UTC,
+			ExpectedDeviceSign: "smg",
+		}).Parse(strings.NewReader(sample))
+		if err != nil || len(result.Records) != 1 {
+			t.Fatalf("parse for %s failed: %v", deviceID, err)
+		}
+		return result.Records[0].RecordID
+	}
+	if parse(uuid.New()) == parse(uuid.New()) {
+		t.Fatal("same sequence number from different SMGs produced one record ID")
+	}
+}

@@ -92,7 +92,7 @@ func (c *Client) ListBuildingDeviceRevisions(ctx context.Context) ([]DeviceRevis
 		cdr_high_watermark,cdr_high_watermark_us,
 		raw_total,cdr_total,processed,cdr_processed,lifecycle_count,error,updated_at
 		FROM collector.device_derived_revisions FINAL
-		WHERE status IN ('building','cutover') ORDER BY updated_at LIMIT 100`)
+		WHERE status IN ('building','cutover','ready') ORDER BY updated_at LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}

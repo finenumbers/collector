@@ -151,6 +151,8 @@ tbody tr { cursor: pointer; }
 .modal-header button { font-size: 22px; color: var(--muted); }
 .device-form { padding: 14px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.form-grid .full-width { grid-column: 1 / -1; }
+.form-grid textarea { min-height: 64px; resize: vertical; font: inherit; }
 .checkbox-row { flex-direction: row; align-items: center; padding-top: 21px; gap: 8px; }
 .checkbox-row input { min-width: auto; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 8px; }

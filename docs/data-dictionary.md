@@ -26,7 +26,10 @@ UTC RFC3339 и локальный RFC3339 с offset. UI не зависит от
 
 ## CDR
 
-Парсер использует emitted field-name row. Если она отключена, применяется сохранённый в карточке устройства ordered profile. Исходная пара `имя → значение` всегда остаётся в `raw_fields`.
+Парсер использует emitted field-name row. Если она отключена, применяется сохранённый
+в карточке устройства ordered profile. При настроенном `Device Sign` несовпадающий файл
+целиком помещается в quarantine и не может быть приписан другому SMG. Исходная пара
+`имя → значение` всегда остаётся в `raw_fields`.
 
 Основные группы:
 
@@ -61,6 +64,11 @@ UTC RFC3339 и локальный RFC3339 с offset. UI не зависит от
 - detected envelope (`eltex`, `rfc3164`, `rfc3164-or-pri`, далее `rfc5424`);
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
+
+Parser v7 распознаёт самостоятельные Eltex trace-continuations `# requestID`,
+`# trunkID`, `# Keep alive type`, `# cause` и номерные строки. При однозначном
+device-scoped контексте они наследуют категорию родителя; иначе сохраняются как
+`call_trace`, а не как ошибочно угаданный RADIUS/SIP.
 
 Категории:
 

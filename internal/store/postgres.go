@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,7 +25,8 @@ import (
 var ErrNotFound = errors.New("not found")
 
 type Store struct {
-	DB *pgxpool.Pool
+	DB                  *pgxpool.Pool
+	deviceCacheRevision atomic.Uint64
 }
 
 type User struct {
@@ -77,15 +79,16 @@ type NewDevice struct {
 }
 
 type DeviceUpdate struct {
-	Name             string `json:"name"`
-	Firmware         string `json:"firmware"`
-	Timezone         string `json:"timezone"`
-	ManagementIP     string `json:"managementIp"`
-	SyslogSourceIP   string `json:"syslogSourceIp"`
-	DeviceSign       string `json:"deviceSign"`
-	AntifraudEnabled bool   `json:"antifraudEnabled"`
-	AntifraudMode    string `json:"antifraudMode"`
-	Enabled          bool   `json:"enabled"`
+	Name             string   `json:"name"`
+	Firmware         string   `json:"firmware"`
+	Timezone         string   `json:"timezone"`
+	ManagementIP     string   `json:"managementIp"`
+	SyslogSourceIP   string   `json:"syslogSourceIp"`
+	DeviceSign       string   `json:"deviceSign"`
+	AntifraudEnabled bool     `json:"antifraudEnabled"`
+	AntifraudMode    string   `json:"antifraudMode"`
+	Enabled          bool     `json:"enabled"`
+	CDRColumns       []string `json:"cdrColumns"`
 }
 
 type Session struct {
@@ -291,6 +294,10 @@ func (s *Store) DeviceIdentityBySourceIP(
 	return id, timezone, revision, err
 }
 
+func (s *Store) DeviceCacheRevision() uint64 {
+	return s.deviceCacheRevision.Load()
+}
+
 func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
 	err := s.DB.QueryRow(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
@@ -430,6 +437,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	if err := tx.Commit(ctx); err != nil {
 		return Device{}, err
 	}
+	s.deviceCacheRevision.Add(1)
 	device.GeneratedPassword = ftpPassword
 	return device, nil
 }
@@ -455,6 +463,7 @@ func (s *Store) UpdateDevice(
 	if input.Firmware == "" {
 		return Device{}, errors.New("firmware is required")
 	}
+	columns, _ := json.Marshal(input.CDRColumns)
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return Device{}, err
@@ -467,7 +476,7 @@ func (s *Store) UpdateDevice(
 			ELSE timezone_revision END,
 		timezone=$4,cdr_source_timezone=$4,management_ip=NULLIF($5,'')::inet,
 		syslog_source_ip=$6,device_sign=$7,antifraud_enabled=$8,antifraud_mode=$9,
-		enabled=$10
+		enabled=$10,cdr_columns=$11
 		WHERE id=$1
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
 			active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
@@ -475,7 +484,7 @@ func (s *Store) UpdateDevice(
 			cdr_columns,enabled,created_at`,
 		id, strings.TrimSpace(input.Name), input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
-		input.AntifraudEnabled, input.AntifraudMode, input.Enabled,
+		input.AntifraudEnabled, input.AntifraudMode, input.Enabled, columns,
 	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
@@ -497,7 +506,11 @@ func (s *Store) UpdateDevice(
 		actor.ID, id.String(), nullableIP(remoteIP), details); err != nil {
 		return Device{}, err
 	}
-	return device, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return Device{}, err
+	}
+	s.deviceCacheRevision.Add(1)
+	return device, nil
 }
 
 func (s *Store) DeleteDevice(ctx context.Context, id uuid.UUID, actor User, remoteIP string) error {
@@ -518,7 +531,11 @@ func (s *Store) DeleteDevice(ctx context.Context, id uuid.UUID, actor User, remo
 		VALUES($1,'device_delete','device',$2,$3,$4)`, actor.ID, id.String(), nullableIP(remoteIP), details); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.deviceCacheRevision.Add(1)
+	return nil
 }
 
 func hashPassword(password string) (string, error) {

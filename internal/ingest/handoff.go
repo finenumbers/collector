@@ -39,6 +39,10 @@ type DeviceResolver interface {
 	DeviceIdentityBySourceIP(context.Context, string) (uuid.UUID, string, int64, error)
 }
 
+type deviceCacheRevisioner interface {
+	DeviceCacheRevision() uint64
+}
+
 func RunIngressHandoffPublisher(
 	ctx context.Context, queue *spool.Queue, socketPath string, metrics *Metrics,
 ) error {
@@ -128,6 +132,7 @@ func RunHandoffReceiver(
 
 	cache := make(map[string]cachedHandoffDevice)
 	rejectedLog := make(map[string]time.Time)
+	var cacheRevision uint64
 	for {
 		connection, err := listener.AcceptUnix()
 		if err != nil {
@@ -135,6 +140,13 @@ func RunHandoffReceiver(
 				return nil
 			}
 			return err
+		}
+		if revisioner, ok := control.(deviceCacheRevisioner); ok {
+			if current := revisioner.DeviceCacheRevision(); current != cacheRevision {
+				clear(cache)
+				clear(rejectedLog)
+				cacheRevision = current
+			}
 		}
 		if err := handleHandoffConnection(ctx, connection, control, queue, metrics, cache, rejectedLog); err != nil {
 			slog.Warn("Syslog handoff batch failed; ingress will retry", "error", err)

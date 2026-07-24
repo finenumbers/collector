@@ -656,12 +656,13 @@ func (c *Client) correlateExactProtocolEvent(ctx context.Context, event SyslogEv
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,record_id,?,'exact_sip_call_id',toFloat32(1.0),
-				map('sip_call_id',?),'smg-3.410-v6',now64(3)
+				map('sip_call_id',?),?,now64(3)
 			FROM collector.cdr_records
 			WHERE device_id=? AND (incoming_sip_call_id=? OR outgoing_sip_call_id=?)
 				AND ? BETWEEN coalesce(setup_time,ingested_at)-INTERVAL 5 MINUTE
 					AND coalesce(disconnect_time,setup_time,ingested_at)+INTERVAL 5 MINUTE`,
-			event.EventID, callID, event.DeviceID, callID, callID, occurredAt); err != nil {
+			event.EventID, callID, SyslogParserVersion,
+			event.DeviceID, callID, callID, occurredAt); err != nil {
 			return err
 		}
 	}
@@ -669,9 +670,9 @@ func (c *Client) correlateExactProtocolEvent(ctx context.Context, event SyslogEv
 		return c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,record_id,?,'exact_global_callref',toFloat32(1.0),
-				map('global_callref',?),'smg-3.410-v6',now64(3)
+				map('global_callref',?),?,now64(3)
 			FROM collector.cdr_records WHERE device_id=? AND global_callref=?`,
-			event.EventID, globalCallref, event.DeviceID, globalCallref)
+			event.EventID, globalCallref, SyslogParserVersion, event.DeviceID, globalCallref)
 	}
 	return nil
 }
@@ -684,12 +685,12 @@ func (c *Client) correlateCDRExactEvidence(ctx context.Context, record CDRRecord
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,?,event_id,'exact_sip_call_id',toFloat32(1.0),
-				map('sip_call_id',?),'smg-3.410-v6',now64(3)
+				map('sip_call_id',?),?,now64(3)
 			FROM collector.raw_syslog
 			WHERE device_id=? AND attributes['sip_call_id']=?
 				AND received_at BETWEEN coalesce(?,?)-INTERVAL 5 MINUTE
 					AND coalesce(?,?,?)+INTERVAL 5 MINUTE`,
-			record.RecordID, callID, record.DeviceID, callID, record.SetupTime,
+			record.RecordID, callID, SyslogParserVersion, record.DeviceID, callID, record.SetupTime,
 			record.IngestedAt, record.DisconnectTime, record.SetupTime, record.IngestedAt); err != nil {
 			return err
 		}
@@ -698,10 +699,11 @@ func (c *Client) correlateCDRExactEvidence(ctx context.Context, record CDRRecord
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,?,event_id,'exact_global_callref',toFloat32(1.0),
-				map('global_callref',?),'smg-3.410-v6',now64(3)
+				map('global_callref',?),?,now64(3)
 			FROM collector.raw_syslog
 			WHERE device_id=? AND attributes['global_callref']=?`,
-			record.RecordID, record.GlobalCallref, record.DeviceID, record.GlobalCallref); err != nil {
+			record.RecordID, record.GlobalCallref, SyslogParserVersion,
+			record.DeviceID, record.GlobalCallref); err != nil {
 			return err
 		}
 	}
@@ -709,14 +711,14 @@ func (c *Client) correlateCDRExactEvidence(ctx context.Context, record CDRRecord
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 			SELECT device_id,?,event_id,'cdr_radius_rejected',toFloat32(0.99),
-				map('rejecting_radius_server',?),'smg-3.410-v6',now64(3)
+				map('rejecting_radius_server',?),?,now64(3)
 			FROM collector.raw_syslog
 			WHERE device_id=? AND category='radius'
 				AND (attributes['server_address']=?
 					OR positionCaseInsensitive(payload,?)>0)
 				AND received_at BETWEEN coalesce(?,?)-INTERVAL 5 MINUTE
 					AND coalesce(?,?,?)+INTERVAL 5 MINUTE`,
-			record.RecordID, record.RejectingRadiusServer, record.DeviceID,
+			record.RecordID, record.RejectingRadiusServer, SyslogParserVersion, record.DeviceID,
 			record.RejectingRadiusServer, record.RejectingRadiusServer,
 			record.SetupTime, record.IngestedAt, record.DisconnectTime,
 			record.SetupTime, record.IngestedAt); err != nil {
@@ -804,11 +806,11 @@ func (c *Client) ListAntifraudPage(
 				ON d.device_id=l.device_id AND d.record_id=l.cdr_record_id
 			LEFT JOIN collector.cdr_time_interpretations AS ct FINAL
 				ON ct.device_id=d.device_id AND ct.record_id=d.record_id
-			WHERE l.parser_version IN ('smg-3.410-v5','smg-3.410-v6')
+			WHERE l.parser_version=?
 			GROUP BY l.device_id,l.transaction_id
 		) c ON c.device_id=t.device_id AND c.transaction_id=t.transaction_id
 		WHERE t.device_id=? AND t.is_antifraud=1`
-	args := []any{deviceID}
+	args := []any{SyslogParserVersion, deviceID}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(t.acct_session_id,?)>0
 			OR positionCaseInsensitive(t.calling_station_id,?)>0

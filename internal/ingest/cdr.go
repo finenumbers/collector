@@ -20,11 +20,12 @@ import (
 var sequencePattern = regexp.MustCompile(`^([0-9]{14})-([0-9]+)$`)
 
 type CDRParser struct {
-	DeviceID         uuid.UUID
-	FileID           uuid.UUID
-	Location         *time.Location
-	TimezoneRevision uint64
-	ExpectedHeader   []string
+	DeviceID           uuid.UUID
+	FileID             uuid.UUID
+	Location           *time.Location
+	TimezoneRevision   uint64
+	ExpectedHeader     []string
+	ExpectedDeviceSign string
 }
 
 type CDRResult struct {
@@ -97,6 +98,14 @@ func (p CDRParser) Parse(reader io.Reader) (CDRResult, error) {
 		fields := make(map[string]string, len(row))
 		for index, value := range row {
 			fields[normalized[index]] = strings.TrimSpace(value)
+		}
+		if actual, present := fields["device_sign"]; present &&
+			p.ExpectedDeviceSign != "" &&
+			!strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(p.ExpectedDeviceSign)) {
+			return CDRResult{}, fmt.Errorf(
+				"CDR device_sign %q does not match configured device %q",
+				actual, p.ExpectedDeviceSign,
+			)
 		}
 		record, parseErr := p.mapRecord(result.Rows, fields)
 		if parseErr != nil {

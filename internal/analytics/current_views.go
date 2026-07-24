@@ -53,6 +53,11 @@ func (c *Client) listCurrentEventsPage(
 	if err != nil {
 		return EventPage{}, err
 	}
+	if category != "" && category != "all" {
+		return c.listCurrentEventsByCategoryPage(
+			ctx, deviceID, revision, timezone, category, search, limit, cursor,
+		)
+	}
 	query := `WITH page AS
 		(
 			SELECT event_id,received_at,payload,event_time,category,component,message,
@@ -60,10 +65,6 @@ func (c *Client) listCurrentEventsPage(
 			FROM collector.raw_syslog
 			WHERE device_id=?`
 	args := []any{deviceID}
-	if category != "" && category != "all" {
-		query += ` AND category=?`
-		args = append(args, category)
-	}
 	if search != "" {
 		query += ` AND positionCaseInsensitive(payload,?)>0`
 		args = append(args, search)
@@ -102,6 +103,68 @@ func (c *Client) listCurrentEventsPage(
 		LEFT JOIN facts AS f ON f.event_id=p.event_id
 		ORDER BY p.received_at DESC,p.event_id DESC`
 	args = append(args, limit+1, deviceID, revision)
+	rows, err := c.Conn.Query(ctx, query, args...)
+	if err != nil {
+		return EventPage{}, err
+	}
+	defer rows.Close()
+	result := make([]EventRow, 0, limit+1)
+	for rows.Next() {
+		var row EventRow
+		if err := rows.Scan(
+			&row.EventID, &row.ReceivedAt, &row.EventTime, &row.Category,
+			&row.Component, &row.Message, &row.RawPayload, &row.Status,
+			&row.Attributes, &row.SourceTimezone,
+		); err != nil {
+			return EventPage{}, err
+		}
+		row.EventTimeLocal = localRFC3339(row.EventTime, timezone)
+		row.ReceivedAtLocal = localRFC3339(&row.ReceivedAt, timezone)
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return EventPage{}, err
+	}
+	hasMore := uint64(len(result)) > limit
+	if hasMore {
+		result = result[:limit]
+	}
+	return EventPage{Items: result, HasMore: hasMore}, nil
+}
+
+func (c *Client) listCurrentEventsByCategoryPage(
+	ctx context.Context,
+	deviceID uuid.UUID,
+	revision uint64,
+	timezone string,
+	category string,
+	search string,
+	limit uint64,
+	cursor *EventCursor,
+) (EventPage, error) {
+	query := `WITH facts_page AS
+		(
+			SELECT f.event_id,f.received_at,f.event_time_utc,f.category,f.component,f.message,
+				f.parse_status,f.attributes,f.source_timezone,r.payload
+			FROM collector.syslog_facts AS f
+			ANY INNER JOIN collector.raw_syslog AS r
+				ON r.device_id=? AND r.event_id=f.event_id
+			WHERE f.device_id=? AND f.timezone_revision=? AND f.category=?`
+	args := []any{deviceID, deviceID, revision, category}
+	if search != "" {
+		query += ` AND positionCaseInsensitive(r.payload,?)>0`
+		args = append(args, search)
+	}
+	if cursor != nil {
+		query += ` AND (f.received_at<? OR (f.received_at=? AND f.event_id<?))`
+		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
+	}
+	query += ` ORDER BY f.received_at DESC,f.event_id DESC LIMIT 1 BY f.event_id LIMIT ?
+		)
+		SELECT event_id,received_at,event_time_utc,category,component,message,
+			payload,parse_status,attributes,source_timezone
+		FROM facts_page ORDER BY received_at DESC,event_id DESC`
+	args = append(args, limit+1)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {
 		return EventPage{}, err

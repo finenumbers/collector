@@ -50,8 +50,9 @@ UDP Syslog не имеет acknowledgement: packet может потерятьс
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 
-Parser version `smg-3.410-v6` разделяет envelope, component classification и typed
-attributes. Durable rebuild последовательно читает raw по integer microsecond cursor,
+Parser version `smg-3.410-v7` разделяет envelope, component classification и typed
+attributes, а отдельные Eltex `#` trace fragments связывает с однозначным родительским
+контекстом только внутри одного `device_id`. Durable rebuild последовательно читает raw по integer microsecond cursor,
 пакетно строит `syslog_facts`, `cdr_time_facts`, `radius_fragments` и
 `antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и
 остаётся read model до проверки counts и короткой catch-up фазы.
@@ -72,8 +73,10 @@ Acct-Session-Id/SIP Call-ID/GCR и composite matching выполняются в�
 ## Изоляция устройств
 
 - Syslog принимается только от IP, зарегистрированного в `devices.syslog_source_ip`.
+- Изменение IP немедленно инвалидирует resolver cache; старый `device_id` не используется до TTL.
 - FTP login/home генерируется отдельно для каждого `device_id`.
 - `device_id` входит во все order keys, correlation keys и API paths.
+- Для каждого включённого SMG фоновый bootstrap гарантирует активную derived revision.
 - Удаление устройства удаляет control-plane конфигурацию и FTP principal; аналитические данные требуют отдельной retention/purge процедуры.
 
 ## Масштабирование

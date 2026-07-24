@@ -50,6 +50,7 @@ var (
 	systemBodyPattern = regexp.MustCompile(`(?i)^\s*(?:WEBS|SEC)\s*:`)
 	alarmPattern      = regexp.MustCompile(`(?i)(?:^|[\s:;,])ALARMS?(?:$|[\s:;,])|АВАР`)
 	callPattern       = regexp.MustCompile(`(?i)(?:^|[\s:;,])CALL(?:$|[\s:;,])|(?:^|[\s:;,])PORT\s+[0-9]`)
+	traceContinuation = regexp.MustCompile(`(?i)^#+\s*(requestID|trunkID|Keep\s+alive\s+type|cause|connected\s+number|number)\b\s*[:=]?\s*['"]?([^'"]*)`)
 )
 
 type RawSyslog struct {
@@ -61,6 +62,59 @@ type RawSyslog struct {
 	Payload          []byte    `json:"payload"`
 	Timezone         string    `json:"timezone,omitempty"`
 	TimezoneRevision uint64    `json:"timezoneRevision,omitempty"`
+}
+
+type continuationParent struct {
+	eventID     uuid.UUID
+	receivedAt  time.Time
+	sourceIP    string
+	category    string
+	component   string
+	callContext string
+}
+
+type ContinuationAssembler struct {
+	parents map[uuid.UUID]continuationParent
+}
+
+func NewContinuationAssembler() *ContinuationAssembler {
+	return &ContinuationAssembler{parents: make(map[uuid.UUID]continuationParent)}
+}
+
+func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
+	if a == nil {
+		return
+	}
+	for index := range events {
+		event := &events[index]
+		if event.Attributes["trace_continuation"] != "true" {
+			a.parents[event.DeviceID] = continuationParent{
+				eventID: event.EventID, receivedAt: event.ReceivedAt,
+				sourceIP: event.SourceIP.String(), category: event.Category,
+				component: event.Component, callContext: event.Attributes["call_context"],
+			}
+			continue
+		}
+		parent, ok := a.parents[event.DeviceID]
+		if !ok || parent.sourceIP != event.SourceIP.String() ||
+			event.ReceivedAt.Before(parent.receivedAt) ||
+			event.ReceivedAt.Sub(parent.receivedAt) > 500*time.Millisecond {
+			continue
+		}
+		eventContext := event.Attributes["call_context"]
+		sameCall := eventContext != "" && eventContext == parent.callContext
+		radiusBurst := eventContext == "" && parent.category == "radius" &&
+			event.ReceivedAt.Sub(parent.receivedAt) <= 100*time.Millisecond
+		if !sameCall && !radiusBurst {
+			continue
+		}
+		event.Attributes["parent_event_id"] = parent.eventID.String()
+		event.Attributes["inherited_category"] = "true"
+		event.Category = parent.category
+		if event.Component == "" {
+			event.Component = parent.component
+		}
+	}
 }
 
 type SyslogReceiver struct {
@@ -307,6 +361,7 @@ func RunSyslogWorker(
 		expires time.Time
 	}
 	timeConfigs := make(map[uuid.UUID]cachedTimeConfig)
+	continuations := NewContinuationAssembler()
 	for ctx.Err() == nil {
 		messages, err := subscription.Fetch(250, nats.MaxWait(time.Second))
 		if errors.Is(err, nats.ErrTimeout) {
@@ -352,6 +407,10 @@ func RunSyslogWorker(
 			event := ParseSyslog(raw)
 			parsed = append(parsed, parsedMessage{message: message, event: event})
 			events = append(events, event)
+		}
+		continuations.Assemble(events)
+		for index := range parsed {
+			parsed[index].event = events[index]
 		}
 		if err := client.InsertSyslogBatch(ctx, events); err != nil {
 			slog.Error("syslog batch persistence failed", "count", len(events), "error", err)
@@ -451,6 +510,7 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		event.Component = strings.TrimSpace(match[1])
 		event.Message = strings.TrimSpace(match[2])
 	}
+	extractTraceContinuation(&event)
 	event.Category = classify(event.Component, event.Attributes["application"], event.Message, string(raw.Payload))
 	if event.Category == "radius" {
 		extractRadiusAttributes(text, &event)
@@ -519,10 +579,35 @@ func classify(component, application, message, payload string) string {
 		return "auth_log"
 	case strings.HasPrefix(eventCallContext(payload), "C") || callPattern.MatchString(upper):
 		return "call_trace"
+	case traceContinuation.MatchString(strings.TrimSpace(message)):
+		return "call_trace"
 	case upperApplication != "":
 		return "system_journal"
 	default:
 		return "unknown"
+	}
+}
+
+func extractTraceContinuation(event *analytics.SyslogEvent) {
+	match := traceContinuation.FindStringSubmatch(strings.TrimSpace(event.Message))
+	if match == nil {
+		return
+	}
+	kind := strings.ToLower(strings.Join(strings.Fields(match[1]), "_"))
+	value := strings.TrimSpace(match[2])
+	event.Attributes["trace_continuation"] = "true"
+	event.Attributes["continuation_type"] = kind
+	switch kind {
+	case "requestid":
+		event.Attributes["request_id"] = value
+	case "trunkid":
+		event.Attributes["trunk_id"] = value
+	case "keep_alive_type":
+		event.Attributes["keep_alive_type"] = value
+	case "cause":
+		event.Attributes["cause"] = value
+	case "connected_number", "number":
+		event.Attributes["number"] = value
 	}
 }
 

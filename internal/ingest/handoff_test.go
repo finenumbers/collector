@@ -41,16 +41,18 @@ func TestHandoffPreservesSourceAndIsolatesDevices(t *testing.T) {
 	}
 	defer appQueue.Close()
 
-	firstDevice, secondDevice := uuid.New(), uuid.New()
+	firstDevice, secondDevice, thirdDevice := uuid.New(), uuid.New(), uuid.New()
 	resolver := fakeDeviceResolver{devices: map[string]uuid.UUID{
 		"5.227.161.181": firstDevice,
 		"5.227.161.188": secondDevice,
+		"5.227.161.190": thirdDevice,
 	}}
 	now := time.Now().UTC()
 	datagrams := []IngressDatagram{
 		{EventID: uuid.New(), ReceivedAt: now, SourceIP: "5.227.161.181", SourcePort: 10003, Payload: []byte("SIP")},
 		{EventID: uuid.New(), ReceivedAt: now.Add(time.Nanosecond), SourceIP: "5.227.161.188", SourcePort: 514, Payload: []byte("WEBS")},
-		{EventID: uuid.New(), ReceivedAt: now.Add(2 * time.Nanosecond), SourceIP: "203.0.113.10", SourcePort: 9999, Payload: []byte("unknown")},
+		{EventID: uuid.New(), ReceivedAt: now.Add(2 * time.Nanosecond), SourceIP: "5.227.161.190", SourcePort: 10003, Payload: []byte("RADIUS")},
+		{EventID: uuid.New(), ReceivedAt: now.Add(3 * time.Nanosecond), SourceIP: "203.0.113.10", SourcePort: 9999, Payload: []byte("unknown")},
 	}
 	enqueueIngressDatagrams(t, ingressQueue, datagrams)
 
@@ -73,7 +75,7 @@ func TestHandoffPreservesSourceAndIsolatesDevices(t *testing.T) {
 	waitFor(t, 3*time.Second, func() bool {
 		ingressDepth, _ := ingressQueue.Depth()
 		appDepth, _ := appQueue.Depth()
-		return ingressDepth == 0 && appDepth == 2
+		return ingressDepth == 0 && appDepth == 3
 	})
 
 	items, err := appQueue.Peek(10)
@@ -99,8 +101,12 @@ func TestHandoffPreservesSourceAndIsolatesDevices(t *testing.T) {
 		records["5.227.161.188"].SourcePort != 514 {
 		t.Fatalf("second device was mixed: %#v", records["5.227.161.188"])
 	}
-	if snapshot := publisherMetrics.Snapshot(); snapshot.HandedOff != 3 {
-		t.Fatalf("got %d completed handoffs, want 3", snapshot.HandedOff)
+	if records["5.227.161.190"].DeviceID != thirdDevice ||
+		string(records["5.227.161.190"].Payload) != "RADIUS" {
+		t.Fatalf("third device was mixed: %#v", records["5.227.161.190"])
+	}
+	if snapshot := publisherMetrics.Snapshot(); snapshot.HandedOff != 4 {
+		t.Fatalf("got %d completed handoffs, want 4", snapshot.HandedOff)
 	}
 	cancel()
 	assertStopped(t, receiverErrors)

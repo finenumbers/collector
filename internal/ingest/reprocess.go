@@ -15,21 +15,18 @@ import (
 func RunDeviceRevisionRebuilds(
 	ctx context.Context, client *analytics.Client, control *store.Store,
 ) error {
-	devices, err := control.ListDevices(ctx)
-	if err != nil {
+	if err := ensureDeviceRevisionJobs(ctx, client, control); err != nil {
 		return err
 	}
-	for _, device := range devices {
-		if device.TimezoneRevision == device.ActiveTimezoneRevision {
-			continue
-		}
-		if err := client.ScheduleDeviceRebuild(
-			ctx, device.ID, uint64(device.TimezoneRevision), device.Timezone,
-		); err != nil {
-			return err
-		}
-	}
+	continuations := NewContinuationAssembler()
+	lastBootstrap := time.Now()
 	for ctx.Err() == nil {
+		if time.Since(lastBootstrap) >= 30*time.Second {
+			if err := ensureDeviceRevisionJobs(ctx, client, control); err != nil {
+				return err
+			}
+			lastBootstrap = time.Now()
+		}
 		jobs, err := client.ListBuildingDeviceRevisions(ctx)
 		if err != nil {
 			return err
@@ -75,6 +72,7 @@ func RunDeviceRevisionRebuilds(
 					}, location)
 					events = append(events, event)
 				}
+				continuations.Assemble(events)
 				if err := client.InsertSyslogFactsBatch(ctx, events); err != nil {
 					return err
 				}
@@ -144,6 +142,34 @@ func RunDeviceRevisionRebuilds(
 	return nil
 }
 
+func ensureDeviceRevisionJobs(
+	ctx context.Context, client *analytics.Client, control *store.Store,
+) error {
+	devices, err := control.ListDevices(ctx)
+	if err != nil {
+		return err
+	}
+	for _, device := range devices {
+		if !device.Enabled {
+			continue
+		}
+		activeRevision, err := client.ActiveDeviceRevision(ctx, device.ID)
+		if err != nil {
+			return err
+		}
+		if device.TimezoneRevision == device.ActiveTimezoneRevision &&
+			activeRevision == uint64(device.ActiveTimezoneRevision) {
+			continue
+		}
+		if err := client.ScheduleDeviceRebuild(
+			ctx, device.ID, uint64(device.TimezoneRevision), device.Timezone,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type DeviceTimezoneResolver interface {
 	DeviceTimezone(context.Context, uuid.UUID) (string, error)
 }
@@ -169,6 +195,7 @@ func RunHistoricalSyslogReprocessOnce(
 ) error {
 	var processed uint64
 	timezones := make(map[uuid.UUID]string)
+	continuations := NewContinuationAssembler()
 	for ctx.Err() == nil {
 		rows, err := client.NextSyslogReplayBatch(ctx, analytics.SyslogParserVersion, 500)
 		if err != nil {
@@ -213,6 +240,7 @@ func RunHistoricalSyslogReprocessOnce(
 			events = append(events, event)
 			completed = append(completed, row.EventID)
 		}
+		continuations.Assemble(events)
 		if err := client.InsertSyslogInterpretationsBatch(ctx, events); err != nil {
 			return err
 		}

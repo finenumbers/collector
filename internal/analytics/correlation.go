@@ -416,21 +416,22 @@ func (c *Client) persistAntifraudCallLinks(
 		}
 		if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 			(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
-			SELECT ?,?,arrayJoin(?),?,?,?,'smg-3.410-v6',now64(3)`,
+			SELECT ?,?,arrayJoin(?),?,?,?,?,now64(3)`,
 			edge.transaction.DeviceID, edge.cdr.ID, edge.transaction.RawEventIDs,
-			edge.method, edge.confidence, edge.evidence); err != nil {
+			edge.method, edge.confidence, edge.evidence, SyslogParserVersion); err != nil {
 			return err
 		}
 		if callContext := edge.transaction.CallContext; callContext != "" {
 			if err := c.Conn.Exec(ctx, `INSERT INTO collector.call_event_links
 				(device_id,cdr_record_id,event_id,method,confidence,evidence,parser_version,linked_at)
 				SELECT i.device_id,?,i.event_id,'call_context_transaction',?,?,
-					'smg-3.410-v6',now64(3)
+					?,now64(3)
 				FROM collector.syslog_interpretations AS i FINAL
 				WHERE i.device_id=? AND i.parser_version=?
 					AND i.attributes['call_context']=?`,
 				edge.cdr.ID, edge.confidence,
 				map[string]string{"call_context": callContext},
+				SyslogParserVersion,
 				edge.transaction.DeviceID, SyslogParserVersion, callContext); err != nil {
 				return err
 			}

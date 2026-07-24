@@ -26,6 +26,7 @@ type Device = {
   ftpHome: string
   generatedPassword?: string
   enabled: boolean
+  cdrColumns: string[]
 }
 type EventRow = {
   eventId: string
@@ -484,6 +485,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const showRadiusEmpty = !loading && rows.length === 0 && dataset === 'radius'
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
   return <section className="data-view">
+    {diagnostics?.activeRevision === 0 && <div className="timezone-rebuild">
+      Инициализация SMG: создаётся первый согласованный read model для Syslog, CDR,
+      RADIUS и AntiFraud. Приём данных продолжается, таблицы появятся после атомарной активации.
+    </div>}
     {device.timezoneRevision !== device.activeTimezoneRevision && <div className="timezone-rebuild">
       Часовой пояс {device.timezone} пересобирается в фоне. До атомарного переключения
       показана активная ревизия {device.activeTimezoneRevision} ({activeDeviceTimezone(device)}).
@@ -541,20 +546,20 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       {value.ingressAvailable ? value.ingress.runtime.acceptedDatagrams.toLocaleString('ru-RU') : ' недоступен'}
     </summary>
     <div className="diagnostic-facts">
-      <span>Ingress принято: <strong>{value.ingressAvailable
+      <span>Глобально · ingress принято: <strong>{value.ingressAvailable
         ? value.ingress.runtime.acceptedDatagrams.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>Ingress передано: <strong>{value.ingressAvailable
+      <span>Глобально · ingress передано: <strong>{value.ingressAvailable
         ? value.ingress.runtime.handedOff.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>Ingress spool: <strong>{value.ingressAvailable
+      <span>Глобально · ingress spool: <strong>{value.ingressAvailable
         ? value.ingress.spoolDepth.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>Ошибок handoff: <strong>{value.ingressAvailable
+      <span>Глобально · ошибок handoff: <strong>{value.ingressAvailable
         ? value.ingress.runtime.handoffErrors.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>App принято: <strong>{value.runtime.acceptedDatagrams.toLocaleString('ru-RU')}</strong></span>
-      <span>App отклонено: <strong>{value.runtime.rejectedDatagrams.toLocaleString('ru-RU')}</strong></span>
-      <span>App spool: <strong>{value.spoolDepth.toLocaleString('ru-RU')}</strong></span>
-      <span>NATS stream: <strong>{value.natsStreamMessages.toLocaleString('ru-RU')}</strong></span>
-      <span>NATS pending: <strong>{value.natsConsumerPending.toLocaleString('ru-RU')}</strong></span>
-      <span>Quarantine: <strong>{value.quarantineDepth.toLocaleString('ru-RU')}</strong></span>
+      <span>Глобально · app принято: <strong>{value.runtime.acceptedDatagrams.toLocaleString('ru-RU')}</strong></span>
+      <span>Глобально · app отклонено: <strong>{value.runtime.rejectedDatagrams.toLocaleString('ru-RU')}</strong></span>
+      <span>Глобально · app spool: <strong>{value.spoolDepth.toLocaleString('ru-RU')}</strong></span>
+      <span>Глобально · NATS stream: <strong>{value.natsStreamMessages.toLocaleString('ru-RU')}</strong></span>
+      <span>Глобально · NATS pending: <strong>{value.natsConsumerPending.toLocaleString('ru-RU')}</strong></span>
+      <span>Глобально · quarantine: <strong>{value.quarantineDepth.toLocaleString('ru-RU')}</strong></span>
       <span>Classified, 24 ч: <strong>{value.classified24h.toLocaleString('ru-RU')} / {value.rawEvents24h.toLocaleString('ru-RU')}</strong></span>
       <span>Reprocess current: <strong>{value.reprocessedCurrent.toLocaleString('ru-RU')}</strong></span>
       <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
@@ -837,6 +842,7 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
   const [form, setForm] = useState({
     name: '', model: 'SMG-1016M', firmware: '3.410.0.7443', timezone: 'Asia/Novosibirsk',
     managementIp: '', syslogSourceIp: '', deviceSign: '', antifraudEnabled: true, antifraudMode: 'Custom',
+    cdrColumnsText: '',
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -845,8 +851,11 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
     event.preventDefault()
     setBusy(true)
     try {
+      const { cdrColumnsText, ...deviceForm } = form
       const device = await api<Device>('/devices', {
-        method: 'POST', body: JSON.stringify({ ...form, cdrColumns: [] }),
+        method: 'POST', body: JSON.stringify({
+          ...deviceForm, cdrColumns: parseCDRColumns(cdrColumnsText),
+        }),
       })
       onCreated(device)
     } catch (reason) {
@@ -865,6 +874,10 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
         <label>Прошивка<input required value={form.firmware} onChange={(e) => update('firmware', e.target.value)} /></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
+        <label className="full-width">Профиль колонок CDR (для файлов без заголовка)
+          <textarea placeholder="Device sign; Setup time; Connect time; ..."
+            value={form.cdrColumnsText} onChange={(e) => update('cdrColumnsText', e.target.value)} />
+        </label>
         <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
           onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
         <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled} value={form.antifraudMode}
@@ -889,6 +902,7 @@ function EditDeviceDialog({ device, onClose, onSaved }: {
     managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp,
     deviceSign: device.deviceSign, antifraudEnabled: device.antifraudEnabled,
     antifraudMode: device.antifraudMode, enabled: device.enabled,
+    cdrColumnsText: (device.cdrColumns || []).join('; '),
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -899,8 +913,11 @@ function EditDeviceDialog({ device, onClose, onSaved }: {
     setBusy(true)
     setError('')
     try {
+      const { cdrColumnsText, ...deviceForm } = form
       onSaved(await api<Device>(`/devices/${device.id}`, {
-        method: 'PATCH', body: JSON.stringify(form),
+        method: 'PATCH', body: JSON.stringify({
+          ...deviceForm, cdrColumns: parseCDRColumns(cdrColumnsText),
+        }),
       }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Ошибка сохранения')
@@ -923,6 +940,10 @@ function EditDeviceDialog({ device, onClose, onSaved }: {
           onChange={(e) => update('firmware', e.target.value)} /></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
+        <label className="full-width">Профиль колонок CDR (для файлов без заголовка)
+          <textarea placeholder="Device sign; Setup time; Connect time; ..."
+            value={form.cdrColumnsText} onChange={(e) => update('cdrColumnsText', e.target.value)} />
+        </label>
         <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
           onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
         <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled}
@@ -952,6 +973,10 @@ function CredentialsDialog({ device, onClose }: { device: Device; onClose: () =>
     </dl>
     <div className="dialog-actions"><button className="primary" onClick={onClose}>Готово</button></div>
   </Modal>
+}
+
+function parseCDRColumns(value: string) {
+  return value.split(/[\n;,]+/).map((column) => column.trim()).filter(Boolean)
 }
 
 const primaryTimezones = [

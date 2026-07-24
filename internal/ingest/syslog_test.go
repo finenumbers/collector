@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"collector/internal/analytics"
+
 	"github.com/google/uuid"
 )
 
@@ -23,6 +25,66 @@ func TestParseEltexSyslog(t *testing.T) {
 	}
 	if event.ParseStatus != "parsed" || event.EventTime == nil {
 		t.Fatalf("trace envelope not parsed: %#v", event)
+	}
+}
+
+func TestParseEltexTraceContinuations(t *testing.T) {
+	deviceID := uuid.New()
+	receivedAt := time.Date(2026, 7, 24, 16, 8, 10, 0, time.UTC)
+	tests := []struct {
+		payload string
+		kind    string
+		key     string
+		value   string
+	}{
+		{`<14> <smg1016m> 16:08:10.545 [INFO] # requestID 05b7`, "requestid", "request_id", "05b7"},
+		{`<14> <smg1016m> 16:08:10.545 [INFO] # trunkID 02`, "trunkid", "trunk_id", "02"},
+		{`<14> <smg1016m> 16:08:10.546 [INFO] # Keep alive type '0'`, "keep_alive_type", "keep_alive_type", "0"},
+		{`<14> <smg1016m> 16:08:10.610 [INFO] # cause 200`, "cause", "cause", "200"},
+	}
+	for _, test := range tests {
+		event := ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: receivedAt,
+			SourceIP: "5.227.161.181", SourcePort: 10003, Payload: []byte(test.payload),
+		})
+		if event.Category != "call_trace" || event.ParseStatus != "parsed" {
+			t.Fatalf("%q classified as %#v", test.payload, event)
+		}
+		if event.Attributes["trace_continuation"] != "true" ||
+			event.Attributes["continuation_type"] != test.kind ||
+			event.Attributes[test.key] != test.value {
+			t.Fatalf("%q attributes: %#v", test.payload, event.Attributes)
+		}
+	}
+}
+
+func TestContinuationAssemblerIsDeviceScopedAndConservative(t *testing.T) {
+	firstDevice, secondDevice := uuid.New(), uuid.New()
+	start := time.Date(2026, 7, 24, 16, 8, 10, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: firstDevice, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m> 16:08:10.500 [INFO] RADIUS. Access-Request`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: secondDevice, ReceivedAt: start.Add(10 * time.Millisecond),
+			SourceIP: "5.227.161.188",
+			Payload:  []byte(`<14> <smg1016m> 16:08:10.510 [INFO] # requestID 05b7`),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: firstDevice, ReceivedAt: start.Add(20 * time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m> 16:08:10.520 [INFO] # requestID 05b7`),
+		}),
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[1].Category != "call_trace" || events[1].Attributes["parent_event_id"] != "" {
+		t.Fatalf("second device inherited foreign context: %#v", events[1])
+	}
+	if events[2].Category != "radius" ||
+		events[2].Attributes["parent_event_id"] != events[0].EventID.String() {
+		t.Fatalf("same-device RADIUS continuation was not assembled: %#v", events[2])
 	}
 }
 

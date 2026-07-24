@@ -9,8 +9,9 @@
 
 - изолированная регистрация нескольких SMG по IP-источнику Syslog и отдельной FTP-учётной записи;
 - host-network UDP ingress с сохранением реального source IP/port, отдельным durable handoff spool, JetStream без silent eviction, DLQ/quarantine и сохранением исходного payload;
-- parser `smg-3.410-v6`: Eltex trace/RFC3164 envelope, все документированные
-  alarm/calls/SIPT/ISUP/Q.931/H.323/RTP/HW/MSP/SMVP/RADIUS/IVR/IPNET и системные журналы;
+- parser `smg-3.410-v7`: Eltex trace/RFC3164 envelope, контекстные `# requestID`/
+  `trunkID`/`Keep alive`/`cause` continuations, все документированные alarm/calls/
+  SIPT/ISUP/Q.931/H.323/RTP/HW/MSP/SMVP/RADIUS/IVR/IPNET и системные журналы;
 - приём CDR через SFTPGo FTP, неизменяемый raw-архив MinIO, UTF-8/Windows-1251 и динамический порядок колонок;
 - нормализация полного CDR, включая Acct-Session-Id, UniqueTag, SIP Call-ID, GCR, CIC и исходные поля;
 - stateful сборка RADIUS AntiFraud request/reply/accounting lifecycle с
@@ -60,7 +61,9 @@ Production Compose намеренно использует только `ghcr.io
 ## Настройка SMG
 
 1. В `Трассировки → SYSLOG` укажите `PUBLIC_HOST`, UDP-порт `514`, включите нужные категории. Для длительного мониторинга Eltex рекомендует уровень `1`; `99` используйте только контролируемо.
-2. В CDR включите строку имён полей и полный набор полей. Укажите FTP `PUBLIC_HOST:21`, выданные логин/пароль и каталог `/`.
+2. В CDR включите строку имён полей и полный набор полей. Если заголовок отключён,
+   сохраните ordered profile колонок в карточке SMG. `Device Sign` файла проверяется
+   против карточки устройства. Укажите FTP `PUBLIC_HOST:21`, выданные логин/пароль и каталог `/`.
 3. Настройте NTP и корректный timezone на шлюзе. Значение timezone также задаётся в карточке устройства.
 4. Ограничьте доступ к портам `514/udp`, `21/tcp` и `50000-50100/tcp` management-сетью SMG. Host port `514/udp` должен быть свободен от rsyslog/syslog-ng.
 

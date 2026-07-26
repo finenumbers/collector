@@ -1,9 +1,9 @@
 # Словарь данных SMG-1016M
 
 Collector поддерживает две схемы обработки прошивки SMG-1016M: **`3.23.2`** и **`3.410`**.
-Поле `devices.firmware` хранит именно схему (не полный build-number). Syslog, RADIUS и
-АнтиФрод пока разбираются общим парсером для обеих схем; отличается встроенный профиль
-колонок CDR.
+Поле `devices.firmware` хранит именно схему (не полный build-number). Syslog использует
+общий parser core и явный dialect profile из `template_key`; RADIUS/АнтиФрод используют
+общую семантическую модель. Встроенные профили колонок CDR также различаются по схеме.
 
 ## Источники и ingest ledger
 
@@ -11,20 +11,17 @@ Collector поддерживает две схемы обработки прош
 `devices.template_key` является authoritative parser/archive contract; доступные
 шаблоны публикует `GET /api/equipment-templates`. Для оборудования используются
 `eltex-smg-1016m-3.410` и `eltex-smg-1016m-3.23.2`;
-`softswitch-cdr-raw-v1` архивирует файл без интерпретации, а
-`satel-rtu-cdr-v1` (`Satel RTU`) включает отдельный typed CDR parser.
+`satel-rtu-cdr-v1` (`Satel RTU`) — единственный шаблон софтсвитча и включает
+отдельный typed CDR parser.
 
 `ingest_files` хранит device-scoped SHA-256, исходное имя, размер, MinIO object key,
-времена, состояние и применённые parser template/version. `archived` означает, что
-raw-only объект надёжно записан в MinIO и не передавался в аналитический pipeline.
-При выборе typed template архивированные объекты ставятся в durable replay; список и
-скачивание всегда проверяют одновременно `device_id` и `file_id`.
+времена, состояние и применённые parser template/version. Durable replay повторно
+обрабатывает сохранённый immutable object; список и скачивание всегда проверяют
+одновременно `device_id` и `file_id`.
 
-`devices.detection_*` хранит состояние (`not_checked`, `no_samples`, `mixed`, `error`,
-`activated`), точный SHA-256 fingerprint нормализованного header set и timestamps
-автоматического определения. `ingest_files.replay_*` хранит durable очередь,
-parser/version, attempts и ошибку отдельного архива. Автоактивация Satel требует
-одинакового точного 120-column fingerprint в последних immutable samples.
+`devices.detection_*` сохранены для совместимости с ранее записанным provenance.
+`ingest_files.replay_*` хранит durable очередь, parser/version, attempts и ошибку
+отдельного архива.
 
 `retention_policies.cdr` задаёт TTL typed CDR оборудования;
 `retention_policies.softswitch_cdr` независимо задаёт TTL таблиц
@@ -46,8 +43,10 @@ UTC RFC3339 и локальный RFC3339 с offset. UI не зависит от
 
 ## Нормативные источники
 
-- Eltex «SMG-1016M/2016/3016/3116. Руководство пользователя» (ветки ПО 3.23 / 3.410),
-  разделы Syslog и CDR;
+- Eltex «SMG-1016M/2016/3016. Руководство пользователя, версия ПО 3.23.2»,
+  разделы трассировок, параметров Syslog, RADIUS и CDR;
+- Eltex Documentation «3.410.0 Цифровые шлюзы SMG-1016M/2016/3016/3116»,
+  разделы конфигурирования, трассировок, Syslog и CDR;
 - Eltex «Подключение шлюзов SMG к ИС АнтиФрод по протоколу RADIUS»;
 - официальный Eltex RADIUS dictionary.
 
@@ -122,8 +121,10 @@ vendor metadata и не определяет успешность — напри
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Parser `smg-3.410-v13` (имя историческое; правила Syslog **общие** для схем прошивки
-`3.23.2` и `3.410`) использует **component-first** классификацию: `SIP` / `SIPT[…]` /
+Parser `eltex-smg-syslog-v14` использует общий envelope/classification core и сохраняет
+`firmware_scheme`, `template_key` и `classification_result` в provenance. Dialect profiles
+`3.23.2` и `3.410` ограничивают firmware-specific continuation. Core использует
+**component-first** классификацию: `SIP` / `SIPT[…]` /
 `SIPT Proc` / `Port SIPT` / `PBXIPC-SIP` остаются в `sip` даже при тексте
 `IAM-`/`ISUP`/`SS7` (SIP-I/SIP-T). Keyword `ISUP`/`IAM-` применяется только когда
 SIP-компонент не распознан.
@@ -142,7 +143,8 @@ Envelope:
 
 Диалект 3.410 (bare SDP без обёртки `##` 3.23.2):
 
-- строки `v=`/`o=`/`s=`/`t=`/`c=`/`m=`/`a=` → `sip`, `fragment_kind=sdp_line`;
+- допустимые RFC 4566 строки, включая `v=`/`o=`/`s=`/`c=`/`b=`/`t=`/`m=`/`a=`,
+  → `sip`, `fragment_kind=sdp_line`; `b=AS:82` является bandwidth field;
 - обрывок `'` после `# SDP len (N): 'v=0` → `sip`, `fragment_kind=sdp_quote`;
 - `\t\t 95.163.183.222` (HostIPlist) → `sip`, `fragment_kind=host_ip`.
 

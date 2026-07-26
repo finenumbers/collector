@@ -71,8 +71,9 @@ var (
 	digestLabelPat      = regexp.MustCompile(`(?i)^(Reply|Calculated|Calculating)\s+digest\b`)
 	// Bare IPv4 lines from SIP HostIPlist / addr-list dumps (often tab-indented).
 	ipv4OnlyPattern = regexp.MustCompile(`^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$`)
-	// 3.410 bare SDP lines (no ## prefix), often after `# SDP len (N): 'v=0`.
-	sdpLinePattern  = regexp.MustCompile(`(?i)^[vostcma]=`)
+	// 3.410 bare RFC 4566 SDP fields (no ## prefix), often after `# SDP len (N): 'v=0`.
+	// In particular, b= carries bandwidth information such as `b=AS:82`.
+	sdpLinePattern  = regexp.MustCompile(`(?i)^[vosiuepcbtrzkam]=`)
 	sdpQuotePattern = regexp.MustCompile(`^'`)
 	configLinePat   = regexp.MustCompile(`(?i)^CONFIG:\s*(.*)$`)
 	siptProcPattern = regexp.MustCompile(`(?i)^SIPT\s+Proc\b`)
@@ -97,6 +98,37 @@ type RawSyslog struct {
 	Payload          []byte    `json:"payload"`
 	Timezone         string    `json:"timezone,omitempty"`
 	TimezoneRevision uint64    `json:"timezoneRevision,omitempty"`
+	TemplateKey      string    `json:"templateKey,omitempty"`
+	Firmware         string    `json:"firmware,omitempty"`
+}
+
+const (
+	syslogDialect3232   = "3.23.2"
+	syslogDialect3410   = "3.410"
+	syslogDialectLegacy = "legacy-common"
+)
+
+func syslogDialect(raw RawSyslog) string {
+	switch raw.TemplateKey {
+	case "eltex-smg-1016m-3.23.2":
+		return syslogDialect3232
+	case "eltex-smg-1016m-3.410":
+		return syslogDialect3410
+	}
+	switch raw.Firmware {
+	case syslogDialect3232:
+		return syslogDialect3232
+	case syslogDialect3410:
+		return syslogDialect3410
+	default:
+		return syslogDialectLegacy
+	}
+}
+
+func allows3410Dialect(dialect string) bool {
+	// Legacy envelopes predate template provenance; preserve their historical
+	// superset behavior so replay never loses already recognized messages.
+	return dialect != syslogDialect3232
 }
 
 type continuationParent struct {
@@ -600,6 +632,8 @@ func RunSyslogWorker(
 				}
 				raw.Timezone = cached.config.ActiveTimezone
 				raw.TimezoneRevision = uint64(cached.config.ActiveTimezoneRevision)
+				raw.TemplateKey = cached.config.TemplateKey
+				raw.Firmware = cached.config.Firmware
 			}
 			event := ParseSyslog(raw)
 			parsed = append(parsed, parsedMessage{message: message, event: event})
@@ -739,6 +773,11 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		Message: text, Attributes: map[string]string{}, SourceTimezone: location.String(),
 		TimezoneRevision: raw.TimezoneRevision,
 	}
+	dialect := syslogDialect(raw)
+	event.Attributes["firmware_scheme"] = dialect
+	if raw.TemplateKey != "" {
+		event.Attributes["template_key"] = raw.TemplateKey
+	}
 	if event.TimezoneRevision == 0 {
 		event.TimezoneRevision = 1
 	}
@@ -796,7 +835,7 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		event.Component = component
 		event.Message = rest
 	}
-	extractTraceContinuation(&event)
+	extractTraceContinuation(&event, dialect)
 	if strings.TrimSpace(event.Message) == "" && event.Attributes["call_context"] != "" {
 		event.Attributes["empty_body"] = "true"
 		if event.Attributes["trace_continuation"] == "" {
@@ -804,7 +843,10 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 			event.Attributes["fragment_kind"] = "empty"
 		}
 	}
-	event.Category = classify(event.Component, event.Attributes["application"], event.Message, string(raw.Payload))
+	event.Category = classify(
+		event.Component, event.Attributes["application"], event.Message, string(raw.Payload), dialect,
+	)
+	event.Attributes["classification_result"] = event.Category
 	if event.Category == "radius" {
 		extractRadiusAttributes(text, &event)
 	}
@@ -819,7 +861,7 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 	return event
 }
 
-func classify(component, application, message, payload string) string {
+func classify(component, application, message, payload, dialect string) string {
 	upperComponent := strings.ToUpper(strings.TrimSpace(component))
 	upperApplication := strings.ToUpper(strings.TrimSpace(application))
 	upperMessage := strings.ToUpper(strings.TrimSpace(message))
@@ -836,10 +878,12 @@ func classify(component, application, message, payload string) string {
 		upperComponent == "WEBS" || upperComponent == "SEC" ||
 		systemAppPattern.MatchString(payload) || systemBodyPattern.MatchString(message):
 		return "system_journal"
-	case isBareSDPLine(trimmedMessage):
+	case allows3410Dialect(dialect) && isBareSDPLine(trimmedMessage):
 		return "sip"
-	case isIsupDumpFragment(trimmedMessage):
+	case allows3410Dialect(dialect) && isIsupDumpFragment(trimmedMessage):
 		return "isup"
+	case upperComponent == "CONFIG":
+		return "config_history"
 	case sipComponent && (strings.Contains(upperMessage, "ANTIFRAUD") ||
 		strings.Contains(upperMessage, "RADIUS:") || strings.Contains(upperMessage, "RADIUS ")):
 		return "radius"
@@ -850,7 +894,8 @@ func classify(component, application, message, payload string) string {
 		strings.Contains(upperMessage, "ACCT-SESSION-ID") ||
 		strings.Contains(upperMessage, "XPGK-") ||
 		radiusAttribute.MatchString(trimmedMessage) ||
-		(!isBareSDPLine(trimmedMessage) && avpLinePattern.MatchString(trimmedMessage)) ||
+		(!(allows3410Dialect(dialect) && isBareSDPLine(trimmedMessage)) &&
+			avpLinePattern.MatchString(trimmedMessage)) ||
 		strings.Contains(upperMessage, "ANTIFRAUD"):
 		return "radius"
 	case upperComponent == "SS7" || upperComponent == "ISUP" || upperComponent == "SS7/ISUP" ||
@@ -900,16 +945,16 @@ func classify(component, application, message, payload string) string {
 		return "config_history"
 	case strings.Contains(upperBody, "AUTHLOG") || upperComponent == "AUTH":
 		return "auth_log"
-	case strings.HasPrefix(eventCallContext(payload), "C") || callPattern.MatchString(upperBody):
-		return "call_trace"
 	case strings.Contains(upperMessage, "SDP LEN") ||
 		strings.HasPrefix(trimmedMessage, "# SDP") ||
 		strings.HasPrefix(trimmedMessage, "##"):
 		return "sip"
+	case strings.HasPrefix(eventCallContext(payload), "C") || callPattern.MatchString(upperBody):
+		return "call_trace"
 	case strings.HasPrefix(trimmedMessage, "#") ||
 		codecLinePattern.MatchString(trimmedMessage):
 		return "call_trace"
-	case ipv4OnlyPattern.MatchString(trimmedMessage):
+	case allows3410Dialect(dialect) && ipv4OnlyPattern.MatchString(trimmedMessage):
 		// SIP HostIPlist / Interface addr-list continuation lines.
 		return "sip"
 	case upperApplication != "":
@@ -1019,7 +1064,7 @@ func markTraceContinuation(event *analytics.SyslogEvent, kind string) {
 	event.Attributes["fragment_kind"] = kind
 }
 
-func extractTraceContinuation(event *analytics.SyslogEvent) {
+func extractTraceContinuation(event *analytics.SyslogEvent, dialect string) {
 	rawMessage := event.Message
 	trimmed := strings.TrimSpace(rawMessage)
 	indented := trimmed != "" && len(rawMessage) > 0 &&
@@ -1050,13 +1095,13 @@ func extractTraceContinuation(event *analytics.SyslogEvent) {
 		markTraceContinuation(event, "hash_detail")
 	case codecLinePattern.MatchString(trimmed):
 		markTraceContinuation(event, "codec")
-	case sdpLinePattern.MatchString(trimmed):
+	case allows3410Dialect(dialect) && sdpLinePattern.MatchString(trimmed):
 		markTraceContinuation(event, "sdp_line")
-	case trimmed == "'" || sdpQuotePattern.MatchString(trimmed):
+	case allows3410Dialect(dialect) && (trimmed == "'" || sdpQuotePattern.MatchString(trimmed)):
 		markTraceContinuation(event, "sdp_quote")
-	case noOptionalParamsPat.MatchString(trimmed):
+	case allows3410Dialect(dialect) && noOptionalParamsPat.MatchString(trimmed):
 		markTraceContinuation(event, "isup_optional")
-	case dottedHexPattern.MatchString(trimmed):
+	case allows3410Dialect(dialect) && dottedHexPattern.MatchString(trimmed):
 		markTraceContinuation(event, "dotted_hex")
 	case hexOnlyPattern.MatchString(strings.ReplaceAll(trimmed, " ", "")):
 		markTraceContinuation(event, "hex")
@@ -1066,7 +1111,7 @@ func extractTraceContinuation(event *analytics.SyslogEvent) {
 		markTraceContinuation(event, "avp")
 	case strings.EqualFold(event.Component, "rc"):
 		markTraceContinuation(event, "rc_fragment")
-	case ipv4OnlyPattern.MatchString(trimmed):
+	case allows3410Dialect(dialect) && ipv4OnlyPattern.MatchString(trimmed):
 		markTraceContinuation(event, "host_ip")
 		event.Attributes["host_ip"] = trimmed
 	case indented:

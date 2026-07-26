@@ -122,11 +122,15 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		_ = rows.Close()
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT device_id,count(),countIf(decision='reject'),
-		countIf(completeness!='complete')
-		FROM collector.antifraud_transactions FINAL
-		WHERE is_antifraud=1 AND last_event_at>=now()-toIntervalSecond(?)
-		GROUP BY device_id`, seconds)
+	rows, err = c.Conn.Query(ctx, `SELECT l.device_id,count(),countIf(l.decision='reject'),
+		countIf(l.completeness!='complete')
+		FROM collector.antifraud_lifecycles AS l FINAL
+		INNER JOIN (
+			SELECT device_id,maxIf(revision,status='active') AS revision
+			FROM collector.device_derived_revisions FINAL GROUP BY device_id
+		) AS d ON d.device_id=l.device_id AND d.revision=l.timezone_revision
+		WHERE l.is_antifraud=1 AND l.last_event_at>=now()-toIntervalSecond(?)
+		GROUP BY l.device_id`, seconds)
 	if err != nil {
 		result.Diagnostics = append(result.Diagnostics, "antifraud: "+err.Error())
 	} else {

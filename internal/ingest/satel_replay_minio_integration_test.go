@@ -50,7 +50,7 @@ func TestSatelArchiveReplayWithMinIO(t *testing.T) {
 	device, err := control.CreateDevice(ctx, store.NewDevice{
 		Name:           "minio-replay-" + uuid.NewString(),
 		SourceCategory: equipment.CategorySoftswitch,
-		TemplateKey:    equipment.TemplateSoftswitchRawV1,
+		TemplateKey:    equipment.TemplateSatelRTUCDRV1,
 		Timezone:       "Europe/Moscow",
 	}, actor, "127.0.0.1")
 	if err != nil {
@@ -79,16 +79,14 @@ func TestSatelArchiveReplayWithMinIO(t *testing.T) {
 	}
 	if err := control.CompleteIngestFileWithParser(
 		ctx, claim.ID, "archived", 0, 0, "",
-		equipment.TemplateSoftswitchRawV1, "raw-archive-v1",
+		equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion,
 	); err != nil {
 		t.Fatal(err)
 	}
-	device, err = control.UpdateDevice(ctx, device.ID, store.DeviceUpdate{
-		Name: device.Name, SourceCategory: equipment.CategorySoftswitch,
-		TemplateKey: equipment.TemplateSatelRTUCDRV1,
-		Timezone:    "Europe/Moscow", Enabled: true,
-	}, actor, "127.0.0.1")
-	if err != nil {
+	if _, err := control.DB.Exec(ctx, `UPDATE ingest_files SET replay_state='pending',
+		replay_template=$2,replay_version=$3,replay_requested_at=now()
+		WHERE id=$1`, claim.ID, equipment.TemplateSatelRTUCDRV1,
+		equipment.SatelRTUParserVersion); err != nil {
 		t.Fatal(err)
 	}
 	warehouse := &countingCDRAnalytics{}

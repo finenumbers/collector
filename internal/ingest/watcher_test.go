@@ -72,20 +72,6 @@ func (client *countingCDRAnalytics) InsertCDRBatch(
 	return nil
 }
 
-func TestRawSoftswitchNeverCallsAnalytics(t *testing.T) {
-	template, err := equipment.Resolve(equipment.TemplateSoftswitchRawV1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &countingCDRAnalytics{}
-	if err := insertCDRForTemplate(context.Background(), template, client, nil); err != nil {
-		t.Fatal(err)
-	}
-	if client.calls != 0 {
-		t.Fatalf("raw archive made %d analytics calls", client.calls)
-	}
-}
-
 func TestTypedTemplateCallsAnalytics(t *testing.T) {
 	template, err := equipment.Resolve(equipment.TemplateEltex3410)
 	if err != nil {
@@ -140,7 +126,7 @@ func TestSatelArchiveReplayRestartAndPartialQuarantine(t *testing.T) {
 	})
 	device, err := control.CreateDevice(ctx, store.NewDevice{
 		Name: "replay-" + uuid.NewString(), SourceCategory: equipment.CategorySoftswitch,
-		TemplateKey: equipment.TemplateSoftswitchRawV1, Timezone: "UTC",
+		TemplateKey: equipment.TemplateSatelRTUCDRV1, Timezone: "UTC",
 	}, actor, "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
@@ -175,25 +161,17 @@ func TestSatelArchiveReplayRestartAndPartialQuarantine(t *testing.T) {
 		}
 		if err := control.CompleteIngestFileWithParser(
 			ctx, claim.ID, "archived", 0, 0, "",
-			equipment.TemplateSoftswitchRawV1, "raw-archive-v1",
+			equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion,
 		); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := control.DB.Exec(ctx, `UPDATE ingest_files SET replay_state='pending',
+			replay_template=$2,replay_version=$3,replay_requested_at=now()
+			WHERE id=$1`, claim.ID, equipment.TemplateSatelRTUCDRV1,
+			equipment.SatelRTUParserVersion); err != nil {
+			t.Fatal(err)
+		}
 		fileIDs = append(fileIDs, claim.ID)
-	}
-	if err := reconcileRawSatelTemplates(ctx, control, memoryArchive); err != nil {
-		t.Fatal(err)
-	}
-	if err := reconcileRawSatelTemplates(ctx, control, memoryArchive); err != nil {
-		t.Fatal(err)
-	}
-	device, err = control.Device(ctx, device.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 ||
-		device.DetectionStatus != "activated" || device.DetectionFingerprint == "" {
-		t.Fatalf("raw source was not auto-detected: %#v", device)
 	}
 	progress, err := control.DeviceIngestReplayProgress(ctx, device.ID)
 	if err != nil {

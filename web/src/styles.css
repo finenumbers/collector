@@ -67,11 +67,12 @@ button:disabled { opacity: .55; cursor: wait; }
   font-size: 12px; margin-bottom: 12px; }
 
 .workspace { height: 100%; display: grid; grid-template-columns: 226px minmax(0, 1fr); }
-.sidebar { display: flex; flex-direction: column; min-height: 0; overflow-y: auto;
+.sidebar { display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   background: #f8fafc; border-right: 1px solid var(--line); }
 .brand { height: 48px; display: flex; align-items: center; padding: 4px 12px;
-  border-bottom: 1px solid var(--line); width: 100%; text-align: left; border-radius: 0; }
+  flex: none; border-bottom: 1px solid var(--line); width: 100%; text-align: left; border-radius: 0; }
 .brand img { display: block; width: 100%; height: 38px; object-fit: contain; object-position: left center; background: transparent; }
+.sidebar-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .side-section-label { padding: 14px 13px 6px; color: #7b8798; font-weight: 700; font-size: 9px; letter-spacing: .12em; }
 .device-list { padding: 0 7px 8px; border-bottom: 1px solid var(--line); }
 .device-button { width: 100%; display: flex; align-items: center; gap: 9px;
@@ -87,14 +88,15 @@ button:disabled { opacity: .55; cursor: wait; }
 .add-device { display: flex; align-items: center; gap: 7px; width: 100%;
   min-height: var(--control-height); padding: 0 8px; color: var(--muted); }
 .add-device:hover { color: var(--accent); }
-.device-nav { min-height: 0; overflow-y: auto; padding: 7px; }
+.device-nav { padding: 7px; border-bottom: 1px solid var(--line); }
 .device-nav button { display: flex; align-items: center; gap: 8px; width: 100%;
   min-height: var(--control-height); padding: 0 8px; text-align: left; color: #475467; }
 .device-nav button:hover { color: var(--text); background: #eef2f7; }
 .device-nav button.active { color: #174ea6; background: var(--accent-soft); }
 .device-nav svg { color: #7b8798; }
 .device-nav button.active svg { color: var(--accent); }
-.sidebar-footer { margin-top: auto; border-top: 1px solid var(--line); padding: 7px; }
+.sidebar-footer { flex: none; margin-top: auto; border-top: 1px solid var(--line);
+  padding: 7px; background: #f8fafc; }
 .sidebar-footer > button { display: flex; align-items: center; gap: 8px; width: 100%;
   min-height: var(--control-height); padding: 0 8px; color: var(--muted); }
 .sidebar-footer > button.active { color: #174ea6; background: var(--accent-soft); }

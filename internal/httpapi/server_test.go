@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -9,12 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"collector/internal/analytics"
 	"collector/internal/config"
 	"collector/internal/store"
 
 	"github.com/google/uuid"
+	"github.com/xuri/excelize/v2"
 )
 
 func TestRevisionDiagnosticsAreIncludedInAPIResponse(t *testing.T) {
@@ -78,7 +81,6 @@ func TestEquipmentTemplatesAPIUsesStableLabels(t *testing.T) {
 		`"displayName":"Eltex SMG-1016M (3.410)"`,
 		`"key":"eltex-smg-1016m-3.23.2"`,
 		`"displayName":"Eltex SMG-1016M (3.23.2)"`,
-		`"key":"softswitch-cdr-raw-v1"`,
 		`"key":"satel-rtu-cdr-v1"`,
 		`"displayName":"Satel RTU"`,
 	} {
@@ -121,6 +123,135 @@ func TestParsePageLimitIsBounded(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/?limit="+value, nil)
 		if got := parsePageLimit(request); got != want {
 			t.Fatalf("limit %q = %d, want %d", value, got, want)
+		}
+	}
+}
+
+func TestExportRequestValidation(t *testing.T) {
+	valid := map[string]exportRequest{
+		"?dataset=calls":                          {Dataset: "calls"},
+		"?dataset=antifraud&q=test":               {Dataset: "antifraud", Search: "test"},
+		"?dataset=events&category=all":            {Dataset: "events", Category: "all"},
+		"?dataset=events&category=system_journal": {Dataset: "events", Category: "system_journal"},
+	}
+	for query, want := range valid {
+		request := httptest.NewRequest(http.MethodGet, "/export.xlsx"+query, nil)
+		got, err := parseExportRequest(request.URL.Query())
+		if err != nil || got != want {
+			t.Fatalf("%s: got %#v, %v; want %#v", query, got, err, want)
+		}
+	}
+	for _, query := range []string{
+		"", "?dataset=invalid", "?dataset=events", "?dataset=events&category=calls",
+		"?dataset=calls&category=all", "?dataset=antifraud&category=radius",
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/export.xlsx"+query, nil)
+		if _, err := parseExportRequest(request.URL.Query()); err == nil {
+			t.Fatalf("%s was accepted", query)
+		}
+	}
+}
+
+func TestExportRejectsInvalidRequestBeforeDependencies(t *testing.T) {
+	response := httptest.NewRecorder()
+	(&Server{}).exportXLSX(
+		response,
+		httptest.NewRequest(http.MethodGet, "/export.xlsx?dataset=bogus", nil),
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestExportScalarDereferencesPointersAndFormatsUUID(t *testing.T) {
+	number := uint64(42)
+	timestamp := time.Date(2026, time.July, 26, 10, 0, 0, 0, time.UTC)
+	id := uuid.MustParse("7845e6d4-b8f1-4d0f-a8d4-c527f6868d02")
+	var missing *uint64
+	if got := exportScalar(missing); got != "" {
+		t.Fatalf("nil pointer exported as %#v", got)
+	}
+	if got := exportScalar(&number); got != number {
+		t.Fatalf("numeric pointer exported as %#v", got)
+	}
+	if got := exportScalar(&timestamp); got != timestamp {
+		t.Fatalf("time pointer exported as %#v", got)
+	}
+	if got := exportScalar(id); got != id.String() {
+		t.Fatalf("UUID exported as %#v", got)
+	}
+}
+
+func TestExportWorkbookWritesScalarsAndRotatesSheets(t *testing.T) {
+	workbook, err := newExportWorkbook([]any{"ID", "Value"}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workbook.Close()
+	number := uint64(7)
+	var missing *uint64
+	for _, row := range [][]any{
+		{"00123", &number},
+		{"=1+1", missing},
+		{"third", uint16(9)},
+	} {
+		if err := workbook.AddRow(context.Background(), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := workbook.Finish(&output); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := excelize.OpenReader(bytes.NewReader(output.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parsed.Close()
+	if sheets := parsed.GetSheetList(); len(sheets) != 2 {
+		t.Fatalf("sheets=%v, want two sheets", sheets)
+	}
+	first, err := parsed.GetRows("Data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := parsed.GetRows("Data 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[1][0] != "00123" || first[1][1] != "7" || first[2][0] != "=1+1" {
+		t.Fatalf("unexpected first sheet: %#v", first)
+	}
+	if formula, err := parsed.GetCellFormula("Data", "A3"); err != nil || formula != "" {
+		t.Fatalf("identifier interpreted as formula: formula=%q err=%v", formula, err)
+	}
+	if len(second) != 2 || second[1][0] != "third" || workbook.totalRows != 3 {
+		t.Fatalf("unexpected second sheet or count: rows=%#v count=%d", second, workbook.totalRows)
+	}
+}
+
+func TestExportResponseMetadataAndFilename(t *testing.T) {
+	response := httptest.NewRecorder()
+	deviceID := uuid.MustParse("7845e6d4-b8f1-4d0f-a8d4-c527f6868d02")
+	setExportResponseHeaders(response, deviceID, exportRequest{
+		Dataset: "events", Category: "system_journal",
+	}, "eltex-smg-1016m-3.410", 123, time.Date(2026, 7, 26, 12, 34, 56, 0, time.UTC))
+	if got := response.Header().Get("X-Export-Dataset"); got != "events" {
+		t.Fatalf("dataset header=%q", got)
+	}
+	if got := response.Header().Get("X-Export-Category"); got != "system_journal" {
+		t.Fatalf("category header=%q", got)
+	}
+	if got := response.Header().Get("X-Export-Template"); got != "eltex-smg-1016m-3.410" {
+		t.Fatalf("template header=%q", got)
+	}
+	if got := response.Header().Get("X-Export-Rows"); got != "123" {
+		t.Fatalf("rows header=%q", got)
+	}
+	disposition := response.Header().Get("Content-Disposition")
+	for _, part := range []string{"events", "system_journal", "7845e6d4"} {
+		if !strings.Contains(disposition, part) {
+			t.Fatalf("Content-Disposition %q does not contain %q", disposition, part)
 		}
 	}
 }

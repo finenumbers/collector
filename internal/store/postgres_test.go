@@ -44,7 +44,7 @@ func TestCreateDeviceValidatesTemplateBeforeDatabase(t *testing.T) {
 			name: "category mismatch",
 			input: NewDevice{
 				Name: "source", SourceCategory: equipment.CategoryEquipment,
-				TemplateKey: equipment.TemplateSoftswitchRawV1, Timezone: "UTC",
+				TemplateKey: equipment.TemplateSatelRTUCDRV1, Timezone: "UTC",
 			},
 			want: "does not match",
 		},
@@ -52,7 +52,7 @@ func TestCreateDeviceValidatesTemplateBeforeDatabase(t *testing.T) {
 			name: "raw source rejects syslog",
 			input: NewDevice{
 				Name: "source", SourceCategory: equipment.CategorySoftswitch,
-				TemplateKey: equipment.TemplateSoftswitchRawV1, Timezone: "UTC",
+				TemplateKey: equipment.TemplateSatelRTUCDRV1, Timezone: "UTC",
 				SyslogSourceIP: "192.0.2.1",
 			},
 			want: "does not support",
@@ -61,7 +61,7 @@ func TestCreateDeviceValidatesTemplateBeforeDatabase(t *testing.T) {
 			name: "raw source requires timezone",
 			input: NewDevice{
 				Name: "source", SourceCategory: equipment.CategorySoftswitch,
-				TemplateKey: equipment.TemplateSoftswitchRawV1,
+				TemplateKey: equipment.TemplateSatelRTUCDRV1,
 			},
 			want: "timezone is required",
 		},

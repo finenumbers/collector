@@ -9,11 +9,10 @@ const (
 	CategoryEquipment  = "equipment"
 	CategorySoftswitch = "softswitch"
 
-	TemplateEltex3410       = "eltex-smg-1016m-3.410"
-	TemplateEltex3232       = "eltex-smg-1016m-3.23.2"
-	TemplateSoftswitchRawV1 = "softswitch-cdr-raw-v1"
-	TemplateSatelRTUCDRV1   = "satel-rtu-cdr-v1"
-	SatelRTUParserVersion   = "satel-rtu-cdr-v1"
+	TemplateEltex3410     = "eltex-smg-1016m-3.410"
+	TemplateEltex3232     = "eltex-smg-1016m-3.23.2"
+	TemplateSatelRTUCDRV1 = "satel-rtu-cdr-v1"
+	SatelRTUParserVersion = "satel-rtu-cdr-v1"
 )
 
 type Capabilities struct {
@@ -44,13 +43,6 @@ var registry = map[string]Template{
 		DisplayName: "Eltex SMG-1016M (3.23.2)",
 		Capabilities: Capabilities{
 			Syslog: true, TypedCDR: true, RawCDR: true, Antifraud: true, Radius: true,
-		},
-	},
-	TemplateSoftswitchRawV1: {
-		Key: TemplateSoftswitchRawV1, Category: CategorySoftswitch,
-		DisplayName: "Софтсвитч — CDR без разбора",
-		Capabilities: Capabilities{
-			RawCDR: true,
 		},
 	},
 	TemplateSatelRTUCDRV1: {

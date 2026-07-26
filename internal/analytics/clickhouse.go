@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const SyslogParserVersion = "smg-3.410-v13"
+const SyslogParserVersion = "eltex-smg-syslog-v14"
 
 type Client struct {
 	Conn            clickhouse.Conn

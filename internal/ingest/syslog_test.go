@@ -915,6 +915,75 @@ func TestUnrecognizedCorpus3410ISUPHasNoUnknown(t *testing.T) {
 	}
 }
 
+func TestFirmwareDialectClassifiesBareSDPBandwidth(t *testing.T) {
+	raw := RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "192.0.2.10", TemplateKey: "eltex-smg-1016m-3.410",
+		Payload: []byte(`<14> <smg1016m> 11:01:25.269949 [INFO] b=AS:82`),
+	}
+	event := ParseSyslog(raw)
+	if event.Category != "sip" || event.Attributes["fragment_kind"] != "sdp_line" ||
+		event.Attributes["firmware_scheme"] != "3.410" {
+		t.Fatalf("3.410 SDP bandwidth was not recognized: %#v", event)
+	}
+
+	raw.EventID = uuid.New()
+	raw.TemplateKey = "eltex-smg-1016m-3.23.2"
+	event = ParseSyslog(raw)
+	if event.Category != "unknown" || event.Attributes["fragment_kind"] != "" ||
+		event.Attributes["firmware_scheme"] != "3.23.2" {
+		t.Fatalf("3.23.2 accepted a bare 3.410 SDP fragment: %#v", event)
+	}
+}
+
+func TestFirmwareDialectKeepsWrappedSDPCommon(t *testing.T) {
+	for _, template := range []string{
+		"eltex-smg-1016m-3.23.2",
+		"eltex-smg-1016m-3.410",
+	} {
+		event := ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+			SourceIP: "192.0.2.10", TemplateKey: template,
+			Payload: []byte(`<14> <smg1016m> 11:01:25.269949 [INFO] [C42] ##b=AS:82`),
+		})
+		if event.Category != "sip" || event.Attributes["fragment_kind"] != "sdp" {
+			t.Fatalf("%s wrapped SDP was not recognized: %#v", template, event)
+		}
+	}
+}
+
+func TestConfigKeyValueTakesPriorityOverGenericAVP(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "192.0.2.10", TemplateKey: "eltex-smg-1016m-3.410",
+		Payload: []byte(`<14> <smg1016m> 11:01:25.269949 [INFO] CONFIG: mode=active`),
+	})
+	if event.Category != "config_history" {
+		t.Fatalf("CONFIG key=value was misclassified: %#v", event)
+	}
+}
+
+func FuzzParseSyslogDialectNeverPanics(f *testing.F) {
+	for _, seed := range []string{
+		`<14> <smg1016m> 11:01:25.269949 [INFO] b=AS:82`,
+		`<14> <smg1016m> 11:01:25.270000 [INFO] [C42] ##a=sendrecv`,
+		`<14> <smg1016m> 11:01:25.271000 [INFO] 01.02.03.04.05.06`,
+		`<14> <smg1016m> CONFIG: mode=active`,
+		`<134>Jul 26 11:01:25 webapp[42]: WEBS: request complete`,
+	} {
+		f.Add(seed, "eltex-smg-1016m-3.410")
+	}
+	f.Fuzz(func(t *testing.T, payload, template string) {
+		if len(payload) > 64<<10 {
+			t.Skip()
+		}
+		_ = ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+			SourceIP: "192.0.2.10", TemplateKey: template, Payload: []byte(payload),
+		})
+	})
+}
+
 func TestDottedHexAndNoOptionalParamsClassifyAsISUP(t *testing.T) {
 	deviceID := uuid.New()
 	start := time.Date(2026, 7, 25, 0, 6, 45, 0, time.UTC)

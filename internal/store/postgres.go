@@ -97,6 +97,8 @@ type DeviceTimeConfig struct {
 	ActiveTimezoneRevision int64  `json:"activeTimezoneRevision"`
 	Timezone               string `json:"timezone"`
 	TimezoneRevision       int64  `json:"timezoneRevision"`
+	TemplateKey            string `json:"templateKey"`
+	Firmware               string `json:"firmware"`
 }
 
 type NewDevice struct {
@@ -649,9 +651,10 @@ func (s *Store) DeviceTimeConfig(ctx context.Context, id uuid.UUID) (DeviceTimeC
 	var config DeviceTimeConfig
 	var purgeState string
 	err := s.DB.QueryRow(ctx, `SELECT active_timezone,active_timezone_revision,
-		timezone,timezone_revision,purge_state FROM devices WHERE id=$1`, id).
+		timezone,timezone_revision,template_key,firmware,purge_state FROM devices WHERE id=$1`, id).
 		Scan(&config.ActiveTimezone, &config.ActiveTimezoneRevision,
-			&config.Timezone, &config.TimezoneRevision, &purgeState)
+			&config.Timezone, &config.TimezoneRevision, &config.TemplateKey,
+			&config.Firmware, &purgeState)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DeviceTimeConfig{}, ErrNotFound
 	}
@@ -833,142 +836,6 @@ type IngestFileMetrics struct {
 	LatestAt *time.Time `json:"latestAt,omitempty"`
 }
 
-type ImmutableIngestObject struct {
-	ID         uuid.UUID
-	ObjectKey  string
-	SHA256     string
-	Status     string
-	ReceivedAt time.Time
-}
-
-func (s *Store) RecentImmutableIngestObjects(
-	ctx context.Context, deviceID uuid.UUID, limit int,
-) ([]ImmutableIngestObject, error) {
-	if limit <= 0 || limit > 10 {
-		limit = 3
-	}
-	rows, err := s.DB.Query(ctx, `SELECT id,object_key,sha256,status,received_at
-		FROM ingest_files
-		WHERE device_id=$1 AND object_key<>''
-		  AND status IN ('archived','processed','quarantined')
-		ORDER BY received_at DESC,id DESC LIMIT $2`, deviceID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []ImmutableIngestObject
-	for rows.Next() {
-		var item ImmutableIngestObject
-		if err := rows.Scan(&item.ID, &item.ObjectKey, &item.SHA256, &item.Status, &item.ReceivedAt); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	return result, rows.Err()
-}
-
-func (s *Store) RawDevicesNeedingDetection(ctx context.Context) ([]Device, error) {
-	devices, err := s.ListDevicesByCategory(ctx, equipment.CategorySoftswitch)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]Device, 0)
-	for _, device := range devices {
-		if device.TemplateKey != equipment.TemplateSoftswitchRawV1 || device.PurgeState != "active" {
-			continue
-		}
-		var latest *time.Time
-		if err := s.DB.QueryRow(ctx, `SELECT max(received_at) FROM ingest_files
-			WHERE device_id=$1 AND object_key<>''
-			  AND status IN ('archived','processed','quarantined')`, device.ID).Scan(&latest); err != nil {
-			return nil, err
-		}
-		newEvidence := latest != nil && (device.DetectionLastFileAt == nil ||
-			latest.After(*device.DetectionLastFileAt))
-		retryError := device.DetectionStatus == "error" &&
-			(device.DetectionCheckedAt == nil || time.Since(*device.DetectionCheckedAt) >= time.Minute)
-		if device.DetectionStatus == "not_checked" || newEvidence || retryError {
-			result = append(result, device)
-		}
-	}
-	return result, nil
-}
-
-func (s *Store) RecordTemplateDetection(
-	ctx context.Context, id uuid.UUID, status, template, fingerprint, message string, latest *time.Time,
-) error {
-	tag, err := s.DB.Exec(ctx, `UPDATE devices SET detection_status=$2,detection_template=$3,
-		detection_fingerprint=$4,detection_error=$5,detection_checked_at=now(),
-		detection_last_file_at=$6
-		WHERE id=$1 AND template_key=$7 AND purge_state='active'`,
-		id, status, template, fingerprint, message, latest, equipment.TemplateSoftswitchRawV1)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func (s *Store) ActivateDetectedSatel(
-	ctx context.Context, id uuid.UUID, fingerprint string, expectedLatest time.Time,
-) error {
-	tx, err := s.DB.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	var template, purgeState string
-	var latest *time.Time
-	if err := tx.QueryRow(ctx, `SELECT d.template_key,d.purge_state,
-		(SELECT max(received_at) FROM ingest_files f WHERE f.device_id=d.id
-		 AND f.object_key<>'' AND f.status IN ('archived','processed','quarantined'))
-		FROM devices d WHERE d.id=$1 FOR UPDATE`, id).Scan(&template, &purgeState, &latest); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
-		}
-		return err
-	}
-	if template != equipment.TemplateSoftswitchRawV1 || purgeState != "active" {
-		return ErrNotFound
-	}
-	if latest == nil || !latest.Equal(expectedLatest) {
-		return errors.New("ingest evidence changed during template detection")
-	}
-	if _, err := tx.Exec(ctx, `UPDATE devices SET
-		template_key=$2,firmware=$2,active_timezone=timezone,
-		active_timezone_revision=timezone_revision,detection_status='activated',
-		detection_template=$2,detection_fingerprint=$3,detection_error='',
-		detection_checked_at=now(),detection_last_file_at=$4
-		WHERE id=$1`, id, equipment.TemplateSatelRTUCDRV1, fingerprint, latest); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE ingest_files SET
-		replay_state='pending',replay_template=$2,replay_version=$3,
-		replay_requested_at=now(),replay_started_at=NULL,replay_completed_at=NULL,
-		replay_attempts=0,replay_error=NULL
-		WHERE device_id=$1 AND object_key<>''
-		  AND status IN ('archived','processed','quarantined')`,
-		id, equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion); err != nil {
-		return err
-	}
-	details, _ := json.Marshal(map[string]any{
-		"reason":      "automatic exact archived CDR header detection",
-		"fingerprint": fingerprint,
-		"templateKey": equipment.TemplateSatelRTUCDRV1,
-	})
-	if _, err := tx.Exec(ctx, `INSERT INTO audit_log(action,resource_type,resource_id,details)
-		VALUES('device_template_auto_detect','device',$1,$2)`, id.String(), details); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	s.deviceCacheRevision.Add(1)
-	return nil
-}
-
 type IngestReplayProgress struct {
 	Pending     uint64 `json:"pending"`
 	Processing  uint64 `json:"processing"`
@@ -1136,9 +1003,6 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	if template.Category == equipment.CategorySoftswitch {
 		input.Model = "Softswitch"
 		input.Firmware = template.Key
-		if template.Key == equipment.TemplateSoftswitchRawV1 {
-			input.Firmware = "raw"
-		}
 		input.ManagementIP = ""
 		input.DeviceSign = ""
 		input.AntifraudMode = "OFF"
@@ -1278,9 +1142,6 @@ func (s *Store) UpdateDevice(
 	}
 	if template.Category == equipment.CategorySoftswitch {
 		input.Firmware = template.Key
-		if template.Key == equipment.TemplateSoftswitchRawV1 {
-			input.Firmware = "raw"
-		}
 		input.ManagementIP = ""
 		input.DeviceSign = ""
 		input.AntifraudEnabled = false
@@ -1293,8 +1154,7 @@ func (s *Store) UpdateDevice(
 			input.Firmware = FirmwareScheme3232
 		}
 	}
-	activateTimezoneImmediately := template.Key == equipment.TemplateSatelRTUCDRV1 ||
-		(!template.Capabilities.Syslog && !template.Capabilities.TypedCDR)
+	activateTimezoneImmediately := template.Key == equipment.TemplateSatelRTUCDRV1
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return Device{}, err
@@ -1337,18 +1197,6 @@ func (s *Store) UpdateDevice(
 	}
 	if err != nil {
 		return Device{}, err
-	}
-	if current.TemplateKey == equipment.TemplateSoftswitchRawV1 &&
-		template.Key == equipment.TemplateSatelRTUCDRV1 {
-		if _, err := tx.Exec(ctx, `UPDATE ingest_files
-			SET replay_state='pending',replay_template=$2,replay_version=$3,
-				replay_requested_at=now(),replay_started_at=NULL,replay_completed_at=NULL,
-				replay_attempts=0,replay_error=NULL
-			WHERE device_id=$1 AND object_key<>''`,
-			id, equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion,
-		); err != nil {
-			return Device{}, err
-		}
 	}
 	normalizeDeviceFirmware(&device)
 	details, _ := json.Marshal(map[string]any{

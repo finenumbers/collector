@@ -44,6 +44,9 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 			`Access-Request Acct-Session-Id='replay-session' ` +
 			`Cisco-AVPair='xpgk-request-type=check_call'`),
 	})
+	// Simulate a stale first-parse snapshot. Historical replay must publish the
+	// current interpretation without rewriting immutable raw_syslog.
+	event.Category = "unknown"
 	if err := client.InsertSyslog(ctx, event); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +63,7 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 		Scan(&ledgerRows); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Conn.QueryRow(ctx, `SELECT count() FROM collector.antifraud_transactions FINAL
+	if err := client.Conn.QueryRow(ctx, `SELECT count() FROM collector.antifraud_lifecycles FINAL
 		WHERE device_id=?`, deviceID).Scan(&transactions); err != nil {
 		t.Fatal(err)
 	}
@@ -73,5 +76,12 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	}
 	if constructs != 0 {
 		t.Fatalf("disabled replay inserted %d Syslog constructs", constructs)
+	}
+	page, err := client.ListEventsPage(ctx, deviceID, "all", "", 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].Category != "radius" {
+		t.Fatalf("fallback read did not use current interpretation: %#v", page.Items)
 	}
 }

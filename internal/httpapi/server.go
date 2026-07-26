@@ -30,7 +30,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
-	"github.com/xuri/excelize/v2"
 )
 
 const sessionCookie = "collector_session"
@@ -799,7 +798,7 @@ func (s *Server) listIngestFiles(writer http.ResponseWriter, request *http.Reque
 	if !ok {
 		return
 	}
-	device, err := s.Store.Device(request.Context(), deviceID)
+	_, err := s.Store.Device(request.Context(), deviceID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(writer, http.StatusNotFound, "device not found")
 		return
@@ -822,12 +821,7 @@ func (s *Server) listIngestFiles(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"items": items,
-		"detection": map[string]any{
-			"status": device.DetectionStatus, "template": device.DetectionTemplate,
-			"fingerprint": device.DetectionFingerprint, "error": device.DetectionError,
-			"checkedAt": device.DetectionCheckedAt, "lastFileAt": device.DetectionLastFileAt,
-		},
+		"items":  items,
 		"replay": replay,
 	})
 }
@@ -1299,248 +1293,6 @@ func (s *Server) antifraudTimeline(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
-}
-
-func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
-	deviceID, ok := parseDeviceID(writer, request)
-	if !ok {
-		return
-	}
-	device, err := s.Store.Device(request.Context(), deviceID)
-	if err != nil {
-		writeError(writer, http.StatusNotFound, "device not found")
-		return
-	}
-	location, err := time.LoadLocation(device.ActiveTimezone)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "invalid device timezone")
-		return
-	}
-	dataset := request.URL.Query().Get("dataset")
-	switch dataset {
-	case "calls":
-		if !device.Capabilities.TypedCDR {
-			writeError(writer, http.StatusConflict,
-				"typed CDR calls are not supported by this source template")
-			return
-		}
-	case "antifraud":
-		if !device.Capabilities.Antifraud || !device.Capabilities.Radius {
-			writeError(writer, http.StatusConflict,
-				"AntiFraud/RADIUS is not supported by this source template")
-			return
-		}
-	default:
-		if !device.Capabilities.Syslog {
-			writeError(writer, http.StatusConflict,
-				"Syslog events are not supported by this source template")
-			return
-		}
-	}
-	search := request.URL.Query().Get("q")
-	workbook := excelize.NewFile()
-	defer workbook.Close()
-	sheet := "Data"
-	workbook.SetSheetName("Sheet1", sheet)
-	stream, err := workbook.NewStreamWriter(sheet)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to create export")
-		return
-	}
-	if dataset == "calls" {
-		if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
-			rows, queryErr := s.Analytics.ListSatelRTUCalls(
-				request.Context(), deviceID, search, 50000,
-			)
-			if queryErr != nil {
-				writeError(writer, http.StatusInternalServerError, "unable to export Satel RTU calls")
-				return
-			}
-			headers := []any{
-				"CDR ID", "CDR date", "Setup", "Connect", "Disconnect", "Duration, ms", "Elapsed",
-				"Outcome", "In ANI", "In DNIS", "Out ANI", "Out DNIS", "Bill ANI",
-				"Bill DNIS", "Source", "Destination", "Dial plan", "In protocol",
-				"Out protocol", "In transport", "Out transport", "Conference ID",
-				"In Call-ID", "Out Call-ID", "Source in conference ID",
-				"Source in Call-ID", "Source out Call-ID", "Signal node", "Source gatekeeper",
-				"Remote source signal", "Remote destination signal", "Remote source media",
-				"Remote destination media", "Local source signal", "Local destination signal",
-				"Local source media", "Local destination media", "In codecs", "Out codecs",
-				"Disconnect code", "Disconnect text", "Disconnect success",
-				"Disconnect initiator", "PDD", "SCD", "Term elapsed", "Term setup",
-				"Term connect", "Term disconnect", "Term PDD", "Term SCD",
-				"Source bytes in", "Source bytes out", "Destination bytes in",
-				"Destination bytes out", "Source packets", "Destination packets",
-				"Source packets late", "Destination packets late", "Source packets lost",
-				"Destination packets lost", "Source min jitter", "Source max jitter",
-				"Destination min jitter", "Destination max jitter", "Record type", "Last CDR",
-				"Parser version", "Source timezone", "Raw fields",
-			}
-			_ = stream.SetRow("A1", headers)
-			for index, row := range rows {
-				raw, _ := json.Marshal(row.RawFields)
-				values := []any{
-					row.CDRID, formatTimeInLocation(row.CDRDate, location),
-					formatTimeInLocation(row.SetupTime, location),
-					formatTimeInLocation(row.ConnectTime, location),
-					formatTimeInLocation(row.DisconnectTime, location), row.DurationMS, row.ElapsedTime,
-					row.Outcome, row.InANI, row.InDNIS, row.OutANI, row.OutDNIS,
-					row.BillANI, row.BillDNIS, row.SrcName, row.DstName, row.DPName,
-					row.InLegProto, row.OutLegProto, row.InLegTransportProto,
-					row.OutLegTransportProto, row.ConfID, row.InLegCallID, row.OutLegCallID,
-					row.SrcInLegConfID, row.SrcInLegCallID, row.SrcOutLegCallID,
-					row.SignalNodeName, row.SrcGatekeeperAddress, row.RemoteSrcSigAddress,
-					row.RemoteDstSigAddress, row.RemoteSrcMediaAddress,
-					row.RemoteDstMediaAddress, row.LocalSrcSigAddress,
-					row.LocalDstSigAddress, row.LocalSrcMediaAddress,
-					row.LocalDstMediaAddress, row.InLegCodecs, row.OutLegCodecs,
-					row.DisconnectCode, row.DisconnectText, row.DisconnectSuccess,
-					row.DisconnectInitiator, row.PDD, row.SCD, row.TermElapsedTime,
-					formatTimeInLocation(row.TermSetupTime, location),
-					formatTimeInLocation(row.TermConnectTime, location),
-					formatTimeInLocation(row.TermDisconnectTime, location),
-					row.TermPDD, row.TermSCD, row.SrcMediaBytesIn, row.SrcMediaBytesOut,
-					row.DstMediaBytesIn, row.DstMediaBytesOut, row.SrcMediaPackets,
-					row.DstMediaPackets, row.SrcMediaPacketsLate, row.DstMediaPacketsLate,
-					row.SrcMediaPacketsLost, row.DstMediaPacketsLost, row.SrcMinJitter,
-					row.SrcMaxJitter, row.DstMinJitter, row.DstMaxJitter, row.RecordType,
-					row.LastCDR, row.ParserVersion, row.SourceTimezone, string(raw),
-				}
-				cell, _ := excelize.CoordinatesToCellName(1, index+2)
-				_ = stream.SetRow(cell, values)
-			}
-		} else {
-			rows, queryErr := s.Analytics.ListCalls(request.Context(), deviceID, search, 50000)
-			if queryErr != nil {
-				writeError(writer, http.StatusInternalServerError, "unable to export calls")
-				return
-			}
-			headers := []any{"Установка", "Входящий маршрут", "Исходящий маршрут", "Номер A вход", "Номер A выход",
-				"Номер B вход", "Номер B выход", "Длительность, мс", "Q.850", "Результат", "Acct-Session-Id", "UniqueTag"}
-			_ = stream.SetRow("A1", headers)
-			for index, row := range rows {
-				values := []any{
-					formatTimeInLocation(row.SetupTime, location),
-					row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
-					row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS, row.ReleaseCause,
-					row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag}
-				cell, _ := excelize.CoordinatesToCellName(1, index+2)
-				_ = stream.SetRow(cell, values)
-			}
-		}
-	} else if dataset == "antifraud" {
-		headers := []any{
-			"Первое событие", "Последнее событие", "Call context", "Acct-Session-Id",
-			"Операция", "Запрос", "Ответ", "Решение", "Причина", "RADIUS server",
-			"Latency, мс", "Повторы", "Calling", "Called", "Номер A вход",
-			"Номер B вход", "Номер A выход", "Номер B выход", "Входящий trunk",
-			"Исходящий trunk", "Accounting", "Q.850", "Полнота", "CDR legs", "Атрибуты",
-			"CDR setup", "CDR Acct-Session-Id", "Метод корреляции", "Confidence",
-			"Delta, мс", "Неоднозначность",
-		}
-		_ = stream.SetRow("A1", headers)
-		var cursor *analytics.AntifraudCursor
-		rowNumber := 1
-		for {
-			page, queryErr := s.Analytics.ListAntifraudPage(
-				request.Context(), deviceID, search, 10000, cursor,
-			)
-			if queryErr != nil {
-				writeError(writer, http.StatusInternalServerError, "unable to export AntiFraud")
-				return
-			}
-			for _, row := range page.Items {
-				rowNumber++
-				attributes, _ := json.Marshal(row.Attributes)
-				cell, _ := excelize.CoordinatesToCellName(1, rowNumber)
-				_ = stream.SetRow(cell, []any{
-					formatTimeInLocation(&row.FirstEventAt, location),
-					formatTimeInLocation(&row.LastEventAt, location),
-					row.CallContext, row.AcctSessionID,
-					row.RequestType, row.RequestCode, row.ResponseCode, row.Decision,
-					row.DecisionReason, row.ServerAddress, row.LatencyMS, row.Retries,
-					row.CallingStationID, row.CalledStationID, row.SrcNumberIn,
-					row.DstNumberIn, row.SrcNumberOut, row.DstNumberOut,
-					row.InTrunkgroupLabel, row.OutTrunkgroupLabel, row.AccountingStatus,
-					row.Q850Cause, row.Completeness, row.LegCount, string(attributes),
-					formatTimeInLocation(row.CDRSetupTime, location), row.CDRSessionID,
-					row.CorrelationMethod, row.CorrelationConfidence,
-					row.CorrelationTimeDeltaMS, row.AmbiguityReason,
-				})
-			}
-			if !page.HasMore || len(page.Items) == 0 {
-				break
-			}
-			last := page.Items[len(page.Items)-1]
-			cursor = &analytics.AntifraudCursor{
-				LastEventAt: last.LastEventAt, TransactionID: last.TransactionID,
-			}
-		}
-	} else {
-		category := request.URL.Query().Get("category")
-		headers := []any{"Получено", "Раздел", "Компонент", "Сообщение", "Исходный Syslog", "Статус", "Атрибуты"}
-		_ = stream.SetRow("A1", headers)
-		var cursor *analytics.EventCursor
-		rowInSheet := 1
-		totalRows := 0
-		sheetNumber := 1
-		for {
-			page, queryErr := s.Analytics.ListEventsPage(
-				request.Context(), deviceID, category, search, 10000, cursor,
-			)
-			if queryErr != nil {
-				writeError(writer, http.StatusInternalServerError, "unable to export events")
-				return
-			}
-			for _, row := range page.Items {
-				if rowInSheet >= 1000000 {
-					if err := stream.Flush(); err != nil {
-						writeError(writer, http.StatusInternalServerError, "unable to finalize export sheet")
-						return
-					}
-					sheetNumber++
-					sheet = fmt.Sprintf("Data %d", sheetNumber)
-					if _, err := workbook.NewSheet(sheet); err != nil {
-						writeError(writer, http.StatusInternalServerError, "unable to create export sheet")
-						return
-					}
-					stream, err = workbook.NewStreamWriter(sheet)
-					if err != nil {
-						writeError(writer, http.StatusInternalServerError, "unable to create export stream")
-						return
-					}
-					_ = stream.SetRow("A1", headers)
-					rowInSheet = 1
-				}
-				rowInSheet++
-				totalRows++
-				attributes, _ := json.Marshal(row.Attributes)
-				cell, _ := excelize.CoordinatesToCellName(1, rowInSheet)
-				eventTime := row.EventTime
-				if eventTime == nil {
-					eventTime = &row.ReceivedAt
-				}
-				_ = stream.SetRow(cell, []any{
-					formatTimeInLocation(eventTime, location), row.Category, row.Component, row.Message,
-					row.RawPayload, row.Status, string(attributes)})
-			}
-			if !page.HasMore || len(page.Items) == 0 {
-				break
-			}
-			last := page.Items[len(page.Items)-1]
-			cursor = &analytics.EventCursor{ReceivedAt: last.ReceivedAt, EventID: last.EventID}
-		}
-		writer.Header().Set("X-Export-Rows", strconv.Itoa(totalRows))
-	}
-	if err := stream.Flush(); err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to finalize export")
-		return
-	}
-	writer.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="smg-%s-%s.xlsx"`, deviceID.String()[:8], time.Now().UTC().Format("20060102-150405")))
-	if err := workbook.Write(writer); err != nil {
-		slog.Error("XLSX response failed", "error", err)
-	}
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

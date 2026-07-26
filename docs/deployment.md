@@ -74,26 +74,12 @@ Collector подключён к external network `${PROXY_NETWORK:-proxy}` по�
 
 При ошибке SFTPGo database device компенсирующе удаляется.
 
-Для raw-only софтсвитча укажите имя, IANA timezone и шаблон
-`softswitch-cdr-raw-v1`. Collector выдаёт отдельный login с префиксом `ssw_`; Syslog
-IP и AntiFraud для него не настраиваются. Загрузите репрезентативный CDR в корень
-выданного FTP home. После стабильной записи watcher покажет файл со статусом
-`archived` на странице «CDR-файлы» и в `GET /api/devices/{id}/ingest-files`. Если до
-трёх последних архивов имеют одинаковый точный Satel 120-column header, Collector
-атомарно активирует `satel-rtu-cdr-v1`, поставит все архивы в replay и откроет таблицу
-«Вызовы и CDR» после первого обработанного файла. Mixed/unknown header не меняет source;
-причина и detection/replay progress отображаются на странице файлов.
-Кнопка «Скачать» использует потоковый
-`GET /api/devices/{id}/ingest-files/{fileID}/download`: сохраните исходник и передайте
-его для проектирования нового typed parser, если формат не определён. MinIO/ledger
-failure оставляет локальный файл для автоматического retry.
-
 Для Satel RTU выберите шаблон `satel-rtu-cdr-v1` (`Satel RTU`) и timezone, в которой
 записаны timestamp файла. Загрузите CDR с 120-column header в корень того же FTP home:
 исходник сначала фиксируется в MinIO, затем строки появляются во вкладке
-«Вызовы и CDR», а файл — во вкладке «CDR-файлы». При смене существующего
-`softswitch-cdr-raw-v1` на Satel RTU уже архивированные объекты автоматически
-попадают в versioned replay; загружать их повторно не требуется.
+«Вызовы и CDR». Collector выдаёт отдельный login с префиксом `ssw_`; Syslog IP и
+AntiFraud для этого источника не настраиваются. MinIO/ledger failure оставляет
+локальный файл для автоматического retry.
 
 ## Backup
 
@@ -148,7 +134,7 @@ read rows/CPU и correlation coverage
 - Ingress не стартует с `address already in use`: освободите `${SYSLOG_PORT:-514}/udp` на Docker-хосте; не возвращайте bridge port mapping.
 - ClickHouse недоступен: JetStream удерживает Syslog; CDR-файл остаётся в volume и raw archive/ledger.
 - Unknown растёт после firmware upgrade: не удаляйте raw, зафиксируйте firmware и добавьте golden fixtures/versioned parser.
-- После bump `SyslogParserVersion` (например `smg-3.410-v13`): дождитесь лога
+- После bump `SyslogParserVersion` (например `eltex-smg-syslog-v14`): дождитесь лога
   `historical Syslog reprocess completed` с новой `parser_version`; в UI diagnostics
   `parserVersion` должен совпасть; «Нераспознанное» по корпусам 3.410 (bare SDP и
   ISUP dotted-hex / `[No optional params]`) и 3.23.2 должно опустеть; `CONFIG:` без

@@ -95,6 +95,7 @@ func processDeviceRevisionJob(
 				ReceivedAt: row.ReceivedAt, SourceIP: row.SourceIP.String(),
 				SourcePort: row.SourcePort, Payload: row.Payload,
 				Timezone: job.Timezone, TimezoneRevision: job.Revision,
+				TemplateKey: config.TemplateKey, Firmware: config.Firmware,
 			}, location))
 		}
 		continuations.Assemble(events)
@@ -195,6 +196,8 @@ type deviceTimeConfigResolver interface {
 type deviceReprocessConfig struct {
 	timezone string
 	revision uint64
+	template string
+	firmware string
 	skip     bool
 }
 
@@ -258,16 +261,18 @@ func RunHistoricalSyslogReprocessOnce(
 				EventID: row.EventID, DeviceID: row.DeviceID, ReceivedAt: row.ReceivedAt,
 				SourceIP: row.SourceIP.String(), SourcePort: row.SourcePort, Payload: row.Payload,
 				Timezone: config.timezone, TimezoneRevision: config.revision,
+				TemplateKey: config.template, Firmware: config.firmware,
 			}, location)
 			events = append(events, event)
 		}
 		continuations.Assemble(events)
-		for _, event := range events {
-			if err := client.ProcessSyslogDerived(ctx, event); err != nil {
-				return err
-			}
-		}
 		if err := client.InsertSyslogInterpretationsBatch(ctx, events); err != nil {
+			return err
+		}
+		if err := client.ProcessSyslogShadowDerivedBatch(ctx, events); err != nil {
+			return err
+		}
+		if err := client.EnqueueDirtySyslogBuckets(ctx, events); err != nil {
 			return err
 		}
 		if constructsEnabled {
@@ -332,6 +337,8 @@ func resolveDeviceReprocessConfig(
 		} else if deviceConfig.TimezoneRevision > 0 {
 			config.revision = uint64(deviceConfig.TimezoneRevision)
 		}
+		config.template = deviceConfig.TemplateKey
+		config.firmware = deviceConfig.Firmware
 		cache[row.DeviceID] = config
 		return config, nil
 	}

@@ -118,7 +118,7 @@ func retentionEffectiveAt(now time.Time, days int) (time.Time, error) {
 
 func validRetentionClass(class string) bool {
 	switch class {
-	case "syslog", "cdr", "derived", "raw_cdr_archive":
+	case "syslog", "cdr", "softswitch_cdr", "derived", "raw_cdr_archive":
 		return true
 	default:
 		return false

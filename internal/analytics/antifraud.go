@@ -772,8 +772,10 @@ func (c *Client) ListAntifraudPage(
 	limit uint64,
 	cursor *AntifraudCursor,
 ) (AntifraudPage, error) {
-	if limit == 0 || limit > 50000 {
+	if limit == 0 {
 		limit = 200
+	} else if limit > 1000 {
+		limit = 1000
 	}
 	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
 		return AntifraudPage{}, err
@@ -831,7 +833,7 @@ func (c *Client) ListAntifraudPage(
 		return AntifraudPage{}, err
 	}
 	defer rows.Close()
-	items := make([]AntifraudRow, 0, limit)
+	items := make([]AntifraudRow, 0, 200)
 	for rows.Next() {
 		var item AntifraudRow
 		if err := rows.Scan(

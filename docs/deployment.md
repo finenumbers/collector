@@ -8,15 +8,19 @@ normally, but construct assembly and construct-table inserts are skipped. The
 construct list/detail API returns a JSON `feature_disabled` 404 response.
 
 Administrators manage retention through `GET /api/system/retention` and
-`PATCH /api/system/retention`. The four independent policy classes are
-`syslog`, `cdr`, `derived`, and `raw_cdr_archive`; each accepts 7–1095 days and
-defaults to 1095. Every valid change is effective immediately, and the PATCH
-waits for the advisory-locked reconciliation attempt before returning. A
-pending change can be cancelled with `"cancel": true`.
+`PATCH /api/system/retention`. The five independent policy classes are
+`syslog`, `cdr` (equipment), `softswitch_cdr`, `derived`, and
+`raw_cdr_archive`; each accepts 7–1095 days and defaults to 1095.
+`softswitch_cdr` currently controls both Satel RTU ClickHouse tables and is the
+contract for future typed softswitch parsers. Every valid change is effective
+immediately, and the PATCH waits for the advisory-locked reconciliation
+attempt before returning. A pending change can be cancelled with
+`"cancel": true`.
 
 The collector reconciles policies at startup and hourly under a PostgreSQL
 advisory lock. ClickHouse TTL changes use a fixed table/column allowlist. The
-raw CDR archive policy installs a MinIO lifecycle rule scoped only to `cdr/`;
+raw CDR archive policy is shared by equipment and softswitches and installs a
+MinIO lifecycle rule scoped only to `cdr/`;
 the PostgreSQL `ingest_files` ledger, NATS streams, and durable spools are not
 retention targets. A policy becomes active only after all resources for that
 class have accepted the change; failures remain pending and expose

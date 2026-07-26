@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,6 +109,52 @@ func TestSanitizeDownloadName(t *testing.T) {
 		if got := sanitizeDownloadName(input); got != want {
 			t.Fatalf("sanitizeDownloadName(%q)=%q want %q", input, got, want)
 		}
+	}
+}
+
+func TestParsePageLimitIsBounded(t *testing.T) {
+	tests := map[string]uint64{
+		"": 200, "invalid": 200, "0": 200, "25": 25, "1000": 1000, "1001": 1000,
+		"18446744073709551615": 1000,
+	}
+	for value, want := range tests {
+		request := httptest.NewRequest(http.MethodGet, "/?limit="+value, nil)
+		if got := parsePageLimit(request); got != want {
+			t.Fatalf("limit %q = %d, want %d", value, got, want)
+		}
+	}
+}
+
+func TestStaticHandlerConfinesRequestsToStaticRoot(t *testing.T) {
+	base := t.TempDir()
+	staticDir := filepath.Join(base, "web")
+	if err := os.Mkdir(staticDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("safe-index"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "secret.txt"), []byte("outside-secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{StaticDir: staticDir}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.URL.Path = "/../secret.txt"
+	response := httptest.NewRecorder()
+	server.staticHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "safe-index" {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestLogoutClearsSecureSessionCookie(t *testing.T) {
+	server := &Server{Config: config.Config{SecureCookies: true}}
+	response := httptest.NewRecorder()
+	server.logout(response, httptest.NewRequest(http.MethodPost, "/api/logout", nil))
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure || !cookies[0].HttpOnly ||
+		cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].MaxAge >= 0 {
+		t.Fatalf("unexpected logout cookie: %#v", cookies)
 	}
 }
 

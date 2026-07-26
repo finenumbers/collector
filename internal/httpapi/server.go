@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -207,7 +208,10 @@ func (s *Server) logout(writer http.ResponseWriter, request *http.Request) {
 	if cookie, err := request.Cookie(sessionCookie); err == nil {
 		_ = s.Store.DeleteSession(request.Context(), cookie.Value)
 	}
-	http.SetCookie(writer, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	http.SetCookie(writer, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+		Secure: s.Config.SecureCookies, SameSite: http.SameSiteStrictMode,
+	})
 	writer.WriteHeader(http.StatusNoContent)
 }
 
@@ -904,7 +908,7 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	}, "Syslog events") {
 		return
 	}
-	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
+	limit := parsePageLimit(request)
 	var cursor *analytics.EventCursor
 	before := request.URL.Query().Get("before")
 	beforeID := request.URL.Query().Get("before_id")
@@ -949,7 +953,7 @@ func (s *Server) listSyslogConstructs(writer http.ResponseWriter, request *http.
 	}, "Syslog constructs") {
 		return
 	}
-	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
+	limit := parsePageLimit(request)
 	var cursor *analytics.SyslogConstructCursor
 	before := request.URL.Query().Get("before")
 	beforeID := request.URL.Query().Get("before_id")
@@ -1028,7 +1032,7 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
+	limit := parsePageLimit(request)
 	var cursor *analytics.CallCursor
 	before := request.URL.Query().Get("before")
 	beforeID := request.URL.Query().Get("before_id")
@@ -1088,7 +1092,7 @@ func (s *Server) listAntifraud(writer http.ResponseWriter, request *http.Request
 	}, "AntiFraud/RADIUS") {
 		return
 	}
-	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
+	limit := parsePageLimit(request)
 	var cursor *analytics.AntifraudCursor
 	before := request.URL.Query().Get("before")
 	beforeID := request.URL.Query().Get("before_id")
@@ -1551,18 +1555,51 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 func (s *Server) staticHandler() http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		path := filepath.Join(s.StaticDir, filepath.Clean(request.URL.Path))
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			http.ServeFile(writer, request, path)
-			return
-		}
-		index := filepath.Join(s.StaticDir, "index.html")
-		if _, err := os.Stat(index); err != nil {
+		root, err := os.OpenRoot(s.StaticDir)
+		if err != nil {
 			writeError(writer, http.StatusNotFound, "web application is not built")
 			return
 		}
-		http.ServeFile(writer, request, index)
+		defer root.Close()
+		relative := strings.TrimPrefix(path.Clean("/"+request.URL.Path), "/")
+		if relative != "" && relative != "." {
+			if file, openErr := root.Open(relative); openErr == nil {
+				info, statErr := file.Stat()
+				if statErr == nil && !info.IsDir() {
+					defer file.Close()
+					http.ServeContent(
+						writer, request, filepath.Base(relative), info.ModTime(), file,
+					)
+					return
+				}
+				_ = file.Close()
+			}
+		}
+		index, err := root.Open("index.html")
+		if err != nil {
+			writeError(writer, http.StatusNotFound, "web application is not built")
+			return
+		}
+		defer index.Close()
+		info, err := index.Stat()
+		if err != nil || info.IsDir() {
+			writeError(writer, http.StatusNotFound, "web application is not built")
+			return
+		}
+		http.ServeContent(writer, request, "index.html", info.ModTime(), index)
 	})
+}
+
+func parsePageLimit(request *http.Request) uint64 {
+	const (
+		defaultPageSize = uint64(200)
+		maxPageSize     = uint64(1000)
+	)
+	limit, err := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
+	if err != nil || limit == 0 {
+		return defaultPageSize
+	}
+	return min(limit, maxPageSize)
 }
 
 func parseDeviceID(writer http.ResponseWriter, request *http.Request) (uuid.UUID, bool) {

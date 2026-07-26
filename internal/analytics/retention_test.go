@@ -18,9 +18,25 @@ func TestRetentionRegistryIncludesSyslogHourly(t *testing.T) {
 	}
 }
 
-func TestRetentionRegistryIncludesSatelRTU(t *testing.T) {
-	foundRecords, foundTimes := false, false
+func TestRetentionRegistrySeparatesEltexAndSatelCDR(t *testing.T) {
+	eltexRecords, eltexInterpretations, eltexFacts := false, false, false
 	for _, table := range retentionTables["cdr"] {
+		eltexRecords = eltexRecords || table.name == "cdr_records"
+		eltexInterpretations = eltexInterpretations || table.name == "cdr_time_interpretations"
+		eltexFacts = eltexFacts || table.name == "cdr_time_facts"
+		if table.name == "satel_rtu_cdr" || table.name == "satel_rtu_cdr_time_facts" {
+			t.Fatalf("Satel table %s remains in cdr retention", table.name)
+		}
+	}
+	if !eltexRecords || !eltexInterpretations || !eltexFacts {
+		t.Fatalf(
+			"Eltex retention incomplete: records=%v interpretations=%v facts=%v",
+			eltexRecords, eltexInterpretations, eltexFacts,
+		)
+	}
+
+	foundRecords, foundTimes := false, false
+	for _, table := range retentionTables["softswitch_cdr"] {
 		foundRecords = foundRecords || table.name == "satel_rtu_cdr"
 		foundTimes = foundTimes || table.name == "satel_rtu_cdr_time_facts"
 	}

@@ -7,6 +7,7 @@ import {
 import './styles.css'
 import {
   canManageUsers, normalizeFirmwareScheme, purgeConfirmationReady, purgeRetryLabel,
+  retentionDescription, retentionLabel,
 } from './settings'
 import { antifraudOutcome, cdrOutcome, outcomeLabel } from './outcomes'
 import {
@@ -25,7 +26,7 @@ type ManagedUser = User & {
 }
 type SystemInfo = { version: string; status: string; user: User; services: Record<string, boolean> }
 type RetentionPolicy = {
-  policyClass: 'syslog' | 'cdr' | 'derived' | 'raw_cdr_archive'
+  policyClass: 'syslog' | 'cdr' | 'softswitch_cdr' | 'derived' | 'raw_cdr_archive'
   activeDays: number
   pendingDays?: number
   effectiveAt?: string
@@ -2154,24 +2155,6 @@ function RetentionPolicyEditor({ policy, busy, onChange, onCancel }: {
     </div>}
     {policy.lastError && <div className="form-error">{policy.lastError}</div>}
   </article>
-}
-
-function retentionLabel(value: RetentionPolicy['policyClass']) {
-  return {
-    syslog: 'Syslog и события',
-    cdr: 'CDR и факты времени',
-    derived: 'AntiFraud и производная аналитика',
-    raw_cdr_archive: 'Raw CDR архив MinIO',
-  }[value]
-}
-
-function retentionDescription(value: RetentionPolicy['policyClass']) {
-  return {
-    syslog: 'Исходные Syslog datagram и их parser facts.',
-    cdr: 'Нормализованные CDR и timezone interpretations.',
-    derived: 'RADIUS lifecycle, AntiFraud и корреляция.',
-    raw_cdr_archive: 'Неизменённые исходные CDR-файлы в объектном хранилище.',
-  }[value]
 }
 
 function UserPasswordReset({ user, disabled, onReset, onClose }: {

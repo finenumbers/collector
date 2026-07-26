@@ -837,10 +837,7 @@ func (c *Client) PurgeDeviceData(ctx context.Context, deviceID uuid.UUID) error 
 			FROM system.columns
 			WHERE database='collector' AND name='device_id'
 		  )
-		  AND (
-			engine LIKE '%MergeTree%'
-			OR engine = 'MaterializedView'
-		  )`)
+		  AND engine LIKE '%MergeTree%'`)
 	if err != nil {
 		return err
 	}

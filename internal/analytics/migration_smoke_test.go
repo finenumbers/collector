@@ -28,7 +28,22 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 12 {
-		t.Fatalf("got %d applied migrations, want 12", applied)
+	if applied != 13 {
+		t.Fatalf("got %d applied migrations, want 13", applied)
+	}
+	var hourlyEngine, viewEngine string
+	if err := client.Conn.QueryRow(ctx, `SELECT engine FROM system.tables
+		WHERE database='collector' AND name='syslog_hourly'`).Scan(&hourlyEngine); err != nil {
+		t.Fatal(err)
+	}
+	if hourlyEngine != "SummingMergeTree" {
+		t.Fatalf("syslog_hourly engine is %s, want SummingMergeTree", hourlyEngine)
+	}
+	if err := client.Conn.QueryRow(ctx, `SELECT engine FROM system.tables
+		WHERE database='collector' AND name='syslog_hourly_mv'`).Scan(&viewEngine); err != nil {
+		t.Fatal(err)
+	}
+	if viewEngine != "MaterializedView" {
+		t.Fatalf("syslog_hourly_mv engine is %s, want MaterializedView", viewEngine)
 	}
 }

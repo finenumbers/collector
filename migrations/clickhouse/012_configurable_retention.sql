@@ -4,7 +4,6 @@ ALTER TABLE collector.syslog_facts MODIFY TTL toDateTime(received_at) + INTERVAL
 ALTER TABLE collector.syslog_fragment_links MODIFY TTL toDateTime(linked_at) + INTERVAL 1095 DAY DELETE;
 ALTER TABLE collector.syslog_constructs MODIFY TTL toDateTime(started_at) + INTERVAL 1095 DAY DELETE;
 ALTER TABLE collector.syslog_construct_members MODIFY TTL toDateTime(linked_at) + INTERVAL 1095 DAY DELETE;
-ALTER TABLE collector.syslog_hourly MODIFY TTL toDateTime(hour) + INTERVAL 1095 DAY DELETE;
 
 ALTER TABLE collector.cdr_records MODIFY TTL toDateTime(coalesce(setup_time, ingested_at)) + INTERVAL 1095 DAY DELETE;
 ALTER TABLE collector.cdr_time_interpretations MODIFY TTL toDateTime(interpreted_at) + INTERVAL 1095 DAY DELETE;

@@ -16,8 +16,9 @@ import {
   sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
 } from './equipment'
 import {
-  createExportRequest, ExportJob, exportDownloadURL, exportJobsURL, exportJobURL,
-  ExportNavigationDataset, isExportActive, localDateInTimezone, pollDelay,
+  createExportRequest, ExportJob, exportDownloadURL, exportJobsURL, exportJobDisposition,
+  exportJobURL, ExportNavigationDataset, exportStorageKey, isExportActive,
+  localDateInTimezone, pollDelay, restoreExportTracking, serializeExportTracking,
 } from './export'
 import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
@@ -944,31 +945,61 @@ function ExportButton({ deviceID, dataset, query, date }: {
   query: string
   date: string
 }) {
-  const storageKey = `collector:export:${deviceID}:${dataset}:${date}:${query}`
-  const [job, setJob] = useState<ExportJob | null>(() => {
-    const saved = window.sessionStorage.getItem(storageKey)
-    return saved ? ({ id: saved, status: 'queued' } as ExportJob) : null
-  })
+  const storageKey = exportStorageKey(deviceID, dataset, date, query)
+  const [restored] = useState(() =>
+    restoreExportTracking(window.sessionStorage.getItem(storageKey)))
+  const [job, setJob] = useState<ExportJob | null>(restored.job)
+  const [restoringJobID, setRestoringJobID] = useState<string | null>(
+    restored.job?.id || restored.legacyJobID,
+  )
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
   const jobID = job?.id
   const jobStatus = job?.status
 
-  const download = useCallback((completed: ExportJob, forget: boolean) => {
-    const link = document.createElement('a')
-    link.href = exportDownloadURL(deviceID, completed.id)
-    link.download = completed.filename || ''
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    if (forget) {
+  const acceptJob = useCallback((next: ExportJob) => {
+    const disposition = exportJobDisposition(next)
+    if (disposition === 'clear') {
       window.sessionStorage.removeItem(storageKey)
       setJob(null)
+      setError(next.error || (next.status === 'completed'
+        ? 'Срок хранения архива истёк'
+        : 'Не удалось подготовить архив'))
+      return disposition
     }
-  }, [deviceID, storageKey])
+    window.sessionStorage.setItem(storageKey, serializeExportTracking(next))
+    setJob(next)
+    setError('')
+    return disposition
+  }, [storageKey])
+
+  const forgetDownloaded = useCallback(() => {
+    window.sessionStorage.removeItem(storageKey)
+  }, [storageKey])
 
   useEffect(() => {
-    if (!jobID || !jobStatus || !isExportActive(jobStatus)) return
+    if (!restoringJobID) return
+    let active = true
+    api<{ job: ExportJob }>(exportJobURL(deviceID, restoringJobID))
+      .then(({ job: next }) => {
+        if (active) acceptJob(next)
+      })
+      .catch((reason) => {
+        if (!active) return
+        window.sessionStorage.removeItem(storageKey)
+        setJob(null)
+        setError(reason instanceof Error ? reason.message : 'Не удалось восстановить экспорт')
+      })
+      .finally(() => {
+        if (active) setRestoringJobID(null)
+      })
+    return () => {
+      active = false
+    }
+  }, [acceptJob, deviceID, restoringJobID, storageKey])
+
+  useEffect(() => {
+    if (restoringJobID || !jobID || !jobStatus || !isExportActive(jobStatus)) return
     let active = true
     let timer: number | undefined
     let failures = 0
@@ -977,18 +1008,10 @@ function ExportButton({ deviceID, dataset, query, date }: {
         .then(({ job: next }) => {
           if (!active) return
           failures = 0
-          setError('')
-          setJob(next)
-          if (next.status === 'completed') {
-            download(next, false)
-            return
+          const disposition = acceptJob(next)
+          if (disposition === 'poll') {
+            timer = window.setTimeout(poll, pollDelay(0, true))
           }
-          if (!isExportActive(next.status)) {
-            window.sessionStorage.removeItem(storageKey)
-            setError(next.error || 'Не удалось подготовить архив')
-            return
-          }
-          timer = window.setTimeout(poll, pollDelay(0, true))
         })
         .catch((reason) => {
           if (!active) return
@@ -1002,7 +1025,14 @@ function ExportButton({ deviceID, dataset, query, date }: {
       active = false
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [deviceID, download, jobID, jobStatus, storageKey])
+  }, [acceptJob, deviceID, jobID, jobStatus, restoringJobID])
+
+  useEffect(() => {
+    if (job?.status !== 'completed' || !job.expiresAt) return
+    const remaining = new Date(job.expiresAt).getTime() - Date.now()
+    const timer = window.setTimeout(() => acceptJob(job), Math.max(0, remaining + 50))
+    return () => window.clearTimeout(timer)
+  }, [acceptJob, job])
 
   const createJob = () => {
     setCreating(true)
@@ -1013,21 +1043,26 @@ function ExportButton({ deviceID, dataset, query, date }: {
       body: JSON.stringify(createExportRequest(dataset, query, date, date)),
     })
       .then(({ job: next }) => {
-        window.sessionStorage.setItem(storageKey, next.id)
-        setJob(next)
+        acceptJob(next)
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : 'Не удалось создать экспорт'))
       .finally(() => setCreating(false))
   }
 
-  const active = creating || (job != null && isExportActive(job.status))
-  const label = creating ? 'Запуск…' : job?.status === 'queued' ? 'Архив в очереди…'
+  const downloadReady = restoringJobID == null && job != null &&
+    exportJobDisposition(job) === 'offer_download'
+  const active = creating || restoringJobID != null ||
+    (job != null && (isExportActive(job.status) || (job.status === 'completed' && !downloadReady)))
+  const label = creating ? 'Запуск…' : restoringJobID ? 'Проверка архива…'
+    : job?.status === 'queued' ? 'Архив в очереди…'
     : job?.status === 'running' ? `Архив: ${job.rowsWritten.toLocaleString('ru-RU')} строк…`
       : job?.status === 'completed' ? 'Скачать архив'
         : error ? 'Повторить экспорт' : 'Экспорт CSV.zip'
   return <div className="export-button-wrap">
-    <button className="secondary" disabled={active}
-      onClick={() => job?.status === 'completed' ? download(job, true) : createJob()}>{label}</button>
+    {downloadReady && job
+      ? <a className="secondary" href={exportDownloadURL(deviceID, job.id)}
+        download={job.filename || ''} onClick={forgetDownloaded}>{label}</a>
+      : <button className="secondary" disabled={active} onClick={createJob}>{label}</button>}
     {error && <small className="export-inline-error" title={error}>{error}</small>}
   </div>
 }

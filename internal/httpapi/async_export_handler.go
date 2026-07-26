@@ -268,7 +268,7 @@ func (s *Server) downloadExportJob(writer http.ResponseWriter, request *http.Req
 	if !ok {
 		return
 	}
-	if job.Status != "completed" || (job.ExpiresAt != nil && !job.ExpiresAt.After(time.Now())) {
+	if !exportDownloadAvailable(job, time.Now()) {
 		writeError(writer, http.StatusConflict, "export is not available for download")
 		return
 	}
@@ -289,18 +289,26 @@ func (s *Server) downloadExportJob(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusInternalServerError, "unable to audit export download")
 		return
 	}
-	filename := sanitizeDownloadName(job.Filename)
-	writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment",
-		map[string]string{"filename": filename}))
-	writer.Header().Set("Content-Type", job.ContentType)
-	if object.Size >= 0 {
-		writer.Header().Set("Content-Length", strconv.FormatInt(object.Size, 10))
-	}
-	writer.Header().Set("ETag", fmt.Sprintf(`"%s"`, job.SHA256))
+	setExportDownloadHeaders(writer.Header(), job, object.Size)
 	writer.WriteHeader(http.StatusOK)
 	if _, err = io.Copy(writer, object.Reader); err != nil {
 		slog.Warn("export response interrupted", "job", job.ID, "error", err)
 	}
+}
+
+func exportDownloadAvailable(job store.ExportJob, now time.Time) bool {
+	return job.Status == "completed" && (job.ExpiresAt == nil || job.ExpiresAt.After(now))
+}
+
+func setExportDownloadHeaders(header http.Header, job store.ExportJob, size int64) {
+	filename := sanitizeDownloadName(job.Filename)
+	header.Set("Content-Disposition", mime.FormatMediaType("attachment",
+		map[string]string{"filename": filename}))
+	header.Set("Content-Type", job.ContentType)
+	if size >= 0 {
+		header.Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	header.Set("ETag", fmt.Sprintf(`"%s"`, job.SHA256))
 }
 
 func (s *Server) exportJobFromRequest(

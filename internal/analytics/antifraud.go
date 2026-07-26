@@ -772,8 +772,10 @@ func (c *Client) ListAntifraudPage(
 	limit uint64,
 	cursor *AntifraudCursor,
 ) (AntifraudPage, error) {
-	if limit == 0 || limit > 50000 {
+	if limit == 0 {
 		limit = 200
+	} else if limit > 1000 {
+		limit = 1000
 	}
 	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
 		return AntifraudPage{}, err

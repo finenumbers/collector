@@ -47,8 +47,30 @@ func TestPurgeDeviceDataRemovesEveryDeviceScopedTable(t *testing.T) {
 		VALUES(?,?,?,?,?,?)`, uuid.New(), deviceID, uuid.New(), 1, now, "purge-test"); err != nil {
 		t.Fatal(err)
 	}
+	satelRecordID := uuid.New()
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.satel_rtu_cdr
+		(record_id,device_id,file_id,row_number,ingested_at,cdr_id)
+		VALUES(?,?,?,?,?,?)`,
+		satelRecordID, deviceID, uuid.New(), 1, now, "purge-test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.satel_rtu_cdr_time_facts
+		(device_id,timezone_revision,record_id,interpreted_at)
+		VALUES(?,?,?,?)`, deviceID, 1, satelRecordID, now); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.PurgeDeviceData(ctx, deviceID); err != nil {
 		t.Fatal(err)
+	}
+	for _, table := range []string{"satel_rtu_cdr", "satel_rtu_cdr_time_facts"} {
+		var satelRemaining uint64
+		query := "SELECT count() FROM collector.`" + table + "` WHERE device_id=?"
+		if err := client.Conn.QueryRow(ctx, query, deviceID).Scan(&satelRemaining); err != nil {
+			t.Fatal(err)
+		}
+		if satelRemaining != 0 {
+			t.Fatalf("purge left %d rows in %s", satelRemaining, table)
+		}
 	}
 	var remaining uint64
 	if err := client.Conn.QueryRow(ctx,

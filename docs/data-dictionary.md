@@ -26,6 +26,11 @@ raw-only объект надёжно записан в MinIO и не перед�
 parser/version, attempts и ошибку отдельного архива. Автоактивация Satel требует
 одинакового точного 120-column fingerprint в последних immutable samples.
 
+`retention_policies.cdr` задаёт TTL typed CDR оборудования;
+`retention_policies.softswitch_cdr` независимо задаёт TTL таблиц
+`satel_rtu_cdr` и `satel_rtu_cdr_time_facts`. Политика `raw_cdr_archive`
+остаётся общей для неизменяемых файлов оборудования и софтсвитчей в MinIO.
+
 ## Время
 
 `received_at` — UTC instant приёма datagram Collector. Raw wall clock из Eltex/RFC3164

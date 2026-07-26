@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   canManageUsers, canOpenSystemSettings, normalizeFirmwareScheme,
-  purgeConfirmationReady, purgeRetryLabel,
+  purgeConfirmationReady, purgeRetryLabel, retentionDescription, retentionLabel,
 } from './settings'
 
 describe('system settings RBAC', () => {
@@ -15,6 +15,20 @@ describe('system settings RBAC', () => {
     expect(canManageUsers('admin')).toBe(true)
     expect(canManageUsers('analyst')).toBe(false)
     expect(canManageUsers('viewer')).toBe(false)
+  })
+})
+
+describe('retention policy presentation', () => {
+  it('distinguishes equipment and softswitch CDR retention', () => {
+    expect(retentionLabel('cdr')).toBe('CDR оборудования')
+    expect(retentionDescription('cdr')).toContain('оборудования')
+    expect(retentionLabel('softswitch_cdr')).toBe('CDR софтсвитчей')
+    expect(retentionDescription('softswitch_cdr')).toContain('софтсвитчей')
+  })
+
+  it('labels the raw CDR archive as shared by every source', () => {
+    expect(retentionLabel('raw_cdr_archive')).toBe('Raw CDR архив всех источников')
+    expect(retentionDescription('raw_cdr_archive')).toContain('всех источников')
   })
 })
 

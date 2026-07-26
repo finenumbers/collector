@@ -15,6 +15,10 @@ updates:
     groups:
       frontend-dependencies:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: typescript
+        versions: [">=6.1.0"]
 
   - package-ecosystem: docker
     directory: /

@@ -72,6 +72,12 @@ MinIO object без повторной загрузки пользователе
 не участвуют в определении; mixed/unknown форматы остаются raw. Detection provenance и
 replay counters хранятся в PostgreSQL и публикуются в API/UI.
 
+Retention разделён по назначению: `cdr` управляет typed CDR оборудования,
+`softswitch_cdr` — typed CDR софтсвитчей (сейчас Satel RTU), а
+`raw_cdr_archive` остаётся общей MinIO lifecycle-политикой для исходных файлов
+всех категорий. Сроки аналитических projections разных source categories не
+связаны, при этом immutable archive contract остаётся единым.
+
 ## Границы надёжности
 
 UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в ingress process. После этого datagram удаляется из ingress spool только после ACK основного Collector, а из app spool — только после JetStream acknowledgement. Один `event_id` проходит через оба spool; повторная передача безопасно перезаписывает BoltDB key, а `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.

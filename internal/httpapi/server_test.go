@@ -2,14 +2,18 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"collector/internal/analytics"
 	"collector/internal/config"
 	"collector/internal/store"
+
+	"github.com/google/uuid"
 )
 
 func TestRevisionDiagnosticsAreIncludedInAPIResponse(t *testing.T) {
@@ -129,4 +133,163 @@ func TestRetentionRoutesRemainAdminOnly(t *testing.T) {
 			t.Fatalf("role %s got status %d, want %d", test.role, response.Code, test.want)
 		}
 	}
+}
+
+func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
+	databaseURL := os.Getenv("POSTGRES_TEST_URL")
+	if databaseURL == "" {
+		t.Skip("POSTGRES_TEST_URL is not set")
+	}
+	ctx := context.Background()
+	control, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.DB.Close()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	var cdrColumnsExists bool
+	if err := control.DB.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='devices' AND column_name='cdr_columns'
+	)`).Scan(&cdrColumnsExists); err != nil {
+		t.Fatal(err)
+	}
+	if cdrColumnsExists {
+		t.Fatal("cdr_columns remains after PostgreSQL migrations")
+	}
+	actor := store.User{ID: uuid.New(), Username: "retention-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = control.DB.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, actor.ID)
+	})
+	t.Cleanup(func() {
+		_, _ = control.DB.Exec(context.Background(), `UPDATE retention_policies SET
+			active_days=1095,pending_days=NULL,effective_at=NULL,updated_by=NULL,last_error=NULL
+			WHERE policy_class='syslog'`)
+	})
+
+	t.Run("success returns applied policy", func(t *testing.T) {
+		if _, err := control.DB.Exec(ctx, `UPDATE retention_policies SET
+			active_days=30,pending_days=NULL,effective_at=NULL,last_error=NULL
+			WHERE policy_class='syslog'`); err != nil {
+			t.Fatal(err)
+		}
+		called := false
+		server := &Server{
+			Store: control,
+			ReconcileRetention: func(ctx context.Context) error {
+				called = true
+				policies, err := control.DueRetentionPolicies(ctx)
+				if err != nil {
+					return err
+				}
+				for _, policy := range policies {
+					if policy.PolicyClass == "syslog" {
+						return control.CompleteRetentionPolicy(
+							ctx, policy.PolicyClass, *policy.PendingDays, policy.UpdatedAt,
+						)
+					}
+				}
+				return errors.New("updated policy was not due")
+			},
+		}
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPatch, "/api/system/retention",
+			strings.NewReader(`{"policyClass":"syslog","days":14}`))
+		request = request.WithContext(context.WithValue(request.Context(), sessionKey,
+			store.Session{User: actor}))
+		server.updateRetention(response, request)
+		if !called || response.Code != http.StatusOK {
+			t.Fatalf("called=%v status=%d body=%s", called, response.Code, response.Body.String())
+		}
+		if !strings.Contains(response.Body.String(), `"activeDays":14`) ||
+			!strings.Contains(response.Body.String(), `"pendingDays":null`) {
+			t.Fatalf("response was not refreshed: %s", response.Body.String())
+		}
+	})
+
+	t.Run("failure remains pending", func(t *testing.T) {
+		if _, err := control.DB.Exec(ctx, `UPDATE retention_policies SET
+			active_days=30,pending_days=NULL,effective_at=NULL,last_error=NULL
+			WHERE policy_class='syslog'`); err != nil {
+			t.Fatal(err)
+		}
+		applyErr := errors.New("clickhouse unavailable")
+		server := &Server{
+			Store: control,
+			ReconcileRetention: func(ctx context.Context) error {
+				policies, err := control.DueRetentionPolicies(ctx)
+				if err != nil {
+					return err
+				}
+				for _, policy := range policies {
+					if policy.PolicyClass == "syslog" {
+						if err := control.FailRetentionPolicy(
+							ctx, policy.PolicyClass, policy.UpdatedAt, applyErr,
+						); err != nil {
+							return err
+						}
+						return applyErr
+					}
+				}
+				return errors.New("updated policy was not due")
+			},
+		}
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPatch, "/api/system/retention",
+			strings.NewReader(`{"policyClass":"syslog","days":14}`))
+		request = request.WithContext(context.WithValue(request.Context(), sessionKey,
+			store.Session{User: actor}))
+		server.updateRetention(response, request)
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		if !strings.Contains(response.Body.String(), `"pendingDays":14`) ||
+			!strings.Contains(response.Body.String(), `"lastError":"clickhouse unavailable"`) {
+			t.Fatalf("failure response was not refreshed: %s", response.Body.String())
+		}
+		policies, err := control.ListRetentionPolicies(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, policy := range policies {
+			if policy.PolicyClass == "syslog" {
+				if policy.PendingDays == nil || *policy.PendingDays != 14 ||
+					policy.LastError == nil || *policy.LastError != applyErr.Error() {
+					t.Fatalf("failed policy was not preserved: %+v", policy)
+				}
+				return
+			}
+		}
+		t.Fatal("syslog policy not found")
+	})
+
+	t.Run("failed pending change can be cancelled", func(t *testing.T) {
+		called := false
+		server := &Server{
+			Store: control,
+			ReconcileRetention: func(context.Context) error {
+				called = true
+				return nil
+			},
+		}
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPatch, "/api/system/retention",
+			strings.NewReader(`{"policyClass":"syslog","cancel":true}`))
+		request = request.WithContext(context.WithValue(request.Context(), sessionKey,
+			store.Session{User: actor}))
+		server.updateRetention(response, request)
+		if !called || response.Code != http.StatusOK {
+			t.Fatalf("called=%v status=%d body=%s", called, response.Code, response.Body.String())
+		}
+		if !strings.Contains(response.Body.String(), `"pendingDays":null`) ||
+			!strings.Contains(response.Body.String(), `"lastError":null`) {
+			t.Fatalf("cancel response was not refreshed: %s", response.Body.String())
+		}
+	})
 }

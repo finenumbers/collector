@@ -87,7 +87,6 @@ type Device = {
   ftpHome: string
   generatedPassword?: string
   enabled: boolean
-  cdrColumns: string[]
   purgeState?: 'active' | 'deleting' | 'purge_failed'
   purgeError?: string
 }
@@ -363,7 +362,7 @@ function AuthScreen(props: {
   }
   return <Centered>
     <form className="auth-panel" onSubmit={submit}>
-      <div className="product-mark"><Radio size={18} /> SMG Collector</div>
+      <div className="product-mark"><img src="/fine-numbers-logo.png" alt="Fine Numbers" /></div>
       <h1>{props.bootstrap ? 'Первичная настройка' : 'Вход в систему'}</h1>
       <p>{props.bootstrap
         ? 'Создайте первого администратора. Пароль должен содержать не менее 12 символов.'
@@ -409,7 +408,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   return <div className="workspace">
     <aside className="sidebar">
       <button className="brand" onClick={() => setActiveView('dashboard')}>
-        <Radio size={17} /><span>SMG Collector</span>
+        <img src="/fine-numbers-logo.png" alt="Fine Numbers" />
       </button>
       <button className={`dashboard-nav ${activeView === 'dashboard' ? 'active' : ''}`}
         onClick={() => setActiveView('dashboard')}>
@@ -1143,7 +1142,6 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
   const [form, setForm] = useState({
     name: '', model: 'SMG-1016M', firmware: '3.23.2', timezone: 'Asia/Novosibirsk',
     managementIp: '', syslogSourceIp: '', deviceSign: '', antifraudEnabled: true, antifraudMode: 'Custom',
-    cdrColumnsText: '',
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1152,11 +1150,8 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
     event.preventDefault()
     setBusy(true)
     try {
-      const { cdrColumnsText, ...deviceForm } = form
       const device = await api<Device>('/devices', {
-        method: 'POST', body: JSON.stringify({
-          ...deviceForm, cdrColumns: parseCDRColumns(cdrColumnsText),
-        }),
+        method: 'POST', body: JSON.stringify(form),
       })
       onCreated(device)
     } catch (reason) {
@@ -1179,10 +1174,6 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
         </select></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
-        <label className="full-width">Профиль колонок CDR (для файлов без заголовка)
-          <textarea placeholder="Device sign; Setup time; Connect time; ..."
-            value={form.cdrColumnsText} onChange={(e) => update('cdrColumnsText', e.target.value)} />
-        </label>
         <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
           onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
         <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled} value={form.antifraudMode}
@@ -1209,7 +1200,6 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
     managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp,
     deviceSign: device.deviceSign, antifraudEnabled: device.antifraudEnabled,
     antifraudMode: device.antifraudMode, enabled: device.enabled,
-    cdrColumnsText: (device.cdrColumns || []).join('; '),
   })
   const [error, setError] = useState(device.purgeError || '')
   const [busy, setBusy] = useState(false)
@@ -1230,11 +1220,8 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
     setBusy(true)
     setError('')
     try {
-      const { cdrColumnsText, ...deviceForm } = form
       onSaved(await api<Device>(`/devices/${device.id}`, {
-        method: 'PATCH', body: JSON.stringify({
-          ...deviceForm, cdrColumns: parseCDRColumns(cdrColumnsText),
-        }),
+        method: 'PATCH', body: JSON.stringify(form),
       }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Ошибка сохранения')
@@ -1306,10 +1293,6 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
         </select></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
-        <label className="full-width">Профиль колонок CDR (для файлов без заголовка)
-          <textarea placeholder="Device sign; Setup time; Connect time; ..."
-            value={form.cdrColumnsText} onChange={(e) => update('cdrColumnsText', e.target.value)} />
-        </label>
         <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
           onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
         <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled}
@@ -1425,23 +1408,17 @@ function SystemSettingsPage({ user }: { user: User }) {
     }
   }
   async function changeRetention(policy: RetentionPolicy, days: number) {
-    const decreasing = days < policy.activeDays
-    if (decreasing && !window.confirm(
-      `Срок ${retentionLabel(policy.policyClass)} уменьшится с ${policy.activeDays} до ${days} дней. ` +
-      'Удаление станет необратимым после 7-дневного периода ожидания.',
-    )) return
     setBusy(true)
     setError('')
     try {
       await api('/system/retention', {
         method: 'PATCH',
-        body: JSON.stringify({
-          policyClass: policy.policyClass, days, confirm: decreasing,
-        }),
+        body: JSON.stringify({ policyClass: policy.policyClass, days }),
       })
       await load()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Ошибка изменения retention')
+      await load()
     } finally {
       setBusy(false)
     }
@@ -1542,7 +1519,7 @@ function SystemSettingsPage({ user }: { user: User }) {
       </section>}
       {tab === 'retention' && canManageUsers(user.role) && <section>
         <div className="page-heading"><div><h3>Хранение данных</h3>
-          <p>Уменьшение срока вступает в силу через 7 дней и может быть отменено.</p></div></div>
+          <p>Новый срок применяется сразу ко всем ресурсам выбранного класса.</p></div></div>
         <div className="retention-list">{retention.map((policy) =>
           <RetentionPolicyEditor key={`${policy.policyClass}:${policy.activeDays}:${policy.pendingDays}`}
             policy={policy} busy={busy}
@@ -1578,12 +1555,11 @@ function RetentionPolicyEditor({ policy, busy, onChange, onCancel }: {
       <button className="secondary" disabled={busy || days < 7 || days > 1095 ||
         days === (policy.pendingDays || policy.activeDays)}
       onClick={() => void onChange(days)}>Сохранить</button>
-      {policy.pendingDays != null && <button className="danger ghost" disabled={busy}
-        onClick={() => void onCancel()}>Отменить</button>}
+      {policy.pendingDays != null && policy.lastError && <button className="danger ghost"
+        disabled={busy} onClick={() => void onCancel()}>Отменить ожидающее</button>}
     </div>
     {policy.pendingDays != null && <div className="retention-pending">
-      Запланировано: {policy.pendingDays} дней с {formatTime(policy.effectiveAt, 'UTC')}
-      {' · '}{retentionCountdown(policy.effectiveAt, referenceNow)}
+      {policy.lastError ? 'Не применено' : 'Применяется'}: {policy.pendingDays} дней
     </div>}
     {policy.lastError && <div className="form-error">{policy.lastError}</div>}
   </article>
@@ -1605,14 +1581,6 @@ function retentionDescription(value: RetentionPolicy['policyClass']) {
     derived: 'RADIUS lifecycle, AntiFraud и корреляция.',
     raw_cdr_archive: 'Неизменённые исходные CDR-файлы в объектном хранилище.',
   }[value]
-}
-
-function retentionCountdown(effectiveAt: string | undefined, now: number) {
-  if (!effectiveAt) return 'ожидает применения'
-  const remaining = new Date(effectiveAt).getTime() - now
-  if (remaining <= 0) return 'применяется'
-  const hours = Math.ceil(remaining / 3_600_000)
-  return hours >= 48 ? `через ${Math.ceil(hours / 24)} дн.` : `через ${hours} ч.`
 }
 
 function UserPasswordReset({ user, disabled, onReset, onClose }: {
@@ -1655,10 +1623,6 @@ function CredentialsDialog({ device, onClose }: { device: Device; onClose: () =>
     </dl>
     <div className="dialog-actions"><button className="primary" onClick={onClose}>Готово</button></div>
   </Modal>
-}
-
-function parseCDRColumns(value: string) {
-  return value.split(/[\n;,]+/).map((column) => column.trim()).filter(Boolean)
 }
 
 const primaryTimezones = [

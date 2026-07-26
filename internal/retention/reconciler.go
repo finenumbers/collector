@@ -4,22 +4,60 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
-	"collector/internal/analytics"
-	"collector/internal/archive"
 	"collector/internal/store"
 )
 
+type policyStore interface {
+	TryRetentionLock(context.Context) (func(), bool, error)
+	CleanupExpiredSessions(context.Context) error
+	DueRetentionPolicies(context.Context) ([]store.RetentionPolicy, error)
+	FailRetentionPolicy(context.Context, string, time.Time, error) error
+	CompleteRetentionPolicy(context.Context, string, int, time.Time) error
+}
+
+type analyticsRetention interface {
+	ApplyRetention(context.Context, string, int) error
+}
+
+type archiveRetention interface {
+	ApplyCDRRetention(context.Context, int) error
+}
+
 type Reconciler struct {
-	Store     *store.Store
-	Analytics *analytics.Client
-	Archive   *archive.Archive
+	Store     policyStore
+	Analytics analyticsRetention
+	Archive   archiveRetention
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
-	release, acquired, err := r.Store.TryRetentionLock(ctx)
-	if err != nil || !acquired {
-		return err
+	return r.run(ctx, false)
+}
+
+func (r *Reconciler) RunNow(ctx context.Context) error {
+	return r.run(ctx, true)
+}
+
+func (r *Reconciler) run(ctx context.Context, waitForLock bool) error {
+	var release func()
+	for {
+		acquiredRelease, acquired, err := r.Store.TryRetentionLock(ctx)
+		if err != nil {
+			return err
+		}
+		if acquired {
+			release = acquiredRelease
+			break
+		}
+		if !waitForLock {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	defer release()
 	if err := r.Store.CleanupExpiredSessions(ctx); err != nil {

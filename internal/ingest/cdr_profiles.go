@@ -51,12 +51,3 @@ func CDRProfileForFirmware(firmware string) []string {
 		return append([]string(nil), cdrProfile3232...)
 	}
 }
-
-// ResolveCDRHeader picks a manual device override when present, otherwise the
-// built-in profile for the firmware scheme.
-func ResolveCDRHeader(firmware string, override []string) []string {
-	if len(override) > 0 {
-		return override
-	}
-	return CDRProfileForFirmware(firmware)
-}

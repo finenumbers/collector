@@ -33,17 +33,18 @@ import (
 const sessionCookie = "collector_session"
 
 type Server struct {
-	Config            config.Config
-	Store             *store.Store
-	Analytics         *analytics.Client
-	FTP               *ftpclient.Provisioner
-	Archive           *archive.Archive
-	StaticDir         string
-	Version           string
-	Metrics           *ingest.Metrics
-	Spool             *spool.Queue
-	NATS              *nats.Conn
-	IngressStatusPath string
+	Config             config.Config
+	Store              *store.Store
+	Analytics          *analytics.Client
+	FTP                *ftpclient.Provisioner
+	Archive            *archive.Archive
+	StaticDir          string
+	Version            string
+	Metrics            *ingest.Metrics
+	Spool              *spool.Queue
+	NATS               *nats.Conn
+	IngressStatusPath  string
+	ReconcileRetention func(context.Context) error
 }
 
 type contextKey string
@@ -350,7 +351,6 @@ func (s *Server) updateRetention(writer http.ResponseWriter, request *http.Reque
 	var input struct {
 		PolicyClass string `json:"policyClass"`
 		Days        int    `json:"days"`
-		Confirm     bool   `json:"confirm"`
 		Cancel      bool   `json:"cancel"`
 	}
 	if err := decodeJSON(request, &input); err != nil {
@@ -358,8 +358,8 @@ func (s *Server) updateRetention(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	session := currentSession(request)
-	policy, err := s.Store.UpdateRetentionPolicy(request.Context(), input.PolicyClass,
-		input.Days, input.Confirm, input.Cancel, session.User, request.RemoteAddr)
+	_, err := s.Store.UpdateRetentionPolicy(request.Context(), input.PolicyClass,
+		input.Days, input.Cancel, session.User, request.RemoteAddr)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(writer, http.StatusNotFound, "retention policy not found")
 		return
@@ -368,7 +368,39 @@ func (s *Server) updateRetention(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(writer, http.StatusOK, policy)
+	if s.ReconcileRetention == nil {
+		writeError(writer, http.StatusInternalServerError, "retention reconciler is unavailable")
+		return
+	}
+	reconcileErr := s.ReconcileRetention(request.Context())
+	policies, refreshErr := s.Store.ListRetentionPolicies(request.Context())
+	var refreshed *store.RetentionPolicy
+	for index := range policies {
+		if policies[index].PolicyClass == input.PolicyClass {
+			refreshed = &policies[index]
+			break
+		}
+	}
+	if reconcileErr != nil {
+		if refreshErr == nil && refreshed != nil {
+			writeJSON(writer, http.StatusBadGateway, map[string]any{
+				"error":  "unable to apply retention policy",
+				"policy": refreshed,
+			})
+			return
+		}
+		writeError(writer, http.StatusBadGateway, "unable to apply retention policy")
+		return
+	}
+	if refreshErr != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to refresh retention policy")
+		return
+	}
+	if refreshed != nil {
+		writeJSON(writer, http.StatusOK, refreshed)
+		return
+	}
+	writeError(writer, http.StatusNotFound, "retention policy not found")
 }
 
 func (s *Server) listUsers(writer http.ResponseWriter, request *http.Request) {

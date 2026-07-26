@@ -44,7 +44,7 @@ func (s *Store) ListRetentionPolicies(ctx context.Context) ([]RetentionPolicy, e
 }
 
 func (s *Store) UpdateRetentionPolicy(
-	ctx context.Context, class string, days int, confirm bool, cancel bool,
+	ctx context.Context, class string, days int, cancel bool,
 	actor User, remoteIP string,
 ) (RetentionPolicy, error) {
 	if !validRetentionClass(class) {
@@ -73,14 +73,13 @@ func (s *Store) UpdateRetentionPolicy(
 		_, err = tx.Exec(ctx, `UPDATE retention_policies SET pending_days=NULL,effective_at=NULL,
 			updated_by=$2,last_error=NULL,updated_at=now() WHERE policy_class=$1`, class, actor.ID)
 	} else {
-		effective, scheduleErr := retentionEffectiveAt(time.Now().UTC(), active, days, confirm)
+		effective, scheduleErr := retentionEffectiveAt(time.Now().UTC(), days)
 		if scheduleErr != nil {
 			return RetentionPolicy{}, scheduleErr
 		}
 		details["days"] = days
 		details["previousDays"] = active
 		details["effectiveAt"] = effective
-		details["confirmed"] = confirm
 		_, err = tx.Exec(ctx, `UPDATE retention_policies SET pending_days=$2,effective_at=$3,
 			updated_by=$4,last_error=NULL,updated_at=now() WHERE policy_class=$1`,
 			class, days, effective, actor.ID)
@@ -110,15 +109,9 @@ func (s *Store) UpdateRetentionPolicy(
 	return RetentionPolicy{}, ErrNotFound
 }
 
-func retentionEffectiveAt(now time.Time, active, days int, confirm bool) (time.Time, error) {
+func retentionEffectiveAt(now time.Time, days int) (time.Time, error) {
 	if days < 7 || days > 1095 {
 		return time.Time{}, errors.New("retention days must be between 7 and 1095")
-	}
-	if days < active {
-		if !confirm {
-			return time.Time{}, errors.New("decreasing retention requires explicit confirmation")
-		}
-		return now.Add(7 * 24 * time.Hour), nil
 	}
 	return now, nil
 }

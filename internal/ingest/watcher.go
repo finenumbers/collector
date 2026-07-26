@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -146,12 +145,10 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		)
 		return fmt.Errorf("invalid active device timezone %q: %w", device.ActiveTimezone, err)
 	}
-	var columns []string
-	_ = json.Unmarshal(device.CDRColumns, &columns)
 	result, err := (CDRParser{
 		DeviceID: device.ID, FileID: fileID, Location: location,
 		TimezoneRevision:   uint64(device.ActiveTimezoneRevision),
-		ExpectedHeader:     ResolveCDRHeader(device.Firmware, columns),
+		ExpectedHeader:     CDRProfileForFirmware(device.Firmware),
 		ExpectedDeviceSign: device.DeviceSign,
 	}).Parse(bytes.NewReader(decoded))
 	if err != nil {

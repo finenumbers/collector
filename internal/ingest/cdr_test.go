@@ -132,12 +132,7 @@ func TestCDRProfile3410PadsShortRows(t *testing.T) {
 	}
 }
 
-func TestResolveCDRHeaderPrefersOverride(t *testing.T) {
-	override := []string{"Device Sign", "Setup time"}
-	got := ResolveCDRHeader("3.410", override)
-	if len(got) != 2 || got[0] != "Device Sign" {
-		t.Fatalf("override not preferred: %#v", got)
-	}
+func TestCDRProfilesMatchFirmwareSchemes(t *testing.T) {
 	if len(CDRProfileForFirmware("3.410")) != 52 {
 		t.Fatalf("3.410 profile want 52 columns, got %d", len(CDRProfileForFirmware("3.410")))
 	}

@@ -58,28 +58,27 @@ type UserUpdate struct {
 }
 
 type Device struct {
-	ID                     uuid.UUID       `json:"id"`
-	Name                   string          `json:"name"`
-	Model                  string          `json:"model"`
-	Firmware               string          `json:"firmware"`
-	Timezone               string          `json:"timezone"`
-	ActiveTimezone         string          `json:"activeTimezone"`
-	TimezoneRevision       int64           `json:"timezoneRevision"`
-	ActiveTimezoneRevision int64           `json:"activeTimezoneRevision"`
-	CDRSourceTimezone      string          `json:"cdrSourceTimezone"`
-	ManagementIP           *string         `json:"managementIp,omitempty"`
-	SyslogSourceIP         string          `json:"syslogSourceIp"`
-	DeviceSign             string          `json:"deviceSign"`
-	AntifraudEnabled       bool            `json:"antifraudEnabled"`
-	AntifraudMode          string          `json:"antifraudMode"`
-	FTPUsername            string          `json:"ftpUsername"`
-	FTPHome                string          `json:"ftpHome"`
-	CDRColumns             json.RawMessage `json:"cdrColumns"`
-	Enabled                bool            `json:"enabled"`
-	PurgeState             string          `json:"purgeState"`
-	PurgeError             string          `json:"purgeError,omitempty"`
-	CreatedAt              time.Time       `json:"createdAt"`
-	GeneratedPassword      string          `json:"generatedPassword,omitempty"`
+	ID                     uuid.UUID `json:"id"`
+	Name                   string    `json:"name"`
+	Model                  string    `json:"model"`
+	Firmware               string    `json:"firmware"`
+	Timezone               string    `json:"timezone"`
+	ActiveTimezone         string    `json:"activeTimezone"`
+	TimezoneRevision       int64     `json:"timezoneRevision"`
+	ActiveTimezoneRevision int64     `json:"activeTimezoneRevision"`
+	CDRSourceTimezone      string    `json:"cdrSourceTimezone"`
+	ManagementIP           *string   `json:"managementIp,omitempty"`
+	SyslogSourceIP         string    `json:"syslogSourceIp"`
+	DeviceSign             string    `json:"deviceSign"`
+	AntifraudEnabled       bool      `json:"antifraudEnabled"`
+	AntifraudMode          string    `json:"antifraudMode"`
+	FTPUsername            string    `json:"ftpUsername"`
+	FTPHome                string    `json:"ftpHome"`
+	Enabled                bool      `json:"enabled"`
+	PurgeState             string    `json:"purgeState"`
+	PurgeError             string    `json:"purgeError,omitempty"`
+	CreatedAt              time.Time `json:"createdAt"`
+	GeneratedPassword      string    `json:"generatedPassword,omitempty"`
 }
 
 type DeviceTimeConfig struct {
@@ -90,29 +89,27 @@ type DeviceTimeConfig struct {
 }
 
 type NewDevice struct {
-	Name             string   `json:"name"`
-	Model            string   `json:"model"`
-	Firmware         string   `json:"firmware"`
-	Timezone         string   `json:"timezone"`
-	ManagementIP     string   `json:"managementIp"`
-	SyslogSourceIP   string   `json:"syslogSourceIp"`
-	DeviceSign       string   `json:"deviceSign"`
-	AntifraudEnabled bool     `json:"antifraudEnabled"`
-	AntifraudMode    string   `json:"antifraudMode"`
-	CDRColumns       []string `json:"cdrColumns"`
+	Name             string `json:"name"`
+	Model            string `json:"model"`
+	Firmware         string `json:"firmware"`
+	Timezone         string `json:"timezone"`
+	ManagementIP     string `json:"managementIp"`
+	SyslogSourceIP   string `json:"syslogSourceIp"`
+	DeviceSign       string `json:"deviceSign"`
+	AntifraudEnabled bool   `json:"antifraudEnabled"`
+	AntifraudMode    string `json:"antifraudMode"`
 }
 
 type DeviceUpdate struct {
-	Name             string   `json:"name"`
-	Firmware         string   `json:"firmware"`
-	Timezone         string   `json:"timezone"`
-	ManagementIP     string   `json:"managementIp"`
-	SyslogSourceIP   string   `json:"syslogSourceIp"`
-	DeviceSign       string   `json:"deviceSign"`
-	AntifraudEnabled bool     `json:"antifraudEnabled"`
-	AntifraudMode    string   `json:"antifraudMode"`
-	Enabled          bool     `json:"enabled"`
-	CDRColumns       []string `json:"cdrColumns"`
+	Name             string `json:"name"`
+	Firmware         string `json:"firmware"`
+	Timezone         string `json:"timezone"`
+	ManagementIP     string `json:"managementIp"`
+	SyslogSourceIP   string `json:"syslogSourceIp"`
+	DeviceSign       string `json:"deviceSign"`
+	AntifraudEnabled bool   `json:"antifraudEnabled"`
+	AntifraudMode    string `json:"antifraudMode"`
+	Enabled          bool   `json:"enabled"`
 }
 
 type Session struct {
@@ -515,7 +512,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.DB.Query(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
-		ftp_username,ftp_home,cdr_columns,enabled,purge_state,purge_error,created_at
+		ftp_username,ftp_home,enabled,purge_state,purge_error,created_at
 		FROM devices ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -528,7 +525,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+			&device.FTPHome, &device.Enabled, &device.PurgeState,
 			&device.PurgeError, &device.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -586,13 +583,13 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	err := s.DB.QueryRow(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
-		ftp_username,ftp_home,cdr_columns,enabled,purge_state,purge_error,created_at
+		ftp_username,ftp_home,enabled,purge_state,purge_error,created_at
 		FROM devices WHERE id=$1`, id).
 		Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-			&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+			&device.FTPHome, &device.Enabled, &device.PurgeState,
 			&device.PurgeError, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
@@ -795,7 +792,6 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		return Device{}, err
 	}
 	ftpHome := "/srv/cdr/" + id.String()
-	columns, _ := json.Marshal(input.CDRColumns)
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return Device{}, err
@@ -805,20 +801,20 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	err = tx.QueryRow(ctx, `INSERT INTO devices
 		(id,name,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,management_ip,syslog_source_ip,device_sign,
-		 antifraud_enabled,antifraud_mode,ftp_username,ftp_home,cdr_columns)
-		VALUES($1,$2,$3,$4,$5,$5,1,1,$5,NULLIF($6,'')::inet,$7,$8,$9,$10,$11,$12,$13)
+		 antifraud_enabled,antifraud_mode,ftp_username,ftp_home)
+		VALUES($1,$2,$3,$4,$5,$5,1,1,$5,NULLIF($6,'')::inet,$7,$8,$9,$10,$11,$12)
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
 		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
-		 cdr_columns,enabled,purge_state,purge_error,created_at`,
+		 enabled,purge_state,purge_error,created_at`,
 		id, strings.TrimSpace(input.Name), input.Model, input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign, input.AntifraudEnabled,
-		input.AntifraudMode, ftpUsername, ftpHome, columns,
+		input.AntifraudMode, ftpUsername, ftpHome,
 	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+		&device.FTPHome, &device.Enabled, &device.PurgeState,
 		&device.PurgeError, &device.CreatedAt)
 	if err != nil {
 		return Device{}, err
@@ -861,7 +857,6 @@ func (s *Store) UpdateDevice(
 		return Device{}, err
 	}
 	input.Firmware = firmware
-	columns, _ := json.Marshal(input.CDRColumns)
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return Device{}, err
@@ -874,20 +869,20 @@ func (s *Store) UpdateDevice(
 			ELSE timezone_revision END,
 		timezone=$4,cdr_source_timezone=$4,management_ip=NULLIF($5,'')::inet,
 		syslog_source_ip=$6,device_sign=$7,antifraud_enabled=$8,antifraud_mode=$9,
-		enabled=$10,cdr_columns=$11
+		enabled=$10
 		WHERE id=$1 AND purge_state='active'
 		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
 			active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
 			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
-			cdr_columns,enabled,purge_state,purge_error,created_at`,
+			enabled,purge_state,purge_error,created_at`,
 		id, strings.TrimSpace(input.Name), input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
-		input.AntifraudEnabled, input.AntifraudMode, input.Enabled, columns,
+		input.AntifraudEnabled, input.AntifraudMode, input.Enabled,
 	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
-		&device.FTPHome, &device.CDRColumns, &device.Enabled, &device.PurgeState,
+		&device.FTPHome, &device.Enabled, &device.PurgeState,
 		&device.PurgeError, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound

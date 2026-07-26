@@ -207,6 +207,22 @@ type SyslogDiagnostics = {
   missingCdrInterpretations: number
   radiusRawFragments: number
   lifecycleDerived: number
+  antifraudPackets: number
+  antifraudCalls: number
+  antifraudOperations: number
+  operationOutstanding: number
+  operationVerificationAccept: number
+  operationVerificationReject: number
+  operationVerificationFailOpen: number
+  operationInformational: number
+  unlinkedRadiusFragments: number
+  ambiguousSessionCollisions: number
+  unknownEvents: number
+  unknownEnvelopeAndBody: number
+  unknownNoCategoryEvidence: number
+  unknownEmptyMessage: number
+  fragmentAmbiguity: number
+  parserProjectionStatus: string
   syslogConstructs: number
   constructMembers: number
   constructOrphans: number
@@ -1300,6 +1316,24 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>Replay CDR: <strong>{formatCount(value.cdrReplayProcessed)} / {formatCount(value.cdrReplayTotal)}</strong></span>
       <span>CDR без time fact: <strong>{formatCount(value.missingCdrInterpretations)}</strong></span>
       <span>RADIUS raw / lifecycle: <strong>{formatCount(value.radiusRawFragments)} / {formatCount(value.lifecycleDerived)}</strong></span>
+      <span>AntiFraud packets / calls / operations: <strong>
+        {formatCount(value.antifraudPackets)} / {formatCount(value.antifraudCalls)} / {formatCount(value.antifraudOperations)}
+      </strong></span>
+      <span>Operations accept / reject / fail-open / info / open: <strong>
+        {formatCount(value.operationVerificationAccept)} / {formatCount(value.operationVerificationReject)} /
+        {formatCount(value.operationVerificationFailOpen)} / {formatCount(value.operationInformational)} /
+        {formatCount(value.operationOutstanding)}
+      </strong></span>
+      <span>RADIUS fragments unlinked / session collisions: <strong>
+        {formatCount(value.unlinkedRadiusFragments)} / {formatCount(value.ambiguousSessionCollisions)}
+      </strong></span>
+      <span>Unknown total / envelope / evidence / empty: <strong>
+        {formatCount(value.unknownEvents)} / {formatCount(value.unknownEnvelopeAndBody)} /
+        {formatCount(value.unknownNoCategoryEvidence)} / {formatCount(value.unknownEmptyMessage)}
+      </strong></span>
+      <span>Fragment ambiguity / parser projection: <strong>
+        {formatCount(value.fragmentAmbiguity)} / {value.parserProjectionStatus || 'building'}
+      </strong></span>
       <span>Syslog constructs / members: <strong>{formatCount(value.syslogConstructs)} / {formatCount(value.constructMembers)}</strong></span>
       <span>Construct heuristic / orphan: <strong>{formatCount(value.heuristicConstructs)} / {formatCount(value.constructOrphans)}</strong></span>
       <span>Последний raw / fact: <strong>{formatTime(value.latestRawAt, 'UTC')} / {formatTime(value.latestFactAt, 'UTC')}</strong></span>
@@ -1373,7 +1407,7 @@ function AntifraudTable({ rows, timezone, onSelect }: {
     className={`outcome-row outcome-${antifraudOutcome(row)}`}
     onClick={() => onSelect(row)}>
     <td className="mono">{formatTime(row.lastEventAt, timezone)}</td>
-    <td><span className="tag">{row.requestType || 'не определена'}</span></td>
+    <td><span className="tag">{operationTypeLabel(row.requestType)}</span></td>
     <td><span className={`decision ${row.decision || 'pending'}`}>
       {decisionLabel(row.decision)}</span>
       <span className={`outcome-badge ${antifraudOutcome(row)}`}>
@@ -1411,9 +1445,9 @@ function AntifraudDrawer({ device, row, onClose }: {
       <span className="mono">{row.transactionId}</span></div>
       <button onClick={onClose}>×</button></div>
     <div className="call-facts">
-      <span><small>Операция</small><strong>{row.requestType || '—'}</strong></span>
+      <span><small>Операция</small><strong>{operationTypeLabel(row.requestType)}</strong></span>
       <span><small>Решение</small><strong>{decisionLabel(row.decision)}</strong></span>
-      <span><small>Причина</small><strong>{row.decisionReason || '—'}</strong></span>
+      <span><small>Причина</small><strong>{terminalReasonLabel(row.decisionReason)}</strong></span>
       <span><small>Q.850</small><strong>{row.q850Cause ?? '—'}</strong></span>
       <span><small>RADIUS server</small><strong className="mono">{row.serverAddress || '—'}</strong></span>
       <span><small>Latency / retries</small><strong>{row.latencyMs == null ? '—' : `${row.latencyMs} мс`} / {row.retries}</strong></span>
@@ -2352,11 +2386,35 @@ function formatTime(value?: string, timezone = 'UTC') {
 
 function decisionLabel(value: string) {
   switch (value) {
-    case 'accept': return 'Пропущен'
-    case 'reject': return 'Заблокирован'
-    case 'timeout_fail_open': return 'Пропущен по timeout'
+    case 'accept':
+    case 'verification_accept': return 'Пропущен'
+    case 'reject':
+    case 'verification_reject': return 'Заблокирован'
+    case 'timeout_fail_open':
+    case 'verification_fail_open': return 'Пропущен по timeout'
     case 'informational': return 'Информационный'
     default: return 'Ожидается / неизвестно'
+  }
+}
+
+function operationTypeLabel(value: string) {
+  switch (value) {
+    case 'number': return 'Индикация номера'
+    case 'save_call': return 'Сохранение вызова'
+    case 'check_call': return 'Проверка вызова'
+    case 'accounting': return 'Accounting'
+    default: return value || 'не определена'
+  }
+}
+
+function terminalReasonLabel(value: string) {
+  switch (value) {
+    case 'indication_response': return 'Информационный ответ'
+    case 'timeout_or_unavailable': return 'Timeout / сервер недоступен'
+    case 'incomplete_response': return 'Ответ без запроса'
+    case 'ambiguous': return 'Неоднозначное соответствие ответа'
+    case 'ambiguous_session_collision': return 'Несколько CDR с одной сессией'
+    default: return value || '—'
   }
 }
 

@@ -175,7 +175,8 @@ func (c *Client) processRadiusEvent(ctx context.Context, event SyslogEvent) erro
 		event.Attributes["calling_station_id"], event.Attributes["called_station_id"],
 		result, event.Attributes["decision"], event.Attributes["decision_reason"],
 		eventTimestamp, delay, event.Attributes["accounting_status"], completeness,
-		SyslogParserVersion, retry, latency, event.Attributes, event.EventID); err != nil {
+		SyslogParserVersion, retry, latency, sanitizePublicAttributes(event.Attributes),
+		event.EventID); err != nil {
 		return err
 	}
 
@@ -281,7 +282,8 @@ func (c *Client) ProcessSyslogShadowDerivedBatch(
 			item.packetTransactionID, item.occurredAt, item.event.Attributes["call_context"],
 			item.event.Attributes["acct_session_id"],
 			parseUint8Attribute(item.event.Attributes["packet_identifier"]), requestType,
-			packetCode, result, boolToUInt8(isAntifraud), item.event.Attributes, now,
+			packetCode, result, boolToUInt8(isAntifraud),
+			sanitizePublicAttributes(item.event.Attributes), now,
 		); err != nil {
 			return err
 		}
@@ -365,7 +367,10 @@ func (c *Client) ProcessSyslogShadowDerivedBatch(
 			}
 		}
 	}
-	return lifecycleBatch.Send()
+	if err := lifecycleBatch.Send(); err != nil {
+		return err
+	}
+	return c.processAntiFraudProjection(ctx, events)
 }
 
 func (c *Client) loadShadowAntifraudTransactions(
@@ -434,7 +439,7 @@ func appendShadowLifecycle(
 		item.CallingStationID, item.CalledStationID, item.SrcNumberIn, item.DstNumberIn,
 		item.SrcNumberOut, item.DstNumberOut, item.InTrunkgroupLabel, item.OutTrunkgroupLabel,
 		item.AccountingStatus, item.Q850Cause, item.IsAntifraud, item.Completeness, defect,
-		item.Attributes, item.RawEventIDs)
+		sanitizePublicAttributes(item.Attributes), item.RawEventIDs)
 }
 
 func valueOrZero(value *uint16) uint16 {
@@ -527,7 +532,7 @@ func mergeAntifraudEvent(
 	if q850 != nil {
 		transaction.Q850Cause = q850
 	}
-	for key, value := range event.Attributes {
+	for key, value := range sanitizePublicAttributes(event.Attributes) {
 		if value != "" && key != "correlation_time_source" && key != "correlation_time_utc" {
 			transaction.Attributes[key] = value
 		}
@@ -561,17 +566,14 @@ func resolveAntifraudDecision(transaction *AntifraudTransaction, event SyslogEve
 	if transaction.RequestType == "check_call" {
 		switch {
 		case transaction.ResponseCode == "access-accept":
-			transaction.Decision = "accept"
+			transaction.Decision = "verification_accept"
 			transaction.DecisionReason = "Access-Accept"
 		case transaction.ResponseCode == "access-reject" ||
 			event.Attributes["result"] == "reject":
-			transaction.Decision = "reject"
+			transaction.Decision = "verification_reject"
 			transaction.DecisionReason = "Access-Reject"
-			if transaction.Q850Cause == nil {
-				cause := uint16(21)
-				transaction.Q850Cause = &cause
-			}
 		case explicit == "timeout_fail_open":
+			transaction.Decision = "verification_fail_open"
 			transaction.DecisionReason = "RADIUS timeout, documented fail-open"
 		}
 	} else if (transaction.RequestType == "number" || transaction.RequestType == "save_call") &&
@@ -793,8 +795,24 @@ func (c *Client) ListAntifraudPageRange(
 	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
 		return AntifraudPage{}, err
 	} else if revision != 0 {
+		if preferred, projectionErr := c.hasOperationProjection(
+			ctx, deviceID, revision,
+		); projectionErr != nil {
+			return AntifraudPage{}, projectionErr
+		} else if preferred {
+			return c.listOperationAntifraudPage(
+				ctx, deviceID, revision, search, limit, cursor, timeRange,
+			)
+		}
 		return c.listCurrentAntifraudPage(
 			ctx, deviceID, revision, search, limit, cursor, timeRange,
+		)
+	}
+	if preferred, err := c.hasOperationProjection(ctx, deviceID, 1); err != nil {
+		return AntifraudPage{}, err
+	} else if preferred {
+		return c.listOperationAntifraudPage(
+			ctx, deviceID, 1, search, limit, cursor, timeRange,
 		)
 	}
 	query := `SELECT t.transaction_id,t.first_event_at,t.last_event_at,t.call_context,
@@ -867,6 +885,7 @@ func (c *Client) ListAntifraudPageRange(
 		); err != nil {
 			return AntifraudPage{}, err
 		}
+		item.Attributes = sanitizePublicAttributes(item.Attributes)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -885,9 +904,21 @@ func (c *Client) AntifraudTimeline(
 	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
 		return nil, err
 	} else if revision != 0 {
+		if projected, projectionErr := c.hasProjectedOperation(
+			ctx, deviceID, revision, transactionID,
+		); projectionErr != nil {
+			return nil, projectionErr
+		} else if projected {
+			return c.operationAntifraudTimeline(ctx, deviceID, revision, transactionID)
+		}
 		return c.currentAntifraudTimeline(
 			ctx, deviceID, revision, transactionID, "antifraud_transaction",
 		)
+	}
+	if projected, err := c.hasProjectedOperation(ctx, deviceID, 1, transactionID); err != nil {
+		return nil, err
+	} else if projected {
+		return c.operationAntifraudTimeline(ctx, deviceID, 1, transactionID)
 	}
 	rows, err := c.Conn.Query(ctx, `SELECT e.event_id,e.received_at,i.event_time,i.category,
 		i.component,i.message,e.payload,i.parse_status,i.attributes,i.source_timezone,
@@ -916,6 +947,7 @@ func (c *Client) AntifraudTimeline(
 		); err != nil {
 			return nil, err
 		}
+		sanitizeEventPresentation(&item.EventRow)
 		result = append(result, item)
 	}
 	return result, rows.Err()

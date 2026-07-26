@@ -211,6 +211,9 @@ func (c *Client) ReconcileDirtyBucket(
 	if err := batch.Send(); err != nil {
 		return c.failDirtyBucket(ctx, bucket, err)
 	}
+	if err := c.reconcileOperationCDRs(ctx, bucket); err != nil {
+		return c.failDirtyBucket(ctx, bucket, err)
+	}
 	if err := c.Conn.Exec(ctx, `INSERT INTO collector.correlation_bucket_runs
 		(device_id,timezone_revision,bucket,ran_at,total,exact,composite,ambiguous,orphan,duration_ms)
 		VALUES(?,?,?,now64(6),?,?,?,?,?,?)`,

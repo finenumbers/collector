@@ -1,0 +1,23 @@
+{
+  "total": 18,
+  "categories": {
+    "isup": 4,
+    "radius": 7,
+    "sip": 7
+  },
+  "unknown_reasons": {},
+  "source_confusions": 0,
+  "coverage": {
+    "access_reject_response": 1,
+    "access_request_alias": 2,
+    "antifraud_control": 1,
+    "hash_detail": 2,
+    "host_ip": 2,
+    "isup_optional": 1,
+    "operation_check_call": 2,
+    "operation_number": 1,
+    "operation_save_call": 1,
+    "producer_provenance": 18,
+    "transport_provenance": 18
+  }
+}

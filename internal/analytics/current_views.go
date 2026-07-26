@@ -131,6 +131,7 @@ func (c *Client) listCurrentEventsPage(
 		); err != nil {
 			return EventPage{}, err
 		}
+		sanitizeEventPresentation(&row)
 		row.EventTimeLocal = localRFC3339(row.EventTime, timezone)
 		row.ReceivedAtLocal = localRFC3339(&row.ReceivedAt, timezone)
 		result = append(result, row)
@@ -203,6 +204,7 @@ func (c *Client) listCurrentEventsByCategoryPage(
 		); err != nil {
 			return EventPage{}, err
 		}
+		sanitizeEventPresentation(&row)
 		row.EventTimeLocal = localRFC3339(row.EventTime, timezone)
 		row.ReceivedAtLocal = localRFC3339(&row.ReceivedAt, timezone)
 		result = append(result, row)
@@ -280,6 +282,7 @@ func (c *Client) listFallbackEventsPage(
 		); err != nil {
 			return EventPage{}, err
 		}
+		sanitizeEventPresentation(&row)
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -527,6 +530,7 @@ func (c *Client) listCurrentAntifraudPage(
 		); err != nil {
 			return AntifraudPage{}, err
 		}
+		item.Attributes = sanitizePublicAttributes(item.Attributes)
 		item.FirstEventLocal = localRFC3339(&item.FirstEventAt, sourceTimezone)
 		item.LastEventLocal = localRFC3339(&item.LastEventAt, sourceTimezone)
 		item.CDRSetupLocal = localRFC3339(item.CDRSetupTime, sourceTimezone)
@@ -646,6 +650,7 @@ func (c *Client) currentAntifraudTimeline(
 		); err != nil {
 			return nil, err
 		}
+		sanitizeEventPresentation(&item.EventRow)
 		item.Method = method
 		item.Confidence = 1
 		result = append(result, item)
@@ -700,6 +705,32 @@ func (c *Client) currentDiagnostics(
 		result.Breakdown = append(result.Breakdown, item)
 	}
 	rows.Close()
+	if err := c.Conn.QueryRow(ctx, `SELECT
+		countIf(category='unknown'),
+		countIf(attributes['unclassified_reason']='unrecognized_envelope_and_body'),
+		countIf(attributes['unclassified_reason']='no_category_evidence'),
+		countIf(attributes['unclassified_reason']='empty_message'),
+		countIf(attributes['trace_continuation']='true'
+			AND attributes['fragment_kind'] IN
+				('typed_hash','hash_detail','isup_optional','dotted_hex','sdp_line','host_ip')
+			AND attributes['parent_event_id']='')
+		FROM
+		(
+			SELECT event_id,argMax(category,interpreted_at) AS category,
+				argMax(attributes,interpreted_at) AS attributes
+			FROM collector.syslog_facts
+			WHERE device_id=? AND timezone_revision=?
+			  AND received_at>=now()-INTERVAL 24 HOUR
+			GROUP BY event_id
+		)`, deviceID, revision).
+		Scan(&result.UnknownEvents, &result.UnknownEnvelope, &result.UnknownEvidence,
+			&result.UnknownEmpty, &result.FragmentAmbiguity); err != nil {
+		return result, err
+	}
+	_ = c.Conn.QueryRow(ctx, `SELECT argMax(status,updated_at)
+		FROM collector.parser_projection_state
+		WHERE device_id=? AND timezone_revision=? AND parser_version=?`,
+		deviceID, revision, SyslogParserVersion).Scan(&result.ParserProjection)
 	migrationRows, err := c.Conn.Query(ctx,
 		`SELECT version FROM collector.schema_migrations FINAL ORDER BY version`)
 	if err != nil {
@@ -775,6 +806,49 @@ func (c *Client) currentDiagnostics(
 		deviceID, revision, deviceID, revision, SyslogGroupingVersion).
 		Scan(&result.SyslogConstructs, &result.ConstructMembers,
 			&result.HeuristicConstructs, &result.ConstructOrphans); err != nil {
+		return result, err
+	}
+	if err := c.Conn.QueryRow(ctx, `SELECT
+		(SELECT count() FROM collector.current_antifraud_packets
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT count() FROM collector.current_antifraud_calls
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT count() FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT countIf(terminal_state='outstanding') FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT countIf(terminal_state='verification_accept') FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT countIf(terminal_state='verification_reject') FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT countIf(terminal_state='verification_fail_open') FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT countIf(terminal_state='informational') FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT countDistinct(event_id) FROM collector.radius_fragments
+		 WHERE device_id=? AND timezone_revision=? AND event_id NOT IN
+		  (SELECT arrayJoin(raw_event_ids) FROM collector.current_antifraud_packets
+		   WHERE device_id=? AND timezone_revision=? AND parser_version=?)),
+		(SELECT countIf(reason='ambiguous_session_collision') FROM
+		 (SELECT operation_id,argMax(reason,updated_at) AS reason
+		  FROM collector.antifraud_operation_cdr_links
+		  WHERE device_id=? AND timezone_revision=? AND parser_version=?
+		  GROUP BY operation_id))`,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion).
+		Scan(&result.AntifraudPackets, &result.AntifraudCalls,
+			&result.AntifraudOperations, &result.OperationOutstanding,
+			&result.OperationAccept, &result.OperationReject,
+			&result.OperationFailOpen, &result.OperationInformation,
+			&result.UnlinkedFragments, &result.AmbiguousSessions); err != nil {
 		return result, err
 	}
 	if err := c.Conn.QueryRow(ctx, `SELECT
@@ -889,7 +963,8 @@ func (c *Client) currentStats(
 		Scan(&result.Alarms24h, &result.Radius24h, &result.Unknown24h); err != nil {
 		return result, err
 	}
-	if err := c.Conn.QueryRow(ctx, `SELECT count(),countIf(decision='reject'),
+	if err := c.Conn.QueryRow(ctx, `SELECT count(),
+		countIf(decision IN ('reject','verification_reject')),
 		countIf(completeness!='complete')
 		FROM
 		(

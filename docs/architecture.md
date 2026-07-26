@@ -74,7 +74,7 @@ CDR сначала получает SHA-256 и запись ledger. Повтор
 Satel RTU — по vendor `cdr_id`; source file/row, parser template/version и raw field map
 остаются в provenance.
 
-Parser version `eltex-smg-syslog-v14` использует общий envelope core (включая `CONFIG`
+Parser version `eltex-smg-syslog-v15` использует общий envelope core (включая `CONFIG`
 без wall-clock) и firmware dialect из template key. Component-first classification,
 typed attributes и provenance одинаковы, а firmware-specific фрагменты
 (`#`/`##`/bare SDP/ISUP dotted-hex/`SIPT Proc`/AVP/hex/host_ip) связывает с родителем по

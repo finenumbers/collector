@@ -11,9 +11,11 @@ export function antifraudOutcome(row: {
   completeness?: string
 }): CallOutcome {
   if (row.q850Cause != null) return cdrOutcome(row.q850Cause)
-  if (row.decision === 'reject') return 'failure'
-  if (row.decision === 'accept' && row.completeness === 'complete') return 'success'
-  if (row.decision === 'timeout_fail_open') return 'warning'
+  if (row.decision === 'reject' || row.decision === 'verification_reject') return 'failure'
+  if ((row.decision === 'accept' || row.decision === 'verification_accept') &&
+    row.completeness === 'complete') return 'success'
+  if (row.decision === 'timeout_fail_open' ||
+    row.decision === 'verification_fail_open') return 'warning'
   return 'neutral'
 }
 

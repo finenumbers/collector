@@ -144,7 +144,8 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		_ = rows.Close()
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT l.device_id,count(),countIf(l.decision='reject'),
+	rows, err = c.Conn.Query(ctx, `SELECT l.device_id,count(),
+		countIf(l.decision IN ('reject','verification_reject')),
 		countIf(l.completeness!='complete')
 		FROM collector.antifraud_lifecycles AS l FINAL
 		INNER JOIN (

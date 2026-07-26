@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -107,7 +108,7 @@ func TestAntifraudLifecycleClickHouse(t *testing.T) {
 		t.Fatalf("got %d lifecycles, want 1", len(page.Items))
 	}
 	item := page.Items[0]
-	if item.Decision != "reject" || item.Q850Cause == nil || *item.Q850Cause != 21 ||
+	if item.Decision != "verification_reject" || item.Q850Cause != nil ||
 		item.LegCount != 1 || item.Completeness != "complete" ||
 		item.CorrelationMethod != "exact_acct_session" ||
 		item.CorrelationConfidence != 1 || abs64(item.CorrelationTimeDeltaMS) >= 1000 {
@@ -696,5 +697,232 @@ func TestActiveRevisionCoverageRepairCreatesTerminalAssignment(t *testing.T) {
 	}
 	if state != "exact" || assigned != recordID {
 		t.Fatalf("state=%s assigned=%s want=%s", state, assigned, recordID)
+	}
+}
+
+func TestAntiFraudOperationProjectionClickHouse(t *testing.T) {
+	address := os.Getenv("CLICKHOUSE_TEST_ADDR")
+	if address == "" {
+		t.Skip("CLICKHOUSE_TEST_ADDR is not set")
+	}
+	client, err := Open(
+		address, "collector", os.Getenv("CLICKHOUSE_TEST_USER"),
+		os.Getenv("CLICKHOUSE_TEST_PASSWORD"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := client.Migrate(ctx, "../../migrations/clickhouse"); err != nil {
+		t.Fatal(err)
+	}
+	deviceID := uuid.New()
+	revision := uint64(91)
+	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.device_derived_revisions
+		(device_id,revision,timezone,reason,status,updated_at)
+		VALUES(?,?,'UTC','operation_projection_test','active',now64(6))`,
+		deviceID, revision); err != nil {
+		t.Fatal(err)
+	}
+	events := make([]SyslogEvent, 0, 6)
+	requestEvents := make([]SyslogEvent, 0, 3)
+	responseEvents := make([]SyslogEvent, 0, 3)
+	for index, operationType := range []string{"number", "save_call", "check_call"} {
+		requestAt := now.Add(time.Duration(index) * time.Second)
+		requestID := uint8(70 + index)
+		request := SyslogEvent{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: requestAt,
+			EventTime: &requestAt, Category: "radius", TimezoneRevision: revision,
+			SourceTimezone: "UTC", Payload: []byte(
+				`Eltex-AVPair="xpgk-src-number-in=100" ` +
+					`Eltex-AVPair="xpgk-src-number-in=200"`),
+			Attributes: map[string]string{
+				"call_context": "C-PROJECTION", "acct_session_id": "projection session",
+				"packet_code": "access-request", "packet_direction": "request",
+				"packet_identifier": strconv.Itoa(int(requestID)),
+				"xpgk_request_type": operationType, "is_antifraud": "true",
+			},
+		}
+		responseAt := requestAt.Add(100 * time.Millisecond)
+		response := SyslogEvent{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: responseAt,
+			EventTime: &responseAt, Category: "radius", TimezoneRevision: revision,
+			SourceTimezone: "UTC", Payload: []byte("Access-Accept"),
+			Attributes: map[string]string{
+				"call_context": "C-PROJECTION", "packet_code": "access-accept",
+				"packet_direction":  "response",
+				"packet_identifier": strconv.Itoa(int(requestID)),
+			},
+		}
+		events = append(events, request, response)
+		requestEvents = append(requestEvents, request)
+		responseEvents = append(responseEvents, response)
+	}
+	if err := client.InsertSyslogBatch(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ProcessSyslogShadowDerivedBatch(ctx, requestEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ProcessSyslogShadowDerivedBatch(ctx, responseEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ProcessSyslogShadowDerivedBatch(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+	var packets, operations, calls uint64
+	if err := client.Conn.QueryRow(ctx, `SELECT
+		(SELECT count() FROM collector.current_antifraud_packets
+		 WHERE device_id=? AND timezone_revision=?),
+		(SELECT count() FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=?),
+		(SELECT count() FROM collector.current_antifraud_calls
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?)`,
+		deviceID, revision, deviceID, revision,
+		deviceID, revision, SyslogParserVersion).
+		Scan(&packets, &operations, &calls); err != nil {
+		t.Fatal(err)
+	}
+	if packets != 6 || operations != 3 || calls != 1 {
+		t.Fatalf("packets=%d operations=%d calls=%d", packets, operations, calls)
+	}
+	var currentSession, currentIdentity string
+	if err := client.Conn.QueryRow(ctx, `SELECT acct_session_id_normalized,identity_kind
+		FROM collector.current_antifraud_calls
+		WHERE device_id=? AND timezone_revision=? AND parser_version=?`,
+		deviceID, revision, SyslogParserVersion).
+		Scan(&currentSession, &currentIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if currentSession != "projectionsession" || currentIdentity != "acct_session_id" {
+		t.Fatalf("weaker response overwrote call identity: %q/%q",
+			currentSession, currentIdentity)
+	}
+	if preferred, preferenceErr := client.hasOperationProjection(
+		ctx, deviceID, revision,
+	); preferenceErr != nil {
+		t.Fatal(preferenceErr)
+	} else if preferred {
+		t.Fatal("operation projection became visible before atomic replay cutover")
+	}
+	if err := client.ActivateParserProjection(
+		ctx, deviceID, revision, SyslogParserVersion,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if preferred, preferenceErr := client.hasOperationProjection(
+		ctx, deviceID, revision,
+	); preferenceErr != nil {
+		t.Fatal(preferenceErr)
+	} else if !preferred {
+		t.Fatal("operation projection was not visible after atomic replay cutover")
+	}
+	page, err := client.ListAntifraudPage(ctx, deviceID, "", 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("operation read model was not preferred: %#v", page.Items)
+	}
+	operationTypes := make(map[string]bool)
+	for _, item := range page.Items {
+		operationTypes[item.RequestType] = true
+		timeline, timelineErr := client.AntifraudTimeline(ctx, deviceID, item.TransactionID)
+		if timelineErr != nil || len(timeline) != 2 {
+			t.Fatalf("operation timeline rows=%d err=%v", len(timeline), timelineErr)
+		}
+	}
+	for _, operationType := range []string{"number", "save_call", "check_call"} {
+		if !operationTypes[operationType] {
+			t.Fatalf("missing operation type %q in %#v", operationType, page.Items)
+		}
+	}
+	var ordered []string
+	if err := client.Conn.QueryRow(ctx, `SELECT attribute_values
+		FROM collector.current_antifraud_packets
+		WHERE device_id=? AND timezone_revision=? AND direction='request'
+		ORDER BY occurred_at LIMIT 1`, deviceID, revision).Scan(&ordered); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ordered, ",") != "100,200" {
+		t.Fatalf("ordered VSA values=%v", ordered)
+	}
+	firstRecordID := uuid.New()
+	if err := client.InsertCDRBatch(ctx, []CDRRecord{{
+		RecordID: firstRecordID, DeviceID: deviceID, FileID: uuid.New(), RowNumber: 1,
+		IngestedAt: now, SetupTime: &now, TimezoneRevision: revision,
+		SourceTimezone: "UTC", RadiusSessionID: "projection session",
+		RadiusSessionIDNormalized: "projectionsession", RawFields: map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	bucket := DirtyCorrelationBucket{
+		DeviceID: deviceID, Revision: revision, Bucket: now.Truncate(24 * time.Hour),
+	}
+	if err := client.ReconcileDirtyBucket(ctx, bucket); err != nil {
+		t.Fatal(err)
+	}
+	var linked uint64
+	if err := client.Conn.QueryRow(ctx, `SELECT countIf(state='linked') FROM
+		(SELECT operation_id,argMax(state,updated_at) AS state
+		 FROM collector.antifraud_operation_cdr_links
+		 WHERE device_id=? AND timezone_revision=? GROUP BY operation_id)`,
+		deviceID, revision).Scan(&linked); err != nil {
+		t.Fatal(err)
+	}
+	if linked != 3 {
+		t.Fatalf("all operations must share one CDR, linked=%d", linked)
+	}
+	secondRecordID := uuid.New()
+	if err := client.InsertCDRBatch(ctx, []CDRRecord{{
+		RecordID: secondRecordID, DeviceID: deviceID, FileID: uuid.New(), RowNumber: 2,
+		IngestedAt: now, SetupTime: &now, TimezoneRevision: revision,
+		SourceTimezone: "UTC", RadiusSessionID: "projection session",
+		RadiusSessionIDNormalized: "projectionsession", RawFields: map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReconcileDirtyBucket(ctx, bucket); err != nil {
+		t.Fatal(err)
+	}
+	var ambiguous uint64
+	if err := client.Conn.QueryRow(ctx, `SELECT countIf(
+			state='ambiguous' AND reason='ambiguous_session_collision') FROM
+		(SELECT operation_id,argMax(state,updated_at) AS state,
+		 argMax(reason,updated_at) AS reason
+		 FROM collector.antifraud_operation_cdr_links
+		 WHERE device_id=? AND timezone_revision=? GROUP BY operation_id)`,
+		deviceID, revision).Scan(&ambiguous); err != nil {
+		t.Fatal(err)
+	}
+	if ambiguous != 3 {
+		t.Fatalf("same-session collision was silently resolved: ambiguous=%d", ambiguous)
+	}
+
+	fallbackDeviceID := uuid.New()
+	fallbackRevision := uint64(92)
+	fallbackTransactionID := uuid.New()
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.device_derived_revisions
+		(device_id,revision,timezone,reason,status,updated_at)
+		VALUES(?,?,'UTC','operation_fallback_test','active',now64(6))`,
+		fallbackDeviceID, fallbackRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.antifraud_lifecycles
+		(device_id,timezone_revision,transaction_id,updated_at,first_event_at,last_event_at,
+		 request_type,is_antifraud,completeness)
+		VALUES(?,?,?,now64(6),?,?, 'check_call',1,'incomplete')`,
+		fallbackDeviceID, fallbackRevision, fallbackTransactionID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	fallbackPage, err := client.ListAntifraudPage(ctx, fallbackDeviceID, "", 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fallbackPage.Items) != 1 ||
+		fallbackPage.Items[0].TransactionID != fallbackTransactionID {
+		t.Fatalf("legacy lifecycle fallback failed: %#v", fallbackPage.Items)
 	}
 }

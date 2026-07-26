@@ -45,11 +45,15 @@ var (
 	repeatedMessage     = regexp.MustCompile(`(?i)^last message repeated (\d+) times$`)
 	radiusPair          = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
 	radiusSession       = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
-	radiusVSAPair       = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
+	radiusVSAPair       = regexp.MustCompile(`(?i)\b((?:xpgk|xpkg)-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
 	radiusPacket        = regexp.MustCompile(`(?i)\b(Access-Request|Access-Accept|Access-Reject|Accounting-Request|Accounting-Response)\b`)
+	radiusRequestAlias  = regexp.MustCompile(`(?i)\b(Accs-Request|Antifraud-Auth-Request)\b`)
+	radiusAliasID       = regexp.MustCompile(`(?i)\b(?:Accs-Request|Antifraud-Auth-Request)\s*\[([0-9]{1,3})\]`)
 	radiusAttribute     = regexp.MustCompile(`(?i)^(?:User-Name|User-Password|Calling-Station-Id|Called-Station-Id|Acct-Session-Id|NAS-Port|NAS-Port-Type|Framed-IP-Address|Event-Timestamp|Acct-Delay-Time|Acct-Session-Time|Cisco-AVPair|Eltex-AVPair|h323-[A-Za-z0-9-]+)\s*(?:\([0-9]+\))?\s*[=:]`)
 	avpLinePattern      = regexp.MustCompile(`(?i)^[A-Za-z][A-Za-z0-9-]+\s*=\s*`)
 	radiusRequestID     = regexp.MustCompile(`(?i)\b(?:Request|Packet)\s+ID\s*\[?([0-9]{1,3})\]?`)
+	radiusResponse      = regexp.MustCompile(`(?i)\b(?:(?:RADIUS\s+)?server\s+rejected|got\s+valid\s+reply\s+for\s+accs)\b`)
+	antifraudControlPat = regexp.MustCompile(`(?i)\b(?:ANTIFRAUD|RADIUS(?:[- ](?:profile|build|wait|config|control)))\b`)
 	radiusServer        = regexp.MustCompile(`(?i)\b(?:server|address)\s*[=:]?\s*((?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?)`)
 	radiusLatency       = regexp.MustCompile(`(?i)\b(?:in|latency\s*[=:]?)\s*([0-9]+)\s*ms\b`)
 	radiusRetry         = regexp.MustCompile(`(?i)\bretr(?:y|ies)\s*[=:]?\s*([0-9]+)\b`)
@@ -169,6 +173,44 @@ func parentFresh(parent continuationParent, event *analytics.SyslogEvent, source
 		event.ReceivedAt.Sub(parent.receivedAt) <= window
 }
 
+func compatibleSignalParent(parent continuationParent, kind string) bool {
+	switch kind {
+	case "isup_optional", "dotted_hex":
+		return parent.category == "isup"
+	case "sdp_line", "sdp_quote", "sdp", "codec", "host_ip":
+		return parent.category == "sip"
+	case "typed_hash", "hash_detail":
+		return parent.category == "sip" || parent.category == "isup"
+	default:
+		return false
+	}
+}
+
+func (a *ContinuationAssembler) nearestSignalBurst(
+	event *analytics.SyslogEvent, sourceIP, kind string,
+) (continuationParent, bool, string) {
+	var selected continuationParent
+	selectedOK := false
+	selectedMethod := ""
+	for _, candidate := range []struct {
+		parent continuationParent
+		ok     bool
+		method string
+	}{
+		{a.sipBurst[event.DeviceID], a.sipBurst[event.DeviceID].eventID != uuid.Nil, "sip_burst"},
+		{a.isupBurst[event.DeviceID], a.isupBurst[event.DeviceID].eventID != uuid.Nil, "isup_burst"},
+	} {
+		if !candidate.ok || !compatibleSignalParent(candidate.parent, kind) ||
+			!parentFresh(candidate.parent, event, sourceIP, 2*time.Second) {
+			continue
+		}
+		if !selectedOK || candidate.parent.receivedAt.After(selected.receivedAt) {
+			selected, selectedOK, selectedMethod = candidate.parent, true, candidate.method
+		}
+	}
+	return selected, selectedOK, selectedMethod
+}
+
 func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 	if a == nil {
 		return
@@ -209,9 +251,9 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 		}
 		kind := event.Attributes["fragment_kind"]
 		radiusFragment := kind == "avp" || kind == "hex" || kind == "digest" || kind == "rc_fragment"
-		sipBurstFragment := kind == "host_ip" || kind == "sdp_line" || kind == "sdp_quote" ||
-			kind == "sdp" || kind == "typed_hash" || kind == "hash_detail" || kind == "codec"
-		isupBurstFragment := kind == "dotted_hex" || kind == "isup_optional"
+		signalFragment := compatibleSignalParent(
+			continuationParent{category: "sip"}, kind,
+		) || compatibleSignalParent(continuationParent{category: "isup"}, kind)
 		parent, ok := continuationParent{}, false
 		linkMethod := ""
 		if callContext != "" {
@@ -225,7 +267,8 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 			} else {
 				parent, ok = a.byCallSignal[key]
 				linkMethod = "call_context_signal"
-				if ok && !parentFresh(parent, event, sourceIP, 2*time.Second) {
+				if ok && (!compatibleSignalParent(parent, kind) ||
+					!parentFresh(parent, event, sourceIP, 2*time.Second)) {
 					ok = false
 				}
 			}
@@ -237,21 +280,11 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 				ok = false
 			}
 		}
-		if !ok && sipBurstFragment {
-			parent, ok = a.sipBurst[event.DeviceID]
-			linkMethod = "sip_burst"
-			if !ok || parent.category != "sip" || !parentFresh(parent, event, sourceIP, 2*time.Second) {
-				ok = false
-			}
+		if !ok && signalFragment {
+			parent, ok, linkMethod = a.nearestSignalBurst(event, sourceIP, kind)
 		}
-		if !ok && isupBurstFragment {
-			parent, ok = a.isupBurst[event.DeviceID]
-			linkMethod = "isup_burst"
-			if !ok || parent.category != "isup" || !parentFresh(parent, event, sourceIP, 2*time.Second) {
-				ok = false
-			}
-		}
-		if !ok && callContext == "" && !radiusFragment && !isupBurstFragment {
+		if !ok && callContext == "" && !radiusFragment &&
+			(!signalFragment || kind == "typed_hash") {
 			parent, ok = a.radiusBurst[event.DeviceID]
 			linkMethod = "radius_short_burst"
 			if !ok || parent.category != "radius" ||
@@ -271,6 +304,12 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 			}
 			event.Attributes["inherited_category"] = "true"
 			event.Category = parent.category
+			event.Attributes["classification_result"] = parent.category
+			event.Attributes["classification_rule"] = "continuation_parent_context"
+			event.Attributes["classification_confidence"] = event.Attributes["fragment_link_confidence"]
+			event.Attributes["source_family"] = sourceFamilyForCategory(parent.category)
+			event.Attributes["semantic_category"] = parent.category
+			delete(event.Attributes, "unclassified_reason")
 			if event.Component == "" {
 				event.Component = parent.component
 			}
@@ -835,7 +874,11 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		event.Component = component
 		event.Message = rest
 	}
-	extractTraceContinuation(&event, dialect)
+	eltexTraceContext := event.HeaderFormat == "eltex-trace"
+	hostIPContext := eltexTraceContext && (raw.TemplateKey == "" ||
+		raw.TemplateKey == "eltex-smg-1016m-3.23.2" ||
+		raw.TemplateKey == "eltex-smg-1016m-3.410")
+	extractTraceContinuation(&event, dialect, hostIPContext)
 	if strings.TrimSpace(event.Message) == "" && event.Attributes["call_context"] != "" {
 		event.Attributes["empty_body"] = "true"
 		if event.Attributes["trace_continuation"] == "" {
@@ -845,8 +888,10 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 	}
 	event.Category = classify(
 		event.Component, event.Attributes["application"], event.Message, string(raw.Payload), dialect,
+		hostIPContext,
 	)
 	event.Attributes["classification_result"] = event.Category
+	setClassificationProvenance(&event)
 	if event.Category == "radius" {
 		extractRadiusAttributes(text, &event)
 	}
@@ -861,7 +906,7 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 	return event
 }
 
-func classify(component, application, message, payload, dialect string) string {
+func classify(component, application, message, payload, dialect string, hostIPContext bool) string {
 	upperComponent := strings.ToUpper(strings.TrimSpace(component))
 	upperApplication := strings.ToUpper(strings.TrimSpace(application))
 	upperMessage := strings.ToUpper(strings.TrimSpace(message))
@@ -870,8 +915,18 @@ func classify(component, application, message, payload, dialect string) string {
 	sipComponent := isSIPComponentName(upperComponent) || siptInMessage.MatchString(component) ||
 		siptInMessage.MatchString(message) || siptProcPattern.MatchString(trimmedMessage) ||
 		strings.HasPrefix(upperMessage, "PBXIPC-SIP")
-	radiusComponent := upperComponent == "RADIUS" || upperComponent == "RC" ||
-		strings.HasPrefix(upperComponent, "RADIUS ")
+	radiusOperationContext := upperComponent == "RADIUS" ||
+		strings.Contains(upperMessage, "RADIUS") ||
+		radiusRequestAlias.MatchString(message)
+	radiusEvidence := radiusPacket.MatchString(message) || radiusRequestAlias.MatchString(message) ||
+		radiusAttribute.MatchString(trimmedMessage) ||
+		(!(allows3410Dialect(dialect) && isBareSDPLine(trimmedMessage)) &&
+			avpLinePattern.MatchString(trimmedMessage)) ||
+		strings.Contains(upperMessage, "ACCT-SESSION-ID") ||
+		strings.Contains(upperMessage, "XPGK-") ||
+		strings.Contains(upperMessage, "XPKG-") ||
+		(radiusOperationContext && radiusRequestID.MatchString(message)) ||
+		radiusResponse.MatchString(message)
 	switch {
 	case upperApplication == "WEBAPP" || upperApplication == "WEBSPP" ||
 		upperApplication == "WEBS" || upperApplication == "SEC" ||
@@ -880,23 +935,17 @@ func classify(component, application, message, payload, dialect string) string {
 		return "system_journal"
 	case allows3410Dialect(dialect) && isBareSDPLine(trimmedMessage):
 		return "sip"
+	case noOptionalParamsPat.MatchString(trimmedMessage):
+		return "isup"
 	case allows3410Dialect(dialect) && isIsupDumpFragment(trimmedMessage):
 		return "isup"
 	case upperComponent == "CONFIG":
 		return "config_history"
-	case sipComponent && (strings.Contains(upperMessage, "ANTIFRAUD") ||
-		strings.Contains(upperMessage, "RADIUS:") || strings.Contains(upperMessage, "RADIUS ")):
+	case sipComponent && radiusEvidence:
 		return "radius"
 	case sipComponent:
 		return "sip"
-	case radiusComponent || radiusPacket.MatchString(message) ||
-		strings.Contains(upperMessage, "ACCS-REQUEST") ||
-		strings.Contains(upperMessage, "ACCT-SESSION-ID") ||
-		strings.Contains(upperMessage, "XPGK-") ||
-		radiusAttribute.MatchString(trimmedMessage) ||
-		(!(allows3410Dialect(dialect) && isBareSDPLine(trimmedMessage)) &&
-			avpLinePattern.MatchString(trimmedMessage)) ||
-		strings.Contains(upperMessage, "ANTIFRAUD"):
+	case radiusEvidence:
 		return "radius"
 	case upperComponent == "SS7" || upperComponent == "ISUP" || upperComponent == "SS7/ISUP" ||
 		strings.Contains(upperComponent, "SS7 ") || strings.HasPrefix(upperComponent, "SS7/"):
@@ -954,13 +1003,78 @@ func classify(component, application, message, payload, dialect string) string {
 	case strings.HasPrefix(trimmedMessage, "#") ||
 		codecLinePattern.MatchString(trimmedMessage):
 		return "call_trace"
-	case allows3410Dialect(dialect) && ipv4OnlyPattern.MatchString(trimmedMessage):
+	case hostIPContext && ipv4OnlyPattern.MatchString(trimmedMessage):
 		// SIP HostIPlist / Interface addr-list continuation lines.
 		return "sip"
 	case upperApplication != "":
 		return "system_journal"
 	default:
 		return "unknown"
+	}
+}
+
+func setClassificationProvenance(event *analytics.SyslogEvent) {
+	event.Attributes["transport_family"] = "syslog"
+	switch event.HeaderFormat {
+	case "eltex-trace":
+		event.Attributes["header_family"] = "eltex_trace"
+	case "eltex-config":
+		event.Attributes["header_family"] = "eltex_config"
+	case "rfc3164", "rfc3164-or-pri":
+		event.Attributes["header_family"] = "rfc3164"
+	default:
+		event.Attributes["header_family"] = "unknown"
+	}
+	event.Attributes["source_family"] = sourceFamilyForCategory(event.Category)
+	event.Attributes["semantic_category"] = event.Category
+
+	trimmed := strings.TrimSpace(event.Message)
+	switch {
+	case event.Attributes["fragment_kind"] != "":
+		event.Attributes["intrinsic_kind"] = event.Attributes["fragment_kind"]
+	case antifraudControlPat.MatchString(strings.Join([]string{event.Component, event.Message}, " ")) &&
+		event.Category != "radius":
+		event.Attributes["intrinsic_kind"] = "antifraud_control"
+		event.Attributes["semantic_category"] = "antifraud_control"
+	case event.Category == "radius":
+		event.Attributes["intrinsic_kind"] = "radius_packet"
+	case event.Category == "sip", event.Category == "isup", event.Category == "q931":
+		event.Attributes["intrinsic_kind"] = "signaling"
+	case event.Category == "unknown":
+		event.Attributes["intrinsic_kind"] = "unknown"
+	default:
+		event.Attributes["intrinsic_kind"] = "journal_event"
+	}
+
+	if event.Category == "unknown" {
+		event.Attributes["classification_rule"] = "no_matching_rule"
+		event.Attributes["classification_confidence"] = "0"
+		switch {
+		case trimmed == "":
+			event.Attributes["unclassified_reason"] = "empty_message"
+		case event.ParseStatus == "partial":
+			event.Attributes["unclassified_reason"] = "unrecognized_envelope_and_body"
+		default:
+			event.Attributes["unclassified_reason"] = "no_category_evidence"
+		}
+		return
+	}
+	event.Attributes["classification_rule"] = "category_evidence:" + event.Category
+	event.Attributes["classification_confidence"] = "1"
+}
+
+func sourceFamilyForCategory(category string) string {
+	switch category {
+	case "sip", "isup", "radius", "q931", "rtp", "h323":
+		return category
+	case "config_history":
+		return "config"
+	case "system_journal", "auth_log":
+		return "system"
+	case "unknown", "":
+		return "unknown"
+	default:
+		return category
 	}
 }
 
@@ -1064,7 +1178,7 @@ func markTraceContinuation(event *analytics.SyslogEvent, kind string) {
 	event.Attributes["fragment_kind"] = kind
 }
 
-func extractTraceContinuation(event *analytics.SyslogEvent, dialect string) {
+func extractTraceContinuation(event *analytics.SyslogEvent, dialect string, hostIPContext bool) {
 	rawMessage := event.Message
 	trimmed := strings.TrimSpace(rawMessage)
 	indented := trimmed != "" && len(rawMessage) > 0 &&
@@ -1099,7 +1213,7 @@ func extractTraceContinuation(event *analytics.SyslogEvent, dialect string) {
 		markTraceContinuation(event, "sdp_line")
 	case allows3410Dialect(dialect) && (trimmed == "'" || sdpQuotePattern.MatchString(trimmed)):
 		markTraceContinuation(event, "sdp_quote")
-	case allows3410Dialect(dialect) && noOptionalParamsPat.MatchString(trimmed):
+	case noOptionalParamsPat.MatchString(trimmed):
 		markTraceContinuation(event, "isup_optional")
 	case allows3410Dialect(dialect) && dottedHexPattern.MatchString(trimmed):
 		markTraceContinuation(event, "dotted_hex")
@@ -1111,7 +1225,7 @@ func extractTraceContinuation(event *analytics.SyslogEvent, dialect string) {
 		markTraceContinuation(event, "avp")
 	case strings.EqualFold(event.Component, "rc"):
 		markTraceContinuation(event, "rc_fragment")
-	case allows3410Dialect(dialect) && ipv4OnlyPattern.MatchString(trimmed):
+	case hostIPContext && ipv4OnlyPattern.MatchString(trimmed):
 		markTraceContinuation(event, "host_ip")
 		event.Attributes["host_ip"] = trimmed
 	case indented:
@@ -1150,6 +1264,9 @@ func extractRadiusAttributes(text string, event *analytics.SyslogEvent) {
 	}
 	if event.Attributes["packet_code"] == "" {
 		switch {
+		case radiusRequestAlias.MatchString(text):
+			event.Attributes["packet_code"] = "access-request"
+			event.Attributes["packet_direction"] = "request"
 		case strings.Contains(lowerText, "radius server rejected"):
 			event.Attributes["packet_code"] = "access-reject"
 			event.Attributes["packet_direction"] = "response"
@@ -1161,6 +1278,8 @@ func extractRadiusAttributes(text string, event *analytics.SyslogEvent) {
 		}
 	}
 	if match := radiusRequestID.FindStringSubmatch(text); match != nil {
+		event.Attributes["packet_identifier"] = match[1]
+	} else if match := radiusAliasID.FindStringSubmatch(text); match != nil {
 		event.Attributes["packet_identifier"] = match[1]
 	}
 	if match := radiusServer.FindStringSubmatch(text); match != nil {
@@ -1365,7 +1484,11 @@ func parsePayloadTime(value string, received time.Time, location *time.Location)
 }
 
 func normalizeAttribute(value string) string {
-	return strings.ReplaceAll(strings.ToLower(value), "-", "_")
+	normalized := strings.ReplaceAll(strings.ToLower(value), "-", "_")
+	if strings.HasPrefix(normalized, "xpkg_") {
+		normalized = "xpgk_" + strings.TrimPrefix(normalized, "xpkg_")
+	}
+	return normalized
 }
 
 func ValidateSyslogAddress(value string) error {

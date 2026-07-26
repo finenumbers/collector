@@ -16,6 +16,13 @@ type DirtyCorrelationBucket struct {
 	Attempts uint16
 }
 
+const (
+	correlationReasonNoCDRInBucket      = "no_cdr_in_bucket"
+	correlationReasonNoIdentityOverlap  = "no_identity_overlap"
+	correlationReasonNoPolicyCandidate  = "no_candidate_meets_policy"
+	correlationReasonEquivalentEvidence = "equivalent_candidates"
+)
+
 func (c *Client) EnqueueDirtySyslogBuckets(
 	ctx context.Context, events []SyslogEvent,
 ) error {
@@ -29,10 +36,7 @@ func (c *Client) EnqueueDirtySyslogBuckets(
 		if event.Category != "radius" {
 			continue
 		}
-		occurredAt := event.ReceivedAt
-		if event.EventTime != nil {
-			occurredAt = *event.EventTime
-		}
+		_, occurredAt := canonicalizeRadiusEvent(event)
 		revision := event.TimezoneRevision
 		if revision == 0 {
 			revision = 1
@@ -84,6 +88,43 @@ func (c *Client) EnqueueDirtyCDRBuckets(
 	return c.EnqueueDirtySyslogBuckets(ctx, events)
 }
 
+func (c *Client) EnqueueActiveCorrelationRepairs(ctx context.Context, limit uint64) error {
+	if limit == 0 {
+		return nil
+	}
+	return c.Conn.Exec(ctx, `INSERT INTO collector.correlation_dirty_buckets
+		(device_id,timezone_revision,bucket,status,attempts,error,updated_at)
+		WITH active_revisions AS
+		(
+			SELECT device_id,revision AS timezone_revision
+			FROM collector.device_derived_revisions FINAL WHERE status='active'
+		)
+		SELECT l.device_id,l.timezone_revision,toDate(l.first_event_at),
+			'pending',toUInt16(0),'coverage_repair',now64(6)
+		FROM
+		(
+			SELECT device_id,timezone_revision,transaction_id,
+				argMax(first_event_at,updated_at) AS first_event_at,
+				argMax(is_antifraud,updated_at) AS is_antifraud
+			FROM collector.antifraud_lifecycles
+			WHERE (device_id,timezone_revision) IN (SELECT * FROM active_revisions)
+			GROUP BY device_id,timezone_revision,transaction_id
+			HAVING is_antifraud=1
+		) AS l
+		LEFT JOIN
+		(
+			SELECT device_id,timezone_revision,transaction_id
+			FROM collector.call_assignments
+			WHERE (device_id,timezone_revision) IN (SELECT * FROM active_revisions)
+			GROUP BY device_id,timezone_revision,transaction_id
+		) AS a USING (device_id,timezone_revision,transaction_id)
+		WHERE a.transaction_id=toUUID('00000000-0000-0000-0000-000000000000')
+		GROUP BY l.device_id,l.timezone_revision,toDate(l.first_event_at)
+		ORDER BY toDate(l.first_event_at) DESC
+		LIMIT ?
+		SETTINGS max_threads=1,max_execution_time=10,max_memory_usage=268435456`, limit)
+}
+
 func (c *Client) ListPendingCorrelationBuckets(
 	ctx context.Context, limit uint64,
 ) ([]DirtyCorrelationBucket, error) {
@@ -124,7 +165,7 @@ func (c *Client) ReconcileDirtyBucket(
 	assignments := correlateBucket(transactions, cdrs)
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.call_assignments
 		(device_id,timezone_revision,transaction_id,updated_at,cdr_record_id,state,
-		 method,confidence,time_delta_ms,matched_fields,reason,tombstone)`)
+		 method,confidence,time_delta_ms,matched_fields,reason,time_source,tombstone)`)
 	if err != nil {
 		return c.failDirtyBucket(ctx, bucket, err)
 	}
@@ -155,10 +196,14 @@ func (c *Client) ReconcileDirtyBucket(
 		if len(fields) == 1 && fields[0] == "" {
 			fields = nil
 		}
+		timeSource := assignment.evidence["time_source"]
+		if timeSource == "" {
+			timeSource = "legacy"
+		}
 		if err := batch.Append(
 			bucket.DeviceID, bucket.Revision, transactionID, now, recordID, state,
 			assignment.method, assignment.confidence, assignment.timeDeltaMS,
-			fields, assignment.reason, uint8(0),
+			fields, assignment.reason, timeSource, uint8(0),
 		); err != nil {
 			return c.failDirtyBucket(ctx, bucket, err)
 		}
@@ -195,7 +240,9 @@ func (c *Client) ReconcileDirtyBucket(
 func (c *Client) failDirtyBucket(
 	ctx context.Context, bucket DirtyCorrelationBucket, cause error,
 ) error {
-	_ = c.Conn.Exec(ctx, `INSERT INTO collector.correlation_dirty_buckets
+	retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = c.Conn.Exec(retryCtx, `INSERT INTO collector.correlation_dirty_buckets
 		(device_id,timezone_revision,bucket,status,attempts,error,updated_at)
 		VALUES(?,?,?,'pending',?,?,now64(6))`,
 		bucket.DeviceID, bucket.Revision, bucket.Bucket, bucket.Attempts+1, cause.Error())
@@ -331,6 +378,7 @@ func correlateBucket(
 				evidence: map[string]string{
 					"matched_fields":  "acct_session_id",
 					"acct_session_id": transaction.Session,
+					"time_source":     transaction.Attributes["correlation_time_source"],
 				},
 			}
 			continue
@@ -387,8 +435,18 @@ func correlateBucket(
 			return edges[i].cdr.ID.String() < edges[j].cdr.ID.String()
 		})
 		if len(edges) == 0 {
+			reason := correlationReasonNoPolicyCandidate
+			switch {
+			case len(cdrs) == 0:
+				reason = correlationReasonNoCDRInBucket
+			case len(group) == 0:
+				reason = correlationReasonNoIdentityOverlap
+			}
 			result[transaction.ID] = correlationEdge{
-				transaction: transaction, reason: "no CDR candidate in normalized signature group",
+				transaction: transaction, reason: reason,
+				evidence: map[string]string{
+					"time_source": transaction.Attributes["correlation_time_source"],
+				},
 			}
 			continue
 		}
@@ -396,7 +454,7 @@ func correlateBucket(
 		if len(edges) > 1 && best.confidence-edges[1].confidence < 0.05 &&
 			abs64(abs64(best.timeDeltaMS)-abs64(edges[1].timeDeltaMS)) < 1000 {
 			best.ambiguous = true
-			best.reason = "multiple CDR candidates have equivalent evidence"
+			best.reason = correlationReasonEquivalentEvidence
 			result[transaction.ID] = best
 			continue
 		}

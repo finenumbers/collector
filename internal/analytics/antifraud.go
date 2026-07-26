@@ -125,10 +125,7 @@ func (c *Client) InsertRadiusAndCorrelate(ctx context.Context, event SyslogEvent
 }
 
 func (c *Client) processRadiusEvent(ctx context.Context, event SyslogEvent) error {
-	occurredAt := event.ReceivedAt
-	if event.EventTime != nil {
-		occurredAt = *event.EventTime
-	}
+	event, occurredAt := canonicalizeRadiusEvent(event)
 	transactionID := antifraudTransactionID(event, occurredAt)
 	packetTransactionID := antifraudPacketTransactionID(event, occurredAt, transactionID)
 	packetIdentifier := parseUint8Attribute(event.Attributes["packet_identifier"])
@@ -240,10 +237,7 @@ func (c *Client) ProcessSyslogShadowDerivedBatch(
 		if event.Category != "radius" {
 			continue
 		}
-		occurredAt := event.ReceivedAt
-		if event.EventTime != nil {
-			occurredAt = *event.EventTime
-		}
+		event, occurredAt := canonicalizeRadiusEvent(event)
 		revision := event.TimezoneRevision
 		if revision == 0 {
 			revision = 1
@@ -492,6 +486,8 @@ func mergeAntifraudEvent(
 	retry uint16,
 	q850 *uint16,
 ) {
+	updateTimeProvenance := transaction.Attributes["correlation_time_utc"] == "" ||
+		transaction.FirstEventAt.IsZero() || occurredAt.Before(transaction.FirstEventAt)
 	if transaction.FirstEventAt.IsZero() || occurredAt.Before(transaction.FirstEventAt) {
 		transaction.FirstEventAt = occurredAt
 	}
@@ -532,9 +528,15 @@ func mergeAntifraudEvent(
 		transaction.Q850Cause = q850
 	}
 	for key, value := range event.Attributes {
-		if value != "" {
+		if value != "" && key != "correlation_time_source" && key != "correlation_time_utc" {
 			transaction.Attributes[key] = value
 		}
+	}
+	if updateTimeProvenance {
+		transaction.Attributes["correlation_time_source"] =
+			event.Attributes["correlation_time_source"]
+		transaction.Attributes["correlation_time_utc"] =
+			event.Attributes["correlation_time_utc"]
 	}
 	transaction.RawEventIDs = appendUniqueUUID(transaction.RawEventIDs, event.EventID)
 	transaction.IsAntifraud = boolToUInt8(
@@ -943,10 +945,10 @@ func antifraudTransactionID(event SyslogEvent, occurredAt time.Time) uuid.UUID {
 	key := ""
 	if contextValue := event.Attributes["call_context"]; contextValue != "" {
 		key = fmt.Sprintf("context:%s:%s", contextValue,
-			event.ReceivedAt.UTC().Truncate(30*time.Minute).Format(time.RFC3339))
+			occurredAt.UTC().Truncate(30*time.Minute).Format(time.RFC3339))
 	} else if requestID := event.Attributes["packet_identifier"]; requestID != "" {
 		key = fmt.Sprintf("request:%s:%s:%s", event.Attributes["server_address"], requestID,
-			event.ReceivedAt.UTC().Truncate(10*time.Minute).Format(time.RFC3339))
+			occurredAt.UTC().Truncate(10*time.Minute).Format(time.RFC3339))
 	} else if session := normalizeCorrelationValue(event.Attributes["acct_session_id"]); session != "" {
 		key = "session:" + session
 	} else {
@@ -964,8 +966,34 @@ func antifraudPacketTransactionID(
 		return lifecycleID
 	}
 	key := fmt.Sprintf("%s|%s|%s|%s", event.DeviceID, event.Attributes["call_context"],
-		identifier, event.ReceivedAt.UTC().Truncate(10*time.Minute))
+		identifier, occurredAt.UTC().Truncate(10*time.Minute))
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(key))
+}
+
+func canonicalizeRadiusEvent(event SyslogEvent) (SyslogEvent, time.Time) {
+	attributes := make(map[string]string, len(event.Attributes)+2)
+	for key, value := range event.Attributes {
+		attributes[key] = value
+	}
+	event.Attributes = attributes
+	occurredAt := event.ReceivedAt.UTC()
+	source := "received_at"
+	if event.EventTime != nil {
+		occurredAt = event.EventTime.UTC()
+		source = "event_time"
+	}
+	if embedded := parseRadiusEventTimestamp(
+		attributes["event_timestamp"], event.SourceTimezone,
+	); embedded != nil {
+		occurredAt = embedded.UTC()
+		source = "event_timestamp"
+	} else if delay := parseUint32Attribute(attributes["acct_delay_time"]); delay != nil && *delay > 0 {
+		occurredAt = occurredAt.Add(-time.Duration(*delay) * time.Second)
+		source += "_minus_acct_delay"
+	}
+	attributes["correlation_time_source"] = source
+	attributes["correlation_time_utc"] = occurredAt.Format(time.RFC3339Nano)
+	return event, occurredAt
 }
 
 func normalizeCorrelationValue(value string) string {

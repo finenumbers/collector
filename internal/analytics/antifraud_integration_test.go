@@ -616,3 +616,85 @@ func TestChunkedRevisionReplayUsesDurableCursor(t *testing.T) {
 		t.Fatalf("revision activation failed: active=%d err=%v", active, err)
 	}
 }
+
+func TestActiveRevisionCoverageRepairCreatesTerminalAssignment(t *testing.T) {
+	address := os.Getenv("CLICKHOUSE_TEST_ADDR")
+	if address == "" {
+		t.Skip("CLICKHOUSE_TEST_ADDR is not set")
+	}
+	client, err := Open(
+		address, "collector", os.Getenv("CLICKHOUSE_TEST_USER"),
+		os.Getenv("CLICKHOUSE_TEST_PASSWORD"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := client.Migrate(ctx, "../../migrations/clickhouse"); err != nil {
+		t.Fatal(err)
+	}
+	deviceID := uuid.New()
+	revision := uint64(14)
+	occurredAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.device_derived_revisions
+		(device_id,revision,timezone,reason,status,updated_at)
+		VALUES(?,?,'UTC','coverage_repair_test','active',now64(6))`,
+		deviceID, revision); err != nil {
+		t.Fatal(err)
+	}
+	event := SyslogEvent{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: occurredAt.Add(time.Minute),
+		EventTime: &occurredAt, Category: "radius", TimezoneRevision: revision,
+		SourceTimezone: "UTC", Attributes: map[string]string{
+			"call_context": "REPAIR-14", "packet_code": "access-request",
+			"xpgk_request_type": "check_call", "is_antifraud": "true",
+			"acct_session_id": "repair session 14",
+		},
+	}
+	if err := client.ProcessSyslogShadowDerived(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	recordID := uuid.New()
+	if err := client.InsertCDRBatch(ctx, []CDRRecord{{
+		RecordID: recordID, DeviceID: deviceID, FileID: uuid.New(), RowNumber: 1,
+		IngestedAt: occurredAt, SetupTime: &occurredAt, TimezoneRevision: revision,
+		SourceTimezone: "UTC", RadiusSessionID: "repair session 14",
+		RadiusSessionIDNormalized: "repairsession14", RawFields: map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.EnqueueActiveCorrelationRepairs(ctx, 20); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2100 * time.Millisecond)
+	buckets, err := client.ListPendingCorrelationBuckets(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repaired bool
+	for _, bucket := range buckets {
+		if bucket.DeviceID != deviceID || bucket.Revision != revision {
+			continue
+		}
+		if err := client.ReconcileDirtyBucket(ctx, bucket); err != nil {
+			t.Fatal(err)
+		}
+		repaired = true
+	}
+	if !repaired {
+		t.Fatal("active revision repair did not enqueue a bucket")
+	}
+	var state string
+	var assigned uuid.UUID
+	if err := client.Conn.QueryRow(ctx, `SELECT argMax(state,updated_at),
+		argMax(cdr_record_id,updated_at)
+		FROM collector.call_assignments
+		WHERE device_id=? AND timezone_revision=?`, deviceID, revision).
+		Scan(&state, &assigned); err != nil {
+		t.Fatal(err)
+	}
+	if state != "exact" || assigned != recordID {
+		t.Fatalf("state=%s assigned=%s want=%s", state, assigned, recordID)
+	}
+}

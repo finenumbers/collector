@@ -29,6 +29,20 @@ import (
 
 var version = "dev"
 
+const (
+	correlationNormalBudget = uint64(20)
+	correlationReplayBudget = uint64(2)
+	correlationTimeout      = 30 * time.Second
+	correlationRepairEvery  = 5 * time.Minute
+)
+
+func correlationBudget(replayActive bool) uint64 {
+	if replayActive {
+		return correlationReplayBudget
+	}
+	return correlationNormalBudget
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	cfg, err := config.Load()
@@ -211,6 +225,7 @@ func main() {
 		}
 	}()
 	go func() {
+		nextRepair := time.Time{}
 		for ctx.Err() == nil {
 			replayActive, replayErr := control.HasActiveSyslogParserRebuildJobs(
 				ctx, analytics.SyslogParserVersion,
@@ -218,15 +233,17 @@ func main() {
 			if replayErr != nil {
 				slog.Error("Syslog replay admission check failed", "error", replayErr)
 			}
-			if replayActive {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(5 * time.Second):
-					continue
+			if !time.Now().Before(nextRepair) {
+				if err := warehouse.EnqueueActiveCorrelationRepairs(
+					ctx, correlationBudget(replayActive),
+				); err != nil {
+					slog.Error("active correlation repair enqueue failed", "error", err)
 				}
+				nextRepair = time.Now().Add(correlationRepairEvery)
 			}
-			buckets, err := warehouse.ListPendingCorrelationBuckets(ctx, 20)
+			buckets, err := warehouse.ListPendingCorrelationBuckets(
+				ctx, correlationBudget(replayActive),
+			)
 			if err != nil {
 				slog.Error("dirty correlation queue read failed", "error", err)
 			} else {
@@ -241,10 +258,21 @@ func main() {
 						}
 						continue
 					}
-					if err := warehouse.ReconcileDirtyBucket(ctx, bucket); err != nil {
+					started := time.Now()
+					bucketCtx, cancel := context.WithTimeout(ctx, correlationTimeout)
+					slog.Info("dirty correlation bucket started",
+						"device", bucket.DeviceID, "revision", bucket.Revision,
+						"bucket", bucket.Bucket, "replayActive", replayActive)
+					err := warehouse.ReconcileDirtyBucket(bucketCtx, bucket)
+					cancel()
+					if err != nil {
 						slog.Error("dirty correlation bucket failed",
 							"device", bucket.DeviceID, "revision", bucket.Revision,
-							"bucket", bucket.Bucket, "error", err)
+							"bucket", bucket.Bucket, "duration", time.Since(started), "error", err)
+					} else {
+						slog.Info("dirty correlation bucket completed",
+							"device", bucket.DeviceID, "revision", bucket.Revision,
+							"bucket", bucket.Bucket, "duration", time.Since(started))
 					}
 					release()
 				}

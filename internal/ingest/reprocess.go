@@ -126,14 +126,6 @@ func processDeviceRevisionJob(
 		return err
 	}
 	if job.Status == "building" {
-		if err := control.ActivateDeviceTimezoneRevision(ctx, job.DeviceID, int64(job.Revision)); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return client.SupersedeDeviceRevision(
-					ctx, job, "newer device timezone revision exists",
-				)
-			}
-			return err
-		}
 		return client.BeginDeviceRevisionCutover(ctx, job)
 	}
 	if job.CutoverSealed == 0 {
@@ -145,6 +137,16 @@ func processDeviceRevisionJob(
 	}
 	job, err = client.MarkDeviceRevisionReady(ctx, job)
 	if err != nil {
+		return err
+	}
+	if err := control.ActivateDeviceTimezoneRevision(
+		ctx, job.DeviceID, int64(job.Revision),
+	); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return client.SupersedeDeviceRevision(
+				ctx, job, "newer device timezone revision exists",
+			)
+		}
 		return err
 	}
 	if err := client.ActivateDeviceRevision(ctx, job); err != nil {

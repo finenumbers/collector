@@ -220,6 +220,14 @@ type SyslogDiagnostics = {
   latestAssignmentAt: string
   pendingDirtyBuckets: number
   oldestDirtyAt: string
+  correlationStatus: 'idle' | 'processing' | 'ready' | string
+  correlationAssignmentLag: number
+  latestCorrelationRunAt: string
+  lastCorrelationDurationMs: number
+  averageCorrelationDurationMs: number
+  correlationTimeFromTimestamp: number
+  correlationTimeFromEnvelope: number
+  correlationTimeFromReceive: number
   ingressAvailable: boolean
   ingress: IngressStatus
   cdrIngestFiles?: CdrIngestFile[]
@@ -1133,6 +1141,13 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const revisionNotice = readModelNotice(device, diagnostics)
   return <section className="data-view">
     {revisionNotice && <div className="timezone-rebuild">{revisionNotice}</div>}
+    {diagnostics?.correlationStatus === 'processing' &&
+      (dataset === 'calls' || dataset === 'antifraud') &&
+      <div className="timezone-rebuild">
+        Корреляция CDR ↔ AntiFraud догоняет активную revision:
+        {' '}{diagnostics.correlationAssignmentLag.toLocaleString('ru-RU')} lifecycle без terminal assignment,
+        buckets в очереди: {diagnostics.pendingDirtyBuckets.toLocaleString('ru-RU')}.
+      </div>}
     {isSatel && dataset === 'calls' && <SatelPipelineNotice
       templateKey={device.templateKey}
       replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />}
@@ -1255,6 +1270,12 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>Последний raw / fact: <strong>{formatTime(value.latestRawAt, 'UTC')} / {formatTime(value.latestFactAt, 'UTC')}</strong></span>
       <span>Последний lifecycle / link: <strong>{formatTime(value.latestLifecycleAt, 'UTC')} / {formatTime(value.latestAssignmentAt, 'UTC')}</strong></span>
       <span>Dirty buckets: <strong>{formatCount(value.pendingDirtyBuckets)} · oldest {formatTime(value.oldestDirtyAt, 'UTC')}</strong></span>
+      <span>Correlation status / lag: <strong>{value.correlationStatus || '—'} / {formatCount(value.correlationAssignmentLag)}</strong></span>
+      <span>Последний correlation run: <strong>{formatTime(value.latestCorrelationRunAt, 'UTC')} · {formatCount(value.lastCorrelationDurationMs)} мс</strong></span>
+      <span>Среднее время bucket: <strong>{Math.round(value.averageCorrelationDurationMs || 0).toLocaleString('ru-RU')} мс</strong></span>
+      <span>Time source embedded / envelope / receive: <strong>
+        {formatCount(value.correlationTimeFromTimestamp)} / {formatCount(value.correlationTimeFromEnvelope)} / {formatCount(value.correlationTimeFromReceive)}
+      </strong></span>
       <span>AntiFraud complete: <strong>{value.antifraudComplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud incomplete: <strong>{value.antifraudIncomplete.toLocaleString('ru-RU')}</strong></span>
       <span>AntiFraud без CDR: <strong>{value.antifraudOrphan.toLocaleString('ru-RU')}</strong></span>

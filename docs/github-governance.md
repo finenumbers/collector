@@ -20,6 +20,7 @@ Protect `main` with a branch ruleset that:
   - `Analyze (go)`;
   - `Analyze (actions)`;
   - `Analyze (javascript-typescript)`;
+  - aggregate `CodeQL`, which fails when a pull request introduces an alert;
 - requires the branch to be up to date before merging;
 - blocks force pushes and branch deletion;
 - does not allow direct pushes or bypasses, including for administrators.

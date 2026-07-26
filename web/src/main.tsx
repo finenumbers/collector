@@ -16,9 +16,8 @@ import {
   sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
 } from './equipment'
 import {
-  canCancelExport, canDownloadExport, createExportRequest, ExportJob, exportDownloadURL,
-  exportETASeconds, exportJobsURL, exportJobURL, exportProgress, exportStatusLabel,
-  ExportNavigationDataset, formatExportBytes, formatExportDuration, isExportActive, pollDelay,
+  createExportRequest, ExportJob, exportDownloadURL, exportJobsURL, exportJobURL,
+  ExportNavigationDataset, isExportActive, localDateInTimezone, pollDelay,
 } from './export'
 import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
@@ -631,7 +630,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       {activeView === 'device' && (!selected
         ? <EmptyDevices category={activeCategory} canCreate={user.role === 'admin'}
           onCreate={() => setShowCreate(activeCategory)} />
-        : <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
+        : <DataView key={`${selected.id}:${dataset}:${activeDeviceTimezone(selected)}`}
+          device={selected} dataset={dataset}
           admin={user.role === 'admin'} />)}
     </main>
     {showCreate && <CreateDeviceDialog category={showCreate} templates={templates}
@@ -930,149 +930,110 @@ function SatelPipelineNotice({ templateKey, replay }: {
   return null
 }
 
-function ExportPanel({
-  deviceID, dataset, query, open, onToggle,
-}: {
+function ExportButton({ deviceID, dataset, query, date }: {
   deviceID: string
   dataset: Dataset
   query: string
-  open: boolean
-  onToggle: () => void
+  date: string
 }) {
-  const [from, setFrom] = useState('')
-  const [to, setTo] = useState('')
-  const [jobs, setJobs] = useState<ExportJob[]>([])
+  const storageKey = `collector:export:${deviceID}:${dataset}:${date}:${query}`
+  const [job, setJob] = useState<ExportJob | null>(() => {
+    const saved = window.sessionStorage.getItem(storageKey)
+    return saved ? ({ id: saved, status: 'queued' } as ExportJob) : null
+  })
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
-  const hasActive = jobs.some((job) => isExportActive(job.status))
+  const jobID = job?.id
+  const jobStatus = job?.status
 
   useEffect(() => {
-    if (!open && !hasActive) return
+    if (!jobID || !jobStatus || !isExportActive(jobStatus)) return
     let active = true
     let timer: number | undefined
     let failures = 0
-    const controller = new AbortController()
     const poll = () => {
-      api<{ items: ExportJob[] }>(`${exportJobsURL(deviceID)}?limit=20`, { signal: controller.signal })
-        .then(({ items }) => {
+      api<{ job: ExportJob }>(exportJobURL(deviceID, jobID))
+        .then(({ job: next }) => {
           if (!active) return
-          const next = items || []
           failures = 0
-          setJobs(next)
-          timer = window.setTimeout(poll, pollDelay(0, next.some((job) => isExportActive(job.status))))
+          setJob(next)
+          if (next.status === 'completed') {
+            window.sessionStorage.removeItem(storageKey)
+            const link = document.createElement('a')
+            link.href = exportDownloadURL(deviceID, next.id)
+            link.download = next.filename || ''
+            document.body.appendChild(link)
+            link.click()
+            link.remove()
+            return
+          }
+          if (!isExportActive(next.status)) {
+            window.sessionStorage.removeItem(storageKey)
+            setError(next.error || 'Не удалось подготовить архив')
+            return
+          }
+          timer = window.setTimeout(poll, pollDelay(0, true))
         })
         .catch((reason) => {
-          if (!active || (reason instanceof DOMException && reason.name === 'AbortError')) return
+          if (!active) return
           failures += 1
-          setError(reason instanceof Error ? reason.message : 'Не удалось обновить список экспортов')
+          setError(reason instanceof Error ? reason.message : 'Не удалось проверить экспорт')
           timer = window.setTimeout(poll, pollDelay(failures, true))
         })
     }
     poll()
     return () => {
       active = false
-      controller.abort()
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [deviceID, hasActive, open])
+  }, [deviceID, jobID, jobStatus, storageKey])
 
   const createJob = () => {
-    if (from && to && from > to) {
-      setError('Дата начала не может быть позже даты окончания')
-      return
-    }
     setCreating(true)
     setError('')
+    setJob(null)
     api<{ job: ExportJob }>(exportJobsURL(deviceID), {
       method: 'POST',
-      body: JSON.stringify(createExportRequest(dataset, query, from || undefined, to || undefined)),
+      body: JSON.stringify(createExportRequest(dataset, query, date, date)),
     })
-      .then(({ job }) => setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)].slice(0, 20)))
+      .then(({ job: next }) => {
+        window.sessionStorage.setItem(storageKey, next.id)
+        setJob(next)
+      })
       .catch((reason) => setError(reason instanceof Error ? reason.message : 'Не удалось создать экспорт'))
       .finally(() => setCreating(false))
   }
-  const cancelJob = (jobID: string) => {
-    setError('')
-    api<void>(`${exportJobURL(deviceID, jobID)}/cancel`, { method: 'POST' })
-      .then(() => setJobs((current) => current.map((job) =>
-        job.id === jobID ? { ...job, status: 'cancelled' } : job)))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : 'Не удалось отменить экспорт'))
-  }
 
-  return <>
-    <button className="secondary" onClick={onToggle} aria-expanded={open}>
-      Экспорт{hasActive ? ' •' : ''}
-    </button>
-    {open && <div className="export-panel">
-      <div className="export-create">
-        <div>
-          <strong>Новый экспорт</strong>
-          <p>Формат выбирается автоматически: XLSX для небольших выборок, CSV.zip для больших.</p>
-        </div>
-        <label>С даты
-          <input type="date" value={from} max={to || undefined}
-            onChange={(event) => setFrom(event.target.value)} />
-        </label>
-        <label>По дату
-          <input type="date" value={to} min={from || undefined}
-            onChange={(event) => setTo(event.target.value)} />
-        </label>
-        <button className="primary" disabled={creating} onClick={createJob}>
-          {creating ? 'Создание…' : 'Создать экспорт'}
-        </button>
-      </div>
-      {error && <div className="form-error export-error">{error}</div>}
-      <div className="export-heading">
-        <strong>Последние экспорты</strong><span>Хранятся до указанного срока</span>
-      </div>
-      <div className="export-list">
-        {jobs.length === 0 && <div className="export-empty">Экспортов пока нет</div>}
-        {jobs.map((job) => {
-          const progress = exportProgress(job)
-          const eta = exportETASeconds(job)
-          const downloadable = canDownloadExport(job)
-          return <div className={`export-job export-${job.status}`} key={job.id}>
-            <div className="export-job-main">
-              <strong>{job.filename || `Экспорт ${job.id.slice(0, 8)}`}</strong>
-              <span>{exportStatusLabel(job.status)} · {job.format || 'auto'} · {formatExportBytes(job.bytesWritten || 0)}</span>
-              {job.status === 'running' && <div className="export-progress">
-                <progress value={progress ?? undefined} max={1} />
-                <small>{progress === null
-                  ? `${job.rowsWritten.toLocaleString('ru-RU')} строк · оценка размера недоступна`
-                  : `${Math.round(progress * 100)}% · ${job.rowsWritten.toLocaleString('ru-RU')} из ${job.estimatedRows?.toLocaleString('ru-RU')}${eta === null ? '' : ` · осталось ~${formatExportDuration(eta)}`}`}
-                </small>
-              </div>}
-              {job.status === 'queued' && <small className="export-queued">Ожидает запуска; оценка времени появится после начала</small>}
-              {job.status === 'failed' && <small className="export-job-error">{job.error || 'Экспорт завершился с ошибкой'}</small>}
-              {job.status === 'completed' && job.expiresAt && <small>Доступен до {new Date(job.expiresAt).toLocaleString('ru-RU')}</small>}
-            </div>
-            <div className="export-job-actions">
-              {canCancelExport(job.status) && <button className="secondary" onClick={() => cancelJob(job.id)}>Отменить</button>}
-              {downloadable && <a className="primary export-download" href={exportDownloadURL(deviceID, job.id)}>Скачать</a>}
-              {(job.status === 'failed' || job.status === 'cancelled' || job.status === 'expired' ||
-                (job.status === 'completed' && !downloadable)) &&
-                <button className="secondary" disabled={creating} onClick={createJob}>Повторить</button>}
-            </div>
-          </div>
-        })}
-      </div>
-    </div>}
-  </>
+  const active = creating || (job != null && isExportActive(job.status))
+  const label = creating ? 'Запуск…' : job?.status === 'queued' ? 'Архив в очереди…'
+    : job?.status === 'running' ? `Архив: ${job.rowsWritten.toLocaleString('ru-RU')} строк…`
+      : error ? 'Повторить экспорт' : 'Экспорт CSV.zip'
+  return <div className="export-button-wrap">
+    <button className="secondary" disabled={active} onClick={createJob}>{label}</button>
+    {error && <small className="export-inline-error" title={error}>{error}</small>}
+  </div>
 }
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
+  const timezone = activeDeviceTimezone(device)
+  const dateStorageKey = `collector:date:${device.id}`
+  const [date, setDate] = useState(() =>
+    window.sessionStorage.getItem(dateStorageKey) || localDateInTimezone(timezone))
   const [rows, setRows] = useState<DataRow[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
   const [selectedSatelCall, setSelectedSatelCall] = useState<SatelCdrRow | null>(null)
   const [selectedAntifraud, setSelectedAntifraud] = useState<AntifraudRow | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
-  const [stats, setStats] = useState<DeviceStats | null>(null)
+  const [statsResult, setStatsResult] = useState<{
+    date: string
+    value: DeviceStats | null
+  }>({ date: '', value: null })
+  const stats = statsResult.date === date ? statsResult.value : null
   const [diagnostics, setDiagnostics] = useState<SyslogDiagnostics | null>(null)
   const [cursor, setCursor] = useState<PageCursor | null>(null)
   const [hasMore, setHasMore] = useState(false)
-  const [exportOpen, setExportOpen] = useState(false)
   const tableShellRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const loadingRef = useRef(false)
@@ -1083,25 +1044,29 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const category = dataset === 'syslog_all' ? 'all' : dataset
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     const base = dataset === 'calls'
-      ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+      ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
       : dataset === 'antifraud'
-        ? `/devices/${device.id}/antifraud?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
-        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+        ? `/devices/${device.id}/antifraud?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
+        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [category, dataset, device.id, query])
+  }, [category, dataset, date, device.id, query])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
   }, [])
   useEffect(() => {
-    api<DeviceStats>(`/devices/${device.id}/stats`).then(setStats).catch(() => setStats(null))
+    let active = true
+    api<DeviceStats>(`/devices/${device.id}/stats?date=${date}`)
+      .then((value) => { if (active) setStatsResult({ date, value }) })
+      .catch(() => { if (active) setStatsResult({ date, value: null }) })
     if (admin && hasSyslog) {
       api<SyslogDiagnostics>(`/devices/${device.id}/syslog-diagnostics`)
         .then(setDiagnostics).catch(() => setDiagnostics(null))
     }
-  }, [admin, device.id, hasSyslog])
+    return () => { active = false }
+  }, [admin, date, device.id, hasSyslog])
   useEffect(() => {
     const generation = ++generationRef.current
     let active = true
@@ -1162,27 +1127,34 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       templateKey={device.templateKey}
       replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />}
     {admin && dataset === 'calls' && diagnostics && <CdrIngestBanner files={diagnostics.cdrIngestFiles || []} />}
-    {stats && <div className="stat-strip">
-      <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>Неуспешных</small><strong>{stats.failedCalls24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>Средняя длительность</small><strong>{(stats.averageTalkMs / 1000).toFixed(1)} с</strong></span>
+    <div className="stat-strip">
+      <label className="stat-date"><small>Дата · {timezone}</small><input type="date"
+        required value={date} onChange={(event) => {
+          if (event.target.value) {
+            window.sessionStorage.setItem(dateStorageKey, event.target.value)
+            setDate(event.target.value)
+          }
+        }} /></label>
+      <span><small>Вызовов</small><strong>{stats ? stats.calls24h.toLocaleString('ru-RU') : '—'}</strong></span>
+      <span><small>Неуспешных</small><strong>{stats ? stats.failedCalls24h.toLocaleString('ru-RU') : '—'}</strong></span>
+      <span><small>Средняя длительность</small><strong>{stats ? `${(stats.averageTalkMs / 1000).toFixed(1)} с` : '—'}</strong></span>
       {!isSatel && <>
-        <span><small>Аварий, 24 ч</small><strong>{stats.alarms24h.toLocaleString('ru-RU')}</strong></span>
-        <span><small>RADIUS, 24 ч</small><strong>{stats.radius24h.toLocaleString('ru-RU')}</strong></span>
-        <span><small>AntiFraud, 24 ч</small><strong>{stats.antifraud24h.toLocaleString('ru-RU')}</strong></span>
-        <span><small>Reject, 24 ч</small><strong className={stats.antifraudRejected24h ? 'warning-text' : ''}>{stats.antifraudRejected24h.toLocaleString('ru-RU')}</strong></span>
-        <span><small>Без связи CDR</small><strong className={stats.unlinkedCalls24h ? 'warning-text' : ''}>{stats.unlinkedCalls24h.toLocaleString('ru-RU')}</strong></span>
-        <span><small>Нераспознано, 24 ч</small><strong className={stats.unknown24h ? 'warning-text' : ''}>{stats.unknown24h.toLocaleString('ru-RU')}</strong></span>
+        <span><small>Аварий</small><strong>{stats ? stats.alarms24h.toLocaleString('ru-RU') : '—'}</strong></span>
+        <span><small>RADIUS</small><strong>{stats ? stats.radius24h.toLocaleString('ru-RU') : '—'}</strong></span>
+        <span><small>AntiFraud</small><strong>{stats ? stats.antifraud24h.toLocaleString('ru-RU') : '—'}</strong></span>
+        <span><small>Reject</small><strong className={stats?.antifraudRejected24h ? 'warning-text' : ''}>{stats ? stats.antifraudRejected24h.toLocaleString('ru-RU') : '—'}</strong></span>
+        <span><small>Без связи CDR</small><strong className={stats?.unlinkedCalls24h ? 'warning-text' : ''}>{stats ? stats.unlinkedCalls24h.toLocaleString('ru-RU') : '—'}</strong></span>
+        <span><small>Нераспознано</small><strong className={stats?.unknown24h ? 'warning-text' : ''}>{stats ? stats.unknown24h.toLocaleString('ru-RU') : '—'}</strong></span>
       </>}
-    </div>}
+    </div>
     {admin && diagnostics && <SyslogDiagnosticPanel value={diagnostics} />}
     <div className="toolbar">
-      <div><h3>{title}</h3><span>{rows.length} записей в текущей выборке</span></div>
+      <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
         <div className="search"><Search size={14} /><input placeholder="Поиск по данным…"
           value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-        <ExportPanel key={device.id} deviceID={device.id} dataset={dataset} query={query}
-          open={exportOpen} onToggle={() => setExportOpen((value) => !value)} />
+        <ExportButton key={`${dataset}:${date}:${query}`} deviceID={device.id}
+          dataset={dataset} query={query} date={date} />
       </div>
     </div>
     <div className="table-shell" ref={tableShellRef}>

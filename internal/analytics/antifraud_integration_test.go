@@ -365,6 +365,32 @@ func TestShadowRevisionCorrelationAndStaleAssignmentReplacement(t *testing.T) {
 		!strings.Contains(callsPage.Items[0].SetupTimeLocal, "+07:00") {
 		t.Fatalf("current calls page failed: %#v err=%v", callsPage, err)
 	}
+	selectedDay := &TimeRange{From: now.Add(-time.Hour), To: now.Add(time.Hour)}
+	if dated, rangeErr := client.ListEventsPageRange(
+		ctx, deviceID, "radius", "", 100, nil, selectedDay,
+	); rangeErr != nil || len(dated.Items) != 2 {
+		t.Fatalf("dated current events failed: items=%d err=%v", len(dated.Items), rangeErr)
+	}
+	if dated, rangeErr := client.ListCallsPageRange(
+		ctx, deviceID, "", 100, nil, selectedDay,
+	); rangeErr != nil || len(dated.Items) != 1 {
+		t.Fatalf("dated current calls failed: items=%d err=%v", len(dated.Items), rangeErr)
+	}
+	if dated, rangeErr := client.ListAntifraudPageRange(
+		ctx, deviceID, "", 100, nil, selectedDay,
+	); rangeErr != nil || len(dated.Items) != 1 {
+		t.Fatalf("dated current AntiFraud failed: items=%d err=%v", len(dated.Items), rangeErr)
+	}
+	if datedStats, rangeErr := client.StatsRange(ctx, deviceID, *selectedDay); rangeErr != nil ||
+		datedStats.Calls24h != 1 || datedStats.Antifraud24h != 1 {
+		t.Fatalf("dated current stats failed: %#v err=%v", datedStats, rangeErr)
+	}
+	outside := &TimeRange{From: now.AddDate(0, 0, 2), To: now.AddDate(0, 0, 3)}
+	if dated, rangeErr := client.ListEventsPageRange(
+		ctx, deviceID, "radius", "", 100, nil, outside,
+	); rangeErr != nil || len(dated.Items) != 0 {
+		t.Fatalf("outside current events failed: items=%d err=%v", len(dated.Items), rangeErr)
+	}
 	timeline, err := client.AntifraudTimeline(
 		ctx, deviceID, page.Items[0].TransactionID,
 	)

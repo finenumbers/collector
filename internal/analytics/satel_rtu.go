@@ -410,12 +410,28 @@ func (c *Client) ListSatelRTUCalls(
 func (c *Client) ListSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
 ) (SatelRTUCallPage, error) {
-	return c.listSatelRTUCallsPage(ctx, deviceID, nil, search, limit, cursor)
+	return c.ListSatelRTUCallsPageRange(ctx, deviceID, search, limit, cursor, nil)
+}
+
+func (c *Client) ListSatelRTUCallsPageRange(
+	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
+	timeRange *TimeRange,
+) (SatelRTUCallPage, error) {
+	revision, err := c.ActiveDeviceRevision(ctx, deviceID)
+	if err != nil {
+		return SatelRTUCallPage{}, err
+	}
+	if revision == 0 {
+		return c.listSatelRTUCallsPage(ctx, deviceID, nil, search, limit, cursor, timeRange)
+	}
+	return c.listSatelRTUCallsPage(
+		ctx, deviceID, &revision, search, limit, cursor, timeRange,
+	)
 }
 
 func (c *Client) listSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, revision *uint64, search string,
-	limit uint64, cursor *CallCursor,
+	limit uint64, cursor *CallCursor, timeRange *TimeRange,
 ) (SatelRTUCallPage, error) {
 	if limit == 0 || limit > 50000 {
 		limit = 200
@@ -478,6 +494,11 @@ func (c *Client) listSatelRTUCallsPage(
 	if revision != nil {
 		query += ` AND c.timezone_revision=?`
 		args = append(args, *revision)
+	}
+	if timeRange != nil {
+		query += ` AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?
+			AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?`
+		args = append(args, timeRange.From, timeRange.To)
 	}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(c.in_ani,?)>0
@@ -567,19 +588,47 @@ func (c *Client) listSatelRTUCallsPage(
 func (c *Client) SatelRTUStats(
 	ctx context.Context, deviceID uuid.UUID,
 ) (DeviceStats, error) {
+	now := time.Now().UTC()
+	return c.SatelRTUStatsRange(
+		ctx, deviceID, TimeRange{From: now.Add(-24 * time.Hour), To: now},
+	)
+}
+
+func (c *Client) SatelRTUStatsRange(
+	ctx context.Context, deviceID uuid.UUID, timeRange TimeRange,
+) (DeviceStats, error) {
+	revision, err := c.ActiveDeviceRevision(ctx, deviceID)
+	if err != nil {
+		return DeviceStats{}, err
+	}
 	var result DeviceStats
-	err := c.Conn.QueryRow(ctx, `WITH times AS
+	query := `WITH times AS
 		(
-			SELECT record_id,argMax(setup_time_utc,interpreted_at) AS setup_time
+			SELECT record_id,argMax(setup_time_utc,interpreted_at) AS setup_time,
+				argMax(cdr_date_utc,interpreted_at) AS cdr_date
 			FROM collector.satel_rtu_cdr_time_facts
-			WHERE device_id=? GROUP BY record_id
+			WHERE device_id=?`
+	args := []any{deviceID}
+	if revision != 0 {
+		query += ` AND timezone_revision=?`
+		args = append(args, revision)
+	}
+	query += ` GROUP BY record_id
 		)
 		SELECT count(),countIf(c.outcome!='answered'),
 			ifNull(avgIf(c.duration_ms,c.outcome='answered'),0)
 		FROM collector.satel_rtu_cdr AS c FINAL
 		LEFT JOIN times AS t ON t.record_id=c.record_id
-		WHERE c.device_id=? AND coalesce(t.setup_time,c.ingested_at)>=now()-INTERVAL 24 HOUR`,
-		deviceID, deviceID).Scan(
+		WHERE c.device_id=?`
+	args = append(args, deviceID)
+	if revision != 0 {
+		query += ` AND c.timezone_revision=?`
+		args = append(args, revision)
+	}
+	query += ` AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?
+		AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?`
+	args = append(args, timeRange.From, timeRange.To)
+	err = c.Conn.QueryRow(ctx, query, args...).Scan(
 		&result.Calls24h, &result.FailedCalls24h, &result.AverageTalkMS,
 	)
 	return result, err

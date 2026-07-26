@@ -25,6 +25,24 @@ const (
 	DefaultXLSXRowLimit = int64(250_000)
 )
 
+type Health struct {
+	lastPoll atomic.Int64
+}
+
+func (h *Health) markPoll() {
+	if h != nil {
+		h.lastPoll.Store(time.Now().UnixNano())
+	}
+}
+
+func (h *Health) Available(maxAge time.Duration) bool {
+	if h == nil {
+		return true
+	}
+	value := h.lastPoll.Load()
+	return value != 0 && time.Since(time.Unix(0, value)) <= maxAge
+}
+
 type ProgressFunc func(rows int64) error
 
 type RenderResult struct {
@@ -47,6 +65,7 @@ type Worker struct {
 	Poll     time.Duration
 	MaxSpool int64
 	Render   RenderFunc
+	Health   *Health
 	runOnce  func(context.Context) (bool, error)
 }
 
@@ -99,7 +118,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		if w.runOnce != nil {
 			iteration = w.runOnce
 		}
+		w.Health.markPoll()
 		worked, err := iteration(ctx)
+		w.Health.markPoll()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("async export worker iteration failed; retrying",
 				"worker", w.WorkerID, "error", err, "retryAfter", w.Poll)
@@ -132,10 +153,15 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 }
 
 func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
+	started := time.Now()
+	slog.Info("async export started", "job", job.ID, "device", job.DeviceID,
+		"dataset", job.Dataset, "queueAge", time.Since(job.CreatedAt))
 	fail := func(failure error) error {
 		_ = w.Store.FinishExportJob(
 			context.WithoutCancel(ctx), job.ID, w.WorkerID, "failed", failure.Error(),
 		)
+		slog.Warn("async export failed", "job", job.ID, "device", job.DeviceID,
+			"dataset", job.Dataset, "duration", time.Since(started), "error", failure)
 		return failure
 	}
 	file, err := os.CreateTemp(w.SpoolDir, "collector-export-*.part")
@@ -162,6 +188,7 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 			case <-renderCtx.Done():
 				return
 			case <-ticker.C:
+				w.Health.markPoll()
 				cancelled, updateErr := w.Store.UpdateExportProgress(
 					renderCtx, job.ID, w.WorkerID, processedRows.Load(), writer.written.Load(), w.Lease,
 				)
@@ -179,6 +206,7 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 		}
 	}()
 	progress := func(rows int64) error {
+		w.Health.markPoll()
 		processedRows.Store(rows)
 		cancelled, updateErr := w.Store.UpdateExportProgress(
 			renderCtx, job.ID, w.WorkerID, rows, writer.written.Load(), w.Lease,
@@ -252,6 +280,11 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 				context.WithoutCancel(ctx), job.ID, w.WorkerID, "cancelled", err.Error(),
 			)
 		}
+	}
+	if err == nil {
+		slog.Info("async export completed", "job", job.ID, "device", job.DeviceID,
+			"dataset", job.Dataset, "duration", time.Since(started),
+			"rows", result.Rows, "bytes", size)
 	}
 	return err
 }

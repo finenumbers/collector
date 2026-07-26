@@ -169,28 +169,34 @@ func normalizeExportEstimate(count int64, err error) *int64 {
 
 func (c *Client) ListExportEventsPage(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, category, search string,
-	limit uint64, cursor *EventCursor,
+	limit uint64, cursor *EventCursor, timeRange *TimeRange,
 ) (EventPage, error) {
-	return c.listCurrentEventsPage(ctx, deviceID, revision, category, search, limit, cursor)
+	return c.listCurrentEventsPage(
+		ctx, deviceID, revision, category, search, limit, cursor, timeRange,
+	)
 }
 
 func (c *Client) ListExportCallsPage(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, search string,
-	limit uint64, cursor *CallCursor,
+	limit uint64, cursor *CallCursor, timeRange *TimeRange,
 ) (CallPage, error) {
-	return c.listCurrentCallsPage(ctx, deviceID, revision, search, limit, cursor)
+	return c.listCurrentCallsPage(ctx, deviceID, revision, search, limit, cursor, timeRange)
 }
 
 func (c *Client) ListExportAntifraudPage(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, search string,
-	limit uint64, cursor *AntifraudCursor,
+	limit uint64, cursor *AntifraudCursor, timeRange *TimeRange,
 ) (AntifraudPage, error) {
-	return c.listCurrentAntifraudPage(ctx, deviceID, revision, search, limit, cursor)
+	return c.listCurrentAntifraudPage(
+		ctx, deviceID, revision, search, limit, cursor, timeRange,
+	)
 }
 
 func (c *Client) ListExportSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, search string,
-	limit uint64, cursor *CallCursor,
+	limit uint64, cursor *CallCursor, timeRange *TimeRange,
 ) (SatelRTUCallPage, error) {
-	return c.listSatelRTUCallsPage(ctx, deviceID, &revision, search, limit, cursor)
+	return c.listSatelRTUCallsPage(
+		ctx, deviceID, &revision, search, limit, cursor, timeRange,
+	)
 }

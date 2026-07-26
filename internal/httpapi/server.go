@@ -21,6 +21,7 @@ import (
 	"collector/internal/archive"
 	"collector/internal/config"
 	"collector/internal/equipment"
+	"collector/internal/exportworker"
 	ftpclient "collector/internal/ftp"
 	"collector/internal/ingest"
 	"collector/internal/spool"
@@ -46,6 +47,7 @@ type Server struct {
 	Spool              *spool.Queue
 	NATS               *nats.Conn
 	IngressStatusPath  string
+	ExportHealth       *exportworker.Health
 	ReconcileRetention func(context.Context) error
 }
 
@@ -258,6 +260,7 @@ func (s *Server) systemInfo(writer http.ResponseWriter, request *http.Request) {
 	services["postgres"] = s.Store.DB.Ping(ctx) == nil
 	services["clickhouse"] = s.Analytics.Conn.Ping(ctx) == nil
 	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
+	services["export_worker"] = s.ExportHealth == nil || s.ExportHealth.Available(10*time.Second)
 	if s.Archive != nil {
 		exists, err := s.Archive.Client.BucketExists(ctx, s.Archive.Bucket)
 		services["minio"] = err == nil && exists
@@ -387,6 +390,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	services["postgres"] = s.Store.DB.Ping(serviceCtx) == nil
 	services["clickhouse"] = s.Analytics.Conn.Ping(serviceCtx) == nil
 	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
+	services["export_worker"] = s.ExportHealth == nil || s.ExportHealth.Available(10*time.Second)
 	var spoolDepth uint64
 	if s.Spool != nil {
 		if depth, depthErr := s.Spool.Depth(); depthErr == nil {
@@ -924,14 +928,43 @@ func sanitizeDownloadName(value string) string {
 	return value
 }
 
+func deviceDateRange(
+	writer http.ResponseWriter, request *http.Request, device store.Device,
+) (*analytics.TimeRange, bool) {
+	value := request.URL.Query().Get("date")
+	if value == "" {
+		return nil, true
+	}
+	timezone := device.ActiveTimezone
+	if timezone == "" {
+		timezone = device.Timezone
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "invalid device timezone")
+		return nil, false
+	}
+	from, err := time.ParseInLocation("2006-01-02", value, location)
+	if err != nil || from.Format("2006-01-02") != value {
+		writeError(writer, http.StatusBadRequest, "date must use YYYY-MM-DD")
+		return nil, false
+	}
+	return &analytics.TimeRange{From: from.UTC(), To: from.AddDate(0, 0, 1).UTC()}, true
+}
+
 func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
 	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
 		return device.Capabilities.Syslog
-	}, "Syslog events") {
+	}, "Syslog events")
+	if !ok {
+		return
+	}
+	timeRange, ok := deviceDateRange(writer, request, device)
+	if !ok {
 		return
 	}
 	limit := parsePageLimit(request)
@@ -947,8 +980,8 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 		}
 		cursor = &analytics.EventCursor{ReceivedAt: receivedAt, EventID: eventID}
 	}
-	page, err := s.Analytics.ListEventsPage(request.Context(), deviceID,
-		request.URL.Query().Get("category"), request.URL.Query().Get("q"), limit, cursor)
+	page, err := s.Analytics.ListEventsPageRange(request.Context(), deviceID,
+		request.URL.Query().Get("category"), request.URL.Query().Get("q"), limit, cursor, timeRange)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query events")
 		return
@@ -1058,6 +1091,10 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
+	timeRange, ok := deviceDateRange(writer, request, device)
+	if !ok {
+		return
+	}
 	limit := parsePageLimit(request)
 	var cursor *analytics.CallCursor
 	before := request.URL.Query().Get("before")
@@ -1072,9 +1109,17 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		cursor = &analytics.CallCursor{SortTime: sortTime, RecordID: recordID}
 	}
 	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
-		page, err := s.Analytics.ListSatelRTUCallsPage(
-			request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
-		)
+		var page analytics.SatelRTUCallPage
+		var err error
+		if timeRange != nil {
+			page, err = s.Analytics.ListSatelRTUCallsPageRange(
+				request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+			)
+		} else {
+			page, err = s.Analytics.ListSatelRTUCallsPage(
+				request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
+			)
+		}
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "unable to query Satel RTU calls")
 			return
@@ -1090,8 +1135,8 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		})
 		return
 	}
-	page, err := s.Analytics.ListCallsPage(
-		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
+	page, err := s.Analytics.ListCallsPageRange(
+		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
 	)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query calls")
@@ -1113,9 +1158,14 @@ func (s *Server) listAntifraud(writer http.ResponseWriter, request *http.Request
 	if !ok {
 		return
 	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
 		return device.Capabilities.Antifraud && device.Capabilities.Radius
-	}, "AntiFraud/RADIUS") {
+	}, "AntiFraud/RADIUS")
+	if !ok {
+		return
+	}
+	timeRange, ok := deviceDateRange(writer, request, device)
+	if !ok {
 		return
 	}
 	limit := parsePageLimit(request)
@@ -1133,8 +1183,8 @@ func (s *Server) listAntifraud(writer http.ResponseWriter, request *http.Request
 			LastEventAt: lastEventAt, TransactionID: transactionID,
 		}
 	}
-	page, err := s.Analytics.ListAntifraudPage(
-		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
+	page, err := s.Analytics.ListAntifraudPageRange(
+		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
 	)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query AntiFraud lifecycle")
@@ -1163,10 +1213,18 @@ func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) 
 	if !ok {
 		return
 	}
+	timeRange, ok := deviceDateRange(writer, request, device)
+	if !ok {
+		return
+	}
 	var stats analytics.DeviceStats
 	var err error
-	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+	if timeRange == nil && device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
 		stats, err = s.Analytics.SatelRTUStats(request.Context(), deviceID)
+	} else if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+		stats, err = s.Analytics.SatelRTUStatsRange(request.Context(), deviceID, *timeRange)
+	} else if timeRange != nil {
+		stats, err = s.Analytics.StatsRange(request.Context(), deviceID, *timeRange)
 	} else {
 		stats, err = s.Analytics.Stats(request.Context(), deviceID)
 	}

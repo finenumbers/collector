@@ -152,6 +152,9 @@ main { min-width: 0; display: flex; flex-direction: column; background: var(--bg
 .stat-strip { display: grid; grid-template-columns: repeat(6, minmax(100px, 1fr)); margin-bottom: 10px;
   border: 1px solid var(--line); background: var(--panel); }
 .stat-strip span { min-width: 0; padding: 7px 9px; border-right: 1px solid var(--line); }
+.stat-date { min-width: 155px; margin: 0; padding: 5px 8px; border-right: 1px solid var(--line); }
+.stat-date small { display: block; }
+.stat-date input { width: 100%; height: 25px; margin-top: 2px; padding: 2px 5px; font-size: 11px; }
 .stat-strip span:last-child { border-right: 0; }
 .stat-strip small, .stat-strip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stat-strip small { color: var(--muted); font-size: 8.5px; text-transform: uppercase; letter-spacing: .04em; }
@@ -166,6 +169,10 @@ main { min-width: 0; display: flex; flex-direction: column; background: var(--bg
 .toolbar h3 { font-size: 14px; margin: 0 0 2px; }
 .toolbar > div > span { color: var(--muted); font-size: 10px; }
 .toolbar-actions { display: flex; gap: 7px; }
+.export-button-wrap { position: relative; display: flex; align-items: center; }
+.export-inline-error { position: absolute; top: calc(100% + 4px); right: 0; z-index: 4;
+  width: 260px; padding: 5px 7px; border: 1px solid #e8b4b4; background: #fff0f0;
+  color: var(--bad); font-size: 9px; box-shadow: 0 4px 12px rgb(31 41 55 / 12%); }
 .export-panel { position: absolute; z-index: 12; top: calc(100% + 5px); right: 0; width: min(720px, calc(100vw - 270px));
   max-height: min(620px, calc(100vh - 130px)); overflow: auto; border: 1px solid #c7d0dc;
   background: var(--panel); box-shadow: 0 14px 36px rgb(31 41 55 / 18%); }

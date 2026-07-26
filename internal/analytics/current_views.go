@@ -46,6 +46,7 @@ func (c *Client) listCurrentEventsPage(
 	search string,
 	limit uint64,
 	cursor *EventCursor,
+	timeRange *TimeRange,
 ) (EventPage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -53,27 +54,39 @@ func (c *Client) listCurrentEventsPage(
 	if err != nil {
 		return EventPage{}, err
 	}
-	if category != "" && category != "all" {
+	if timeRange != nil || (category != "" && category != "all") {
 		return c.listCurrentEventsByCategoryPage(
-			ctx, deviceID, revision, timezone, category, search, limit, cursor,
+			ctx, deviceID, revision, timezone, category, search, limit, cursor, timeRange,
 		)
 	}
 	query := `WITH page AS
 		(
-			SELECT event_id,received_at,payload,event_time,category,component,message,
-				parse_status,attributes,source_timezone
-			FROM collector.raw_syslog
-			WHERE device_id=?`
-	args := []any{deviceID}
+			SELECT r.event_id,r.received_at,r.payload,r.event_time,r.category,r.component,
+				r.message,r.parse_status,r.attributes,r.source_timezone
+			FROM collector.raw_syslog AS r
+			LEFT JOIN
+			(
+				SELECT event_id,argMax(event_time_utc,interpreted_at) AS event_time
+				FROM collector.syslog_facts
+				WHERE device_id=? AND timezone_revision=?
+				GROUP BY event_id
+			) AS ft ON ft.event_id=r.event_id
+			WHERE r.device_id=?`
+	args := []any{deviceID, revision, deviceID}
+	if timeRange != nil {
+		query += ` AND coalesce(ft.event_time,r.event_time,r.received_at)>=?
+			AND coalesce(ft.event_time,r.event_time,r.received_at)<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
 	if search != "" {
-		query += ` AND positionCaseInsensitive(payload,?)>0`
+		query += ` AND positionCaseInsensitive(r.payload,?)>0`
 		args = append(args, search)
 	}
 	if cursor != nil {
-		query += ` AND (received_at<? OR (received_at=? AND event_id<?))`
+		query += ` AND (r.received_at<? OR (r.received_at=? AND r.event_id<?))`
 		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
 	}
-	query += ` ORDER BY received_at DESC,event_id DESC LIMIT 1 BY event_id LIMIT ?
+	query += ` ORDER BY r.received_at DESC,r.event_id DESC LIMIT 1 BY r.event_id LIMIT ?
 		),
 		facts AS
 		(
@@ -141,6 +154,7 @@ func (c *Client) listCurrentEventsByCategoryPage(
 	search string,
 	limit uint64,
 	cursor *EventCursor,
+	timeRange *TimeRange,
 ) (EventPage, error) {
 	query := `WITH facts_page AS
 		(
@@ -149,8 +163,17 @@ func (c *Client) listCurrentEventsByCategoryPage(
 			FROM collector.syslog_facts AS f
 			ANY INNER JOIN collector.raw_syslog AS r
 				ON r.device_id=? AND r.event_id=f.event_id
-			WHERE f.device_id=? AND f.timezone_revision=? AND f.category=?`
-	args := []any{deviceID, deviceID, revision, category}
+			WHERE f.device_id=? AND f.timezone_revision=?`
+	args := []any{deviceID, deviceID, revision}
+	if category != "" && category != "all" {
+		query += ` AND f.category=?`
+		args = append(args, category)
+	}
+	if timeRange != nil {
+		query += ` AND coalesce(f.event_time_utc,r.event_time,r.received_at)>=?
+			AND coalesce(f.event_time_utc,r.event_time,r.received_at)<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
 	if search != "" {
 		query += ` AND positionCaseInsensitive(r.payload,?)>0`
 		args = append(args, search)
@@ -201,6 +224,7 @@ func (c *Client) listFallbackEventsPage(
 	search string,
 	limit uint64,
 	cursor *EventCursor,
+	timeRange *TimeRange,
 ) (EventPage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -222,6 +246,11 @@ func (c *Client) listFallbackEventsPage(
 		) AS i ON i.device_id=r.device_id AND i.event_id=r.event_id
 		WHERE r.device_id=?`
 	args := []any{SyslogParserVersion, deviceID}
+	if timeRange != nil {
+		query += ` AND coalesce(i.event_time,r.event_time,r.received_at)>=?
+			AND coalesce(i.event_time,r.event_time,r.received_at)<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
 	if category != "" && category != "all" {
 		query += ` AND ` + effectiveCategory + `=?`
 		args = append(args, category)
@@ -270,6 +299,7 @@ func (c *Client) listCurrentCallsPage(
 	search string,
 	limit uint64,
 	cursor *CallCursor,
+	timeRange *TimeRange,
 ) (CallPage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -277,23 +307,36 @@ func (c *Client) listCurrentCallsPage(
 	if err != nil {
 		return CallPage{}, err
 	}
-	query := `WITH source AS
+	query := `WITH all_times AS
 		(
-			SELECT *,
+			SELECT record_id,argMax(setup_time_utc,interpreted_at) AS setup_time
+			FROM collector.cdr_time_facts
+			WHERE device_id=? AND timezone_revision=?
+			GROUP BY record_id
+		),
+		source AS
+		(
+			SELECT c.*,
 				coalesce(
+					t.setup_time,
 					parseDateTime64BestEffortOrNull(
-						coalesce(nullIf(raw_fields['setup_time'],''),nullIf(raw_fields['setup'],'')),
+						coalesce(nullIf(c.raw_fields['setup_time'],''),nullIf(c.raw_fields['setup'],'')),
 						6,?),
-					ingested_at) AS source_sort_time
-			FROM collector.cdr_records
-			WHERE device_id=?
+					c.ingested_at) AS source_sort_time
+			FROM collector.cdr_records AS c
+			LEFT JOIN all_times AS t ON t.record_id=c.record_id
+			WHERE c.device_id=?
 		),
 		page AS
 		(
 			SELECT record_id AS page_record_id,source_sort_time AS sort_time
 			FROM source AS c
 			WHERE 1`
-	args := []any{timezone, deviceID}
+	args := []any{deviceID, revision, timezone, deviceID}
+	if timeRange != nil {
+		query += ` AND source_sort_time>=? AND source_sort_time<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(c.incoming_cgpn,?)>0
 			OR positionCaseInsensitive(c.outgoing_cgpn,?)>0
@@ -315,11 +358,8 @@ func (c *Client) listCurrentCallsPage(
 		),
 		times AS
 		(
-			SELECT record_id,argMax(setup_time_utc,interpreted_at) AS setup_time
-			FROM collector.cdr_time_facts
-			WHERE device_id=? AND timezone_revision=?
-			  AND record_id IN (SELECT page_record_id FROM page)
-			GROUP BY record_id
+			SELECT record_id,setup_time FROM all_times
+			WHERE record_id IN (SELECT page_record_id FROM page)
 		)
 		SELECT c.record_id,t.setup_time,c.duration_ms,c.release_cause,c.release_info,
 			c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,c.outgoing_cdpn,
@@ -330,7 +370,7 @@ func (c *Client) listCurrentCallsPage(
 		ANY INNER JOIN collector.cdr_records AS c
 			ON c.device_id=? AND c.record_id=p.page_record_id
 		ORDER BY p.sort_time DESC,c.record_id DESC`
-	args = append(args, limit+1, deviceID, revision, deviceID)
+	args = append(args, limit+1, deviceID)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {
 		return CallPage{}, err
@@ -379,6 +419,7 @@ func (c *Client) listCurrentAntifraudPage(
 	search string,
 	limit uint64,
 	cursor *AntifraudCursor,
+	timeRange *TimeRange,
 ) (AntifraudPage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -397,6 +438,10 @@ func (c *Client) listCurrentAntifraudPage(
 			FROM collector.antifraud_lifecycles FINAL
 			WHERE device_id=? AND timezone_revision=? AND is_antifraud=1`
 	args := []any{deviceID, revision}
+	if timeRange != nil {
+		query += ` AND last_event_at>=? AND last_event_at<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(acct_session_id,?)>0
 			OR positionCaseInsensitive(calling_station_id,?)>0
@@ -776,7 +821,7 @@ func (c *Client) currentDiagnostics(
 }
 
 func (c *Client) currentStats(
-	ctx context.Context, deviceID uuid.UUID, revision uint64,
+	ctx context.Context, deviceID uuid.UUID, revision uint64, timeRange TimeRange,
 ) (DeviceStats, error) {
 	var result DeviceStats
 	if err := c.Conn.QueryRow(ctx, `SELECT count(),countIf(c.release_cause IS NOT NULL
@@ -786,11 +831,11 @@ func (c *Client) currentStats(
 			SELECT record_id,argMax(setup_time_utc,interpreted_at) AS setup_time
 			FROM collector.cdr_time_facts
 			WHERE device_id=? AND timezone_revision=?
-			GROUP BY record_id HAVING setup_time>=now()-INTERVAL 24 HOUR
+			GROUP BY record_id HAVING setup_time>=? AND setup_time<?
 		) AS t
 		ANY INNER JOIN collector.cdr_records AS c
 			ON c.device_id=? AND c.record_id=t.record_id`,
-		deviceID, revision, deviceID).
+		deviceID, revision, timeRange.From, timeRange.To, deviceID).
 		Scan(&result.Calls24h, &result.FailedCalls24h, &result.AverageTalkMS); err != nil {
 		return result, err
 	}
@@ -801,9 +846,10 @@ func (c *Client) currentStats(
 			SELECT event_id,argMax(category,interpreted_at) AS category
 			FROM collector.syslog_facts
 			WHERE device_id=? AND timezone_revision=?
-			  AND received_at>=now()-INTERVAL 24 HOUR
+			  AND coalesce(event_time_utc,received_at)>=?
+			  AND coalesce(event_time_utc,received_at)<?
 			GROUP BY event_id
-		)`, deviceID, revision).
+		)`, deviceID, revision, timeRange.From, timeRange.To).
 		Scan(&result.Alarms24h, &result.Radius24h, &result.Unknown24h); err != nil {
 		return result, err
 	}
@@ -816,8 +862,8 @@ func (c *Client) currentStats(
 				argMax(last_event_at,updated_at) AS last_event_at
 			FROM collector.antifraud_lifecycles
 			WHERE device_id=? AND timezone_revision=? AND is_antifraud=1
-			GROUP BY transaction_id HAVING last_event_at>=now()-INTERVAL 24 HOUR
-		)`, deviceID, revision).
+			GROUP BY transaction_id HAVING last_event_at>=? AND last_event_at<?
+		)`, deviceID, revision, timeRange.From, timeRange.To).
 		Scan(&result.Antifraud24h, &result.AntifraudRejected24h,
 			&result.AntifraudIncomplete24h); err != nil {
 		return result, err
@@ -828,7 +874,7 @@ func (c *Client) currentStats(
 			SELECT record_id,argMax(setup_time_utc,interpreted_at) AS setup_time
 			FROM collector.cdr_time_facts
 			WHERE device_id=? AND timezone_revision=?
-			GROUP BY record_id HAVING setup_time>=now()-INTERVAL 24 HOUR
+			GROUP BY record_id HAVING setup_time>=? AND setup_time<?
 		) AS t
 		LEFT JOIN
 		(
@@ -839,7 +885,8 @@ func (c *Client) currentStats(
 			HAVING argMax(state,updated_at) IN ('exact','composite')
 		) AS a ON a.record_id=t.record_id
 		WHERE a.record_id=toUUID('00000000-0000-0000-0000-000000000000')`,
-		deviceID, revision, deviceID, revision).Scan(&result.UnlinkedCalls24h); err != nil {
+		deviceID, revision, timeRange.From, timeRange.To, deviceID, revision).
+		Scan(&result.UnlinkedCalls24h); err != nil {
 		return result, err
 	}
 	return result, nil

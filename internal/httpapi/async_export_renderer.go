@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"collector/internal/analytics"
@@ -44,7 +45,19 @@ func (s *Server) AsyncExportRenderer() exportworker.RenderFunc {
 			return exportworker.RenderResult{}, fmt.Errorf("load pinned timezone: %w", err)
 		}
 		if useCSVZip(job) {
-			return s.renderEventsCSVZip(ctx, job, location, output, progress)
+			switch job.Dataset {
+			case "events":
+				return s.renderEventsCSVZip(ctx, job, location, output, progress)
+			case "calls":
+				if job.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+					return s.renderSatelCallsCSVZip(ctx, job, location, output, progress)
+				}
+				return s.renderCallsCSVZip(ctx, job, location, output, progress)
+			case "antifraud":
+				return s.renderAntifraudCSVZip(ctx, job, location, output, progress)
+			default:
+				return exportworker.RenderResult{}, fmt.Errorf("unsupported dataset %q", job.Dataset)
+			}
 		}
 		renderContext := context.WithValue(ctx, asyncExportContextKey{}, asyncExportState{
 			job: job, progress: progress,
@@ -87,9 +100,6 @@ func (s *Server) AsyncExportRenderer() exportworker.RenderFunc {
 }
 
 func useCSVZip(job store.ExportJob) bool {
-	if job.Dataset != "events" {
-		return false
-	}
 	if job.Format == "csv_zip" {
 		return true
 	}
@@ -97,7 +107,15 @@ func useCSVZip(job store.ExportJob) bool {
 		return false
 	}
 	return (job.RangeFrom == nil && job.RangeTo == nil) ||
-		job.RowsEstimated == nil || *job.RowsEstimated > analytics.ExportEstimateLimit
+		(job.Dataset == "events" &&
+			(job.RowsEstimated == nil || *job.RowsEstimated > analytics.ExportEstimateLimit))
+}
+
+func exportJobTimeRange(job store.ExportJob) *analytics.TimeRange {
+	if job.RangeFrom == nil || job.RangeTo == nil {
+		return nil
+	}
+	return &analytics.TimeRange{From: *job.RangeFrom, To: *job.RangeTo}
 }
 
 func (s *Server) renderEventsCSVZip(
@@ -113,7 +131,7 @@ func (s *Server) renderEventsCSVZip(
 	}
 	writer := csv.NewWriter(entry)
 	if err = writer.Write([]string{
-		"Received", "Category", "Component", "Message", "Raw Syslog", "Status", "Attributes",
+		"Время", "Раздел", "Компонент", "Сообщение", "Статус", "Атрибуты",
 	}); err != nil {
 		return exportworker.RenderResult{}, err
 	}
@@ -127,23 +145,16 @@ func (s *Server) renderEventsCSVZip(
 	var total int64
 	for {
 		page, queryErr := s.Analytics.ListExportEventsPage(ctx, job.DeviceID,
-			uint64(job.ActiveRevision), job.Category, job.Search, exportPageSize, cursor)
+			uint64(job.ActiveRevision), job.Category, job.Search, exportPageSize, cursor,
+			exportJobTimeRange(job))
 		if queryErr != nil {
 			return exportworker.RenderResult{}, queryErr
 		}
-		stop := false
 		for _, row := range page.Items {
 			if exportRowAfterSnapshot(
 				row.ReceivedAt, row.EventID, job.RawHighWatermark, job.RawHighWatermarkID,
 			) {
 				continue
-			}
-			if job.RangeTo != nil && !row.ReceivedAt.Before(*job.RangeTo) {
-				continue
-			}
-			if job.RangeFrom != nil && row.ReceivedAt.Before(*job.RangeFrom) {
-				stop = true
-				break
 			}
 			eventTime := row.EventTime
 			if eventTime == nil {
@@ -153,10 +164,10 @@ func (s *Server) renderEventsCSVZip(
 			if marshalErr != nil {
 				return exportworker.RenderResult{}, marshalErr
 			}
-			if err = writer.Write([]string{
+			if err = writeCSVValues(writer,
 				formatTimeInLocation(eventTime, location), row.Category, row.Component,
-				row.Message, row.RawPayload, row.Status, string(attributes),
-			}); err != nil {
+				row.Message, row.Status, string(attributes),
+			); err != nil {
 				return exportworker.RenderResult{}, err
 			}
 			total++
@@ -168,7 +179,7 @@ func (s *Server) renderEventsCSVZip(
 		if err = progress(total); err != nil {
 			return exportworker.RenderResult{}, err
 		}
-		if stop || !page.HasMore || len(page.Items) == 0 {
+		if !page.HasMore || len(page.Items) == 0 {
 			break
 		}
 		last := page.Items[len(page.Items)-1]
@@ -181,6 +192,225 @@ func (s *Server) renderEventsCSVZip(
 		Rows: total, Format: "csv_zip", Filename: csvName + ".zip",
 		ContentType: "application/zip",
 	}, nil
+}
+
+func (s *Server) renderCallsCSVZip(
+	ctx context.Context, job store.ExportJob, location *time.Location, output io.Writer,
+	progress exportworker.ProgressFunc,
+) (exportworker.RenderResult, error) {
+	return renderCSVArchive(job, output, []string{
+		"Установка", "Входящий маршрут", "Исходящий маршрут", "Номер A вход",
+		"Номер A выход", "Номер B вход", "Номер B выход", "Длительность, мс",
+		"Q.850", "Результат", "Acct-Session-Id", "UniqueTag",
+	}, func(writer *csv.Writer) (int64, error) {
+		var cursor *analytics.CallCursor
+		if job.RawHighWatermark != nil {
+			cursor = &analytics.CallCursor{
+				SortTime: job.RawHighWatermark.Add(time.Microsecond), RecordID: maxUUID(),
+			}
+		}
+		var total int64
+		for {
+			page, err := s.Analytics.ListExportCallsPage(
+				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
+				exportPageSize, cursor, exportJobTimeRange(job),
+			)
+			if err != nil {
+				return total, err
+			}
+			for _, row := range page.Items {
+				if job.RawHighWatermark != nil && exportRowAfterSnapshot(
+					row.SortTime, row.RecordID, job.RawHighWatermark, job.RawHighWatermarkID,
+				) {
+					continue
+				}
+				if err = writeCSVValues(writer,
+					formatTimeInLocation(row.SetupTime, location),
+					row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
+					row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS,
+					row.ReleaseCause, row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag,
+				); err != nil {
+					return total, err
+				}
+				total++
+			}
+			if err = progress(total); err != nil {
+				return total, err
+			}
+			if !page.HasMore || len(page.Items) == 0 {
+				return total, nil
+			}
+			last := page.Items[len(page.Items)-1]
+			cursor = &analytics.CallCursor{SortTime: last.SortTime, RecordID: last.RecordID}
+		}
+	}, progress)
+}
+
+func (s *Server) renderSatelCallsCSVZip(
+	ctx context.Context, job store.ExportJob, location *time.Location, output io.Writer,
+	progress exportworker.ProgressFunc,
+) (exportworker.RenderResult, error) {
+	return renderCSVArchive(job, output, []string{
+		"Установка", "Соединение", "Завершение", "Результат", "ANI вход", "DNIS вход",
+		"ANI выход", "DNIS выход", "Src маршрут", "Dst маршрут", "DP маршрут",
+		"Длительность, мс", "Протокол вход", "Протокол выход", "Разъединение", "Код", "Узел",
+	}, func(writer *csv.Writer) (int64, error) {
+		var cursor *analytics.CallCursor
+		if job.RawHighWatermark != nil {
+			cursor = &analytics.CallCursor{
+				SortTime: job.RawHighWatermark.Add(time.Microsecond), RecordID: maxUUID(),
+			}
+		}
+		var total int64
+		for {
+			page, err := s.Analytics.ListExportSatelRTUCallsPage(
+				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
+				exportPageSize, cursor, exportJobTimeRange(job),
+			)
+			if err != nil {
+				return total, err
+			}
+			for _, row := range page.Items {
+				if job.RawHighWatermark != nil && exportRowAfterSnapshot(
+					row.SortTime, row.RecordID, job.RawHighWatermark, job.RawHighWatermarkID,
+				) {
+					continue
+				}
+				if err = writeCSVValues(writer,
+					formatTimeInLocation(row.SetupTime, location),
+					formatTimeInLocation(row.ConnectTime, location),
+					formatTimeInLocation(row.DisconnectTime, location), row.Outcome,
+					row.InANI, row.InDNIS, row.OutANI, row.OutDNIS, row.SrcName,
+					row.DstName, row.DPName, row.DurationMS, row.InLegProto,
+					row.OutLegProto, row.DisconnectText, row.DisconnectCode, row.SignalNodeName,
+				); err != nil {
+					return total, err
+				}
+				total++
+			}
+			if err = progress(total); err != nil {
+				return total, err
+			}
+			if !page.HasMore || len(page.Items) == 0 {
+				return total, nil
+			}
+			last := page.Items[len(page.Items)-1]
+			cursor = &analytics.CallCursor{SortTime: last.SortTime, RecordID: last.RecordID}
+		}
+	}, progress)
+}
+
+func (s *Server) renderAntifraudCSVZip(
+	ctx context.Context, job store.ExportJob, location *time.Location, output io.Writer,
+	progress exportworker.ProgressFunc,
+) (exportworker.RenderResult, error) {
+	return renderCSVArchive(job, output, []string{
+		"Последнее событие", "Операция", "Решение", "Номер A", "Номер B",
+		"Входящий маршрут", "Исходящий маршрут", "RADIUS server", "Latency, мс",
+		"Accounting", "Корреляция", "CDR legs", "Полнота", "Acct-Session-Id", "Call context",
+	}, func(writer *csv.Writer) (int64, error) {
+		var cursor *analytics.AntifraudCursor
+		if job.RawHighWatermark != nil {
+			cursor = &analytics.AntifraudCursor{
+				LastEventAt: job.RawHighWatermark.Add(time.Microsecond), TransactionID: maxUUID(),
+			}
+		}
+		var total int64
+		for {
+			page, err := s.Analytics.ListExportAntifraudPage(
+				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
+				exportPageSize, cursor, exportJobTimeRange(job),
+			)
+			if err != nil {
+				return total, err
+			}
+			for _, row := range page.Items {
+				if job.RawHighWatermark != nil && exportRowAfterSnapshot(
+					row.LastEventAt, row.TransactionID,
+					job.RawHighWatermark, job.RawHighWatermarkID,
+				) {
+					continue
+				}
+				if err = writeCSVValues(writer,
+					formatTimeInLocation(&row.LastEventAt, location), row.RequestType,
+					row.Decision, firstNonEmpty(row.SrcNumberIn, row.CallingStationID),
+					firstNonEmpty(row.DstNumberIn, row.CalledStationID),
+					row.InTrunkgroupLabel, row.OutTrunkgroupLabel, row.ServerAddress,
+					row.LatencyMS, row.AccountingStatus, row.CorrelationState,
+					row.LegCount, row.Completeness, row.AcctSessionID, row.CallContext,
+				); err != nil {
+					return total, err
+				}
+				total++
+			}
+			if err = progress(total); err != nil {
+				return total, err
+			}
+			if !page.HasMore || len(page.Items) == 0 {
+				return total, nil
+			}
+			last := page.Items[len(page.Items)-1]
+			cursor = &analytics.AntifraudCursor{
+				LastEventAt: last.LastEventAt, TransactionID: last.TransactionID,
+			}
+		}
+	}, progress)
+}
+
+func renderCSVArchive(
+	job store.ExportJob, output io.Writer, headers []string,
+	writeRows func(*csv.Writer) (int64, error), _ exportworker.ProgressFunc,
+) (exportworker.RenderResult, error) {
+	archiveWriter := zip.NewWriter(output)
+	base := exportFilename(job.DeviceID, job.Dataset, job.Category, job.CreatedAt)
+	csvName := base[:len(base)-len(".xlsx")] + ".csv"
+	entry, err := archiveWriter.Create(csvName)
+	if err != nil {
+		return exportworker.RenderResult{}, err
+	}
+	writer := csv.NewWriter(entry)
+	if err = writer.Write(headers); err != nil {
+		return exportworker.RenderResult{}, err
+	}
+	rows, err := writeRows(writer)
+	writer.Flush()
+	if err == nil {
+		err = writer.Error()
+	}
+	if err == nil {
+		err = archiveWriter.Close()
+	}
+	if err != nil {
+		return exportworker.RenderResult{}, err
+	}
+	return exportworker.RenderResult{
+		Rows: rows, Format: "csv_zip", Filename: csvName + ".zip",
+		ContentType: "application/zip",
+	}, nil
+}
+
+func writeCSVValues(writer *csv.Writer, values ...any) error {
+	record := make([]string, len(values))
+	for index, value := range values {
+		record[index] = csvSafe(fmt.Sprint(exportScalar(value)))
+	}
+	return writer.Write(record)
+}
+
+func csvSafe(value string) string {
+	if value != "" && strings.ContainsRune("=+-@", rune(value[0])) {
+		return "'" + value
+	}
+	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func maxUUID() uuid.UUID {

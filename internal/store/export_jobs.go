@@ -19,6 +19,8 @@ var (
 const (
 	MaxQueuedExportsPerUser   = 3
 	MaxActiveExportsPerDevice = 5
+	QueuedExportTimeout       = 10 * time.Minute
+	ExportHeartbeatTimeout    = 2 * time.Minute
 )
 
 type ExportJob struct {
@@ -116,6 +118,15 @@ func (s *Store) CreateExportJob(
 		"export:"+input.DeviceID.String()); err != nil {
 		return ExportJob{}, err
 	}
+	if _, err = tx.Exec(ctx, `UPDATE export_jobs SET status='failed',
+		error='export worker timed out; retry the export',finished_at=now(),
+		expires_at=now()+interval '7 days',lease_expires_at=NULL,updated_at=now()
+		WHERE (status='queued' AND created_at<now()-make_interval(secs=>$1))
+			OR (status='running' AND COALESCE(heartbeat_at,started_at,created_at)
+				<now()-make_interval(secs=>$2))`,
+		int64(QueuedExportTimeout/time.Second), int64(ExportHeartbeatTimeout/time.Second)); err != nil {
+		return ExportJob{}, err
+	}
 	var userActive, deviceActive int
 	if err = tx.QueryRow(ctx, `SELECT
 		count(*) FILTER (WHERE requested_by=$1),
@@ -159,6 +170,22 @@ func (s *Store) CreateExportJob(
 func (s *Store) ExportJob(ctx context.Context, deviceID, jobID uuid.UUID) (ExportJob, error) {
 	return scanExportJob(s.DB.QueryRow(ctx, `SELECT `+exportJobColumns+
 		` FROM export_jobs WHERE id=$1 AND device_id=$2`, jobID, deviceID))
+}
+
+func (s *Store) FailStaleExportJob(
+	ctx context.Context, deviceID, jobID uuid.UUID, queuedAge, heartbeatAge time.Duration,
+) (bool, error) {
+	queuedSeconds := max(int64(queuedAge/time.Second), 1)
+	heartbeatSeconds := max(int64(heartbeatAge/time.Second), 1)
+	tag, err := s.DB.Exec(ctx, `UPDATE export_jobs SET status='failed',
+		error='export worker timed out; retry the export',finished_at=now(),
+		expires_at=now()+interval '7 days',lease_expires_at=NULL,updated_at=now()
+		WHERE id=$1 AND device_id=$2 AND (
+			(status='queued' AND created_at<now()-make_interval(secs=>$3))
+			OR (status='running' AND COALESCE(heartbeat_at,started_at,created_at)
+				<now()-make_interval(secs=>$4))
+		)`, jobID, deviceID, queuedSeconds, heartbeatSeconds)
+	return tag.RowsAffected() != 0, err
 }
 
 func (s *Store) ListExportJobs(

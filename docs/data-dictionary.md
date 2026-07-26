@@ -5,6 +5,19 @@ Collector поддерживает две схемы обработки прош
 АнтиФрод пока разбираются общим парсером для обеих схем; отличается встроенный профиль
 колонок CDR.
 
+## Источники и ingest ledger
+
+`devices.source_category` принимает `equipment` или `softswitch`.
+`devices.template_key` является authoritative parser/archive contract; доступные
+шаблоны публикует `GET /api/equipment-templates`. Для оборудования используются
+`eltex-smg-1016m-3.410` и `eltex-smg-1016m-3.23.2`; временный
+`softswitch-cdr-raw-v1` архивирует файл без интерпретации.
+
+`ingest_files` хранит device-scoped SHA-256, исходное имя, размер, MinIO object key,
+времена и состояние. `archived` означает, что raw-only объект надёжно записан в MinIO
+и не передавался в аналитический pipeline. Список и скачивание всегда проверяют
+одновременно `device_id` и `file_id`.
+
 ## Время
 
 `received_at` — UTC instant приёма datagram Collector. Raw wall clock из Eltex/RFC3164

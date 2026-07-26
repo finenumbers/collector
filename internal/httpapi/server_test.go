@@ -68,6 +68,47 @@ func TestDashboardWindowValidation(t *testing.T) {
 	}
 }
 
+func TestEquipmentTemplatesAPIUsesStableLabels(t *testing.T) {
+	response := httptest.NewRecorder()
+	(&Server{}).listEquipmentTemplates(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	for _, value := range []string{
+		`"key":"eltex-smg-1016m-3.410"`,
+		`"displayName":"Eltex SMG-1016M (3.410)"`,
+		`"key":"eltex-smg-1016m-3.23.2"`,
+		`"displayName":"Eltex SMG-1016M (3.23.2)"`,
+		`"key":"softswitch-cdr-raw-v1"`,
+	} {
+		if !strings.Contains(body, value) {
+			t.Fatalf("template response missing %s: %s", value, body)
+		}
+	}
+}
+
+func TestDeviceListRejectsInvalidCategoryBeforeDatabase(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/devices?category=invalid", nil)
+	(&Server{}).listDevices(response, request)
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(response.Body.String(), "equipment or softswitch") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSanitizeDownloadName(t *testing.T) {
+	tests := map[string]string{
+		`../../secret.csv`: "secret.csv",
+		`..\..\secret.csv`: "secret.csv",
+		"bad\r\nname.csv":  "badname.csv",
+		"":                 "cdr-file",
+	}
+	for input, want := range tests {
+		if got := sanitizeDownloadName(input); got != want {
+			t.Fatalf("sanitizeDownloadName(%q)=%q want %q", input, got, want)
+		}
+	}
+}
+
 func TestDashboardAPIRejectsInvalidWindowBeforeQueries(t *testing.T) {
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/dashboard?window=2h", nil)

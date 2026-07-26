@@ -61,15 +61,24 @@ Collector подключён к external network `${PROXY_NETWORK:-proxy}` по�
 
 ## Onboarding
 
-После создания устройства система атомарно создаёт:
+После создания источника система атомарно создаёт:
 
-- UUID и source-IP allowlist;
-- parser profile для firmware/timezone;
-- SFTPGo principal и отдельный `/srv/cdr/<device_id>`;
-- одноразовый FTP password;
-- отображаемые параметры настройки SMG.
+- UUID, category и version-controlled template;
+- SFTPGo principal, отдельный `/srv/cdr/<device_id>` и одноразовый FTP password;
+- source-IP allowlist и parser profile только для шаблонов с Syslog/typed CDR;
+- отображаемые параметры приёма согласно capabilities шаблона.
 
 При ошибке SFTPGo database device компенсирующе удаляется.
+
+Для raw-only софтсвитча укажите имя, IANA timezone и шаблон
+`softswitch-cdr-raw-v1`. Collector выдаёт отдельный login с префиксом `ssw_`; Syslog
+IP и AntiFraud для него не настраиваются. Загрузите репрезентативный CDR в корень
+выданного FTP home. После стабильной записи watcher покажет файл со статусом
+`archived` на странице «CDR-файлы» и в `GET /api/devices/{id}/ingest-files`.
+Кнопка «Скачать» использует потоковый
+`GET /api/devices/{id}/ingest-files/{fileID}/download`: сохраните исходник и передайте
+его для последующего проектирования typed parser. MinIO/ledger failure оставляет
+локальный файл для автоматического retry.
 
 ## Backup
 

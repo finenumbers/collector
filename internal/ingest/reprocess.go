@@ -163,7 +163,8 @@ func ensureDeviceRevisionJobs(
 		return err
 	}
 	for _, device := range devices {
-		if !device.Enabled {
+		if !device.Enabled ||
+			(!device.Capabilities.Syslog && !device.Capabilities.TypedCDR) {
 			continue
 		}
 		activeRevision, err := client.ActiveDeviceRevision(ctx, device.ID)

@@ -9,6 +9,10 @@ import {
   canManageUsers, normalizeFirmwareScheme, purgeConfirmationReady, purgeRetryLabel,
 } from './settings'
 import { antifraudOutcome, cdrOutcome, outcomeLabel } from './outcomes'
+import {
+  EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
+  sourceCategory, SourceCapabilities, SourceCategory, templatesFor,
+} from './equipment'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
 type ManagedUser = User & {
@@ -44,6 +48,10 @@ type DashboardDevice = {
   }
   freshness: { latestSyslogAt?: string; latestCdrAt?: string }
   revision: { aligned: boolean; status: string }
+  sourceCategory?: SourceCategory
+  templateKey?: string
+  capabilities?: SourceCapabilities
+  fileMetrics?: { files: number; bytes: number; latestAt?: string }
 }
 type DashboardSnapshot = {
   window: string
@@ -78,7 +86,7 @@ type Device = {
   timezoneRevision: number
   activeTimezoneRevision: number
   cdrSourceTimezone: string
-  syslogSourceIp: string
+  syslogSourceIp?: string
   managementIp?: string
   deviceSign: string
   antifraudEnabled: boolean
@@ -89,6 +97,9 @@ type Device = {
   enabled: boolean
   purgeState?: 'active' | 'deleting' | 'purge_failed'
   purgeError?: string
+  sourceCategory?: SourceCategory
+  templateKey?: string
+  capabilities?: SourceCapabilities
 }
 type EventRow = {
   eventId: string
@@ -175,6 +186,9 @@ type SyslogDiagnostics = {
 type CdrIngestFile = {
   id: string
   originalName: string
+  sha256?: string
+  sizeBytes?: number
+  objectKey?: string
   status: string
   rowsTotal: number
   rowsValid: number
@@ -249,7 +263,8 @@ type PageResponse<T> = {
 type DataRow = EventRow | CallRow | AntifraudRow
 type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
   'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
-  'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown'
+  'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown' |
+  'ingest_files'
 
 let csrfToken = ''
 const PAGE_SIZE = 100
@@ -381,10 +396,12 @@ function AuthScreen(props: {
 
 function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [devices, setDevices] = useState<Device[]>([])
+  const [templates, setTemplates] = useState<EquipmentTemplate[]>(fallbackTemplates)
   const [activeDevice, setActiveDevice] = useState<string>('')
+  const [activeCategory, setActiveCategory] = useState<SourceCategory>('equipment')
   const [activeView, setActiveView] = useState<'dashboard' | 'device' | 'settings'>('dashboard')
   const [dataset, setDataset] = useState<Dataset>('calls')
-  const [showCreate, setShowCreate] = useState(false)
+  const [showCreate, setShowCreate] = useState<SourceCategory | null>(null)
   const [editingDevice, setEditingDevice] = useState<Device | null>(null)
   const [credentials, setCredentials] = useState<Device | null>(null)
   const [error, setError] = useState('')
@@ -395,6 +412,9 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   }).catch((reason) => setError(reason.message)), [])
   useEffect(() => {
     void loadDevices()
+    api<{ items: EquipmentTemplate[] }>('/equipment-templates')
+      .then(({ items }) => setTemplates((items || []).map(normalizeTemplate)))
+      .catch(() => setTemplates(fallbackTemplates))
   }, [loadDevices])
   const hasTimezoneRebuild = devices.some((device) =>
     device.timezoneRevision !== device.activeTimezoneRevision)
@@ -404,6 +424,34 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     return () => window.clearInterval(timer)
   }, [hasTimezoneRebuild, loadDevices])
   const selected = devices.find((device) => device.id === activeDevice)
+  const equipment = devices.filter((device) => sourceCategory(device) === 'equipment')
+  const softswitches = devices.filter((device) => sourceCategory(device) === 'softswitch')
+  const selectSource = (device: Device) => {
+    const category = sourceCategory(device)
+    setActiveDevice(device.id)
+    setActiveCategory(category)
+    setDataset(category === 'softswitch' ? 'ingest_files' : 'calls')
+    setActiveView('device')
+  }
+  const sourceList = (items: Device[], category: SourceCategory) => <div className="device-list">
+    {items.map((device) => <button key={device.id}
+      className={`device-button ${device.id === activeDevice ? 'active' : ''}`}
+      onClick={() => selectSource(device)}>
+      <span className={`status-dot ${device.enabled && device.purgeState !== 'purge_failed' ? 'online' : ''}`} />
+      <span>
+        <strong>{device.name}</strong>
+        <small>{device.purgeState === 'purge_failed' ? 'Ошибка удаления' :
+          device.purgeState === 'deleting' ? 'Удаление…' :
+            category === 'softswitch' ? device.ftpUsername : device.syslogSourceIp}</small>
+      </span>
+    </button>)}
+    {user.role === 'admin' && <button className="add-device" onClick={() => {
+      setActiveCategory(category)
+      setShowCreate(category)
+    }}>
+      <CirclePlus size={15} /> {category === 'equipment' ? 'Добавить оборудование' : 'Добавить софтсвитч'}
+    </button>}
+  </div>
 
   return <div className="workspace">
     <aside className="sidebar">
@@ -415,29 +463,11 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         <LayoutDashboard size={14} /> Dashboard
       </button>
       <div className="side-section-label">ОБОРУДОВАНИЕ</div>
-      <div className="device-list">
-        {devices.map((device) => <button key={device.id}
-          className={`device-button ${device.id === activeDevice ? 'active' : ''}`}
-          onClick={() => {
-            setActiveDevice(device.id)
-            setDataset('calls')
-            setActiveView('device')
-          }}>
-          <span className={`status-dot ${device.enabled && device.purgeState !== 'purge_failed' ? 'online' : ''}`} />
-          <span>
-            <strong>{device.name}</strong>
-            <small>
-              {device.purgeState === 'purge_failed' ? 'Ошибка удаления' :
-                device.purgeState === 'deleting' ? 'Удаление…' : device.syslogSourceIp}
-            </small>
-          </span>
-        </button>)}
-        {user.role === 'admin' && <button className="add-device" onClick={() => setShowCreate(true)}>
-          <CirclePlus size={15} /> Добавить SMG
-        </button>}
-      </div>
+      {sourceList(equipment, 'equipment')}
+      <div className="side-section-label">СОФТСВИТЧИ</div>
+      {sourceList(softswitches, 'softswitch')}
       {selected && activeView === 'device' &&
-        <DeviceNavigation active={dataset} onChange={setDataset} />}
+        <DeviceNavigation device={selected} active={dataset} onChange={setDataset} />}
       <div className="sidebar-footer">
         <button className={activeView === 'settings' ? 'active' : ''}
           onClick={() => setActiveView('settings')}><Settings size={15} /> Настройки</button>
@@ -454,7 +484,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           {activeView === 'dashboard' && <span>Состояние Collector и оборудования</span>}
           {activeView === 'settings' && <span>Пользователи, сервисы и хранение данных</span>}
           {activeView === 'device' && selected &&
-            <span>{selected.model} · {selected.firmware} · {selected.timezone}</span>}
+            <span>{selected.model || (sourceCategory(selected) === 'softswitch' ? 'Софтсвитч' : 'Оборудование')}
+              {selected.firmware ? ` · ${selected.firmware}` : ''} · {selected.timezone}</span>}
         </div>
         {activeView === 'device' && selected && <div className="header-health">
           <span><i className={`status-dot ${selected.enabled && selected.purgeState !== 'purge_failed' ? 'online' : ''}`} />
@@ -462,35 +493,43 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
               selected.purgeState === 'deleting' ? 'Идёт удаление' :
                 selected.enabled ? 'Приём активен' : 'Приём выключен'}
           </span>
-          <span>{selected.antifraudEnabled ? `АнтиФрод: ${selected.antifraudMode}` : 'Без АнтиФрод'}</span>
+          {sourceCapabilities(selected).antifraud &&
+            <span>{selected.antifraudEnabled ? `АнтиФрод: ${selected.antifraudMode}` : 'Без АнтиФрод'}</span>}
           {user.role === 'admin' && selected.purgeState === 'purge_failed' &&
             <button className="danger" onClick={() => setEditingDevice(selected)}>
               Повторить удаление
             </button>}
           {user.role === 'admin' && <button className="secondary"
-            onClick={() => setEditingDevice(selected)}>Настройки SMG</button>}
+            onClick={() => setEditingDevice(selected)}>Настройки</button>}
         </div>}
       </header>
       {error && <div className="global-error">{error}</div>}
       {activeView === 'dashboard' && <DashboardPage devices={devices}
         onSelectDevice={(deviceID) => {
-          setActiveDevice(deviceID)
-          setDataset('calls')
-          setActiveView('device')
+          const device = devices.find((item) => item.id === deviceID)
+          if (device) selectSource(device)
         }} />}
       {activeView === 'settings' && <SystemSettingsPage user={user} />}
       {activeView === 'device' && (!selected
-        ? <EmptyDevices canCreate={user.role === 'admin'} onCreate={() => setShowCreate(true)} />
-        : <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
-          admin={user.role === 'admin'} />)}
+        ? <EmptyDevices category={activeCategory} canCreate={user.role === 'admin'}
+          onCreate={() => setShowCreate(activeCategory)} />
+        : dataset === 'ingest_files'
+          ? <CdrFilesPage key={selected.id} device={selected} />
+          : <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
+            admin={user.role === 'admin'} />)}
     </main>
-    {showCreate && <CreateDeviceDialog onClose={() => setShowCreate(false)} onCreated={(device) => {
-      setShowCreate(false)
+    {showCreate && <CreateDeviceDialog category={showCreate} templates={templates}
+      onClose={() => setShowCreate(null)} onCreated={(device) => {
+      setShowCreate(null)
       setCredentials(device)
       loadDevices()
       setActiveDevice(device.id)
+      const category = sourceCategory(device)
+      setActiveCategory(category)
+      setDataset(category === 'softswitch' ? 'ingest_files' : 'calls')
+      setActiveView('device')
     }} />}
-    {editingDevice && <EditDeviceDialog device={editingDevice}
+    {editingDevice && <EditDeviceDialog device={editingDevice} templates={templates}
       initialDeleting={editingDevice.purgeState === 'purge_failed'}
       onClose={() => setEditingDevice(null)} onSaved={(device) => {
         setDevices((current) => current.map((item) => item.id === device.id ? device : item))
@@ -526,6 +565,7 @@ const navigation: { id: Dataset; label: string; icon: typeof Activity }[] = [
   { id: 'system_journal', label: 'Системный журнал', icon: FileClock },
   { id: 'unknown', label: 'Нераспознанное', icon: AlertTriangle },
 ]
+const rawCdrNavigation = { id: 'ingest_files' as Dataset, label: 'CDR-файлы', icon: FileClock }
 
 function DashboardPage({ devices, onSelectDevice }: {
   devices: Device[]
@@ -546,7 +586,7 @@ function DashboardPage({ devices, onSelectDevice }: {
   const totals = snapshot?.totals
   return <section className="dashboard-page">
     <div className="page-heading">
-      <div><h3>Обзор системы</h3><p>Ключевые показатели Collector и всех подключённых SMG.</p></div>
+      <div><h3>Обзор системы</h3><p>Ключевые показатели Collector и всех источников данных.</p></div>
       <select value={windowValue} onChange={(event) => setWindowValue(event.target.value)}
         aria-label="Интервал Dashboard">
         <option value="1h">Последний час</option>
@@ -589,25 +629,30 @@ function DashboardPage({ devices, onSelectDevice }: {
     </section>
     <section className="dashboard-panel fleet-panel">
       <div className="panel-heading"><div><h4>Оборудование</h4><span>Метрики за выбранный интервал</span></div></div>
-      <table><thead><tr><th>SMG</th><th>Firmware / timezone</th><th>Статус</th><th>Вызовы</th><th>Неуспешные</th>
-        <th>AntiFraud / reject</th><th>Аварии</th><th>Unknown</th><th>Последний Syslog</th>
+      <table><thead><tr><th>Источник</th><th>Шаблон / timezone</th><th>Статус</th><th>Вызовы / файлы</th><th>Неуспешные</th>
+        <th>AntiFraud / reject</th><th>Аварии</th><th>Unknown</th><th>Последние данные</th>
         <th>Revision</th></tr></thead>
         <tbody>{(snapshot?.devices || []).map((row) => <tr key={row.id}
           onClick={() => onSelectDevice(row.id)}>
           <td><strong>{row.name}</strong><small>{row.model}</small></td>
-          <td>{row.firmware || '—'} / {row.timezone || 'UTC'}</td>
+          <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}</td>
           <td><span className={row.enabled ? 'healthy' : 'service-error'}>
             {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
-          <td className="right">{formatCount(row.metrics.calls)}</td>
-          <td className="right">{formatCount(row.metrics.failedCalls)}</td>
-          <td className="right">{formatCount(row.metrics.antifraud)} / {formatCount(row.metrics.antifraudRejected)}</td>
-          <td className="right">{formatCount(row.metrics.alarms)}</td>
-          <td className="right">{formatCount(row.metrics.unknown)}</td>
-          <td className="mono">{formatTime(row.freshness.latestSyslogAt, 'UTC')}</td>
-          <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
+          <td className="right">{sourceCapabilities(row).typedCdr
+            ? formatCount(row.metrics.calls)
+            : `${formatCount(row.fileMetrics?.files)} / ${formatBytes(row.fileMetrics?.bytes)}`}</td>
+          <td className="right">{sourceCapabilities(row).typedCdr
+            ? formatCount(row.metrics.failedCalls) : '—'}</td>
+          <td className="right">{sourceCapabilities(row).antifraud
+            ? `${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}` : '—'}</td>
+          <td className="right">{sourceCapabilities(row).syslog ? formatCount(row.metrics.alarms) : '—'}</td>
+          <td className="right">{sourceCapabilities(row).syslog ? formatCount(row.metrics.unknown) : '—'}</td>
+          <td className="mono">{formatTime(sourceCapabilities(row).syslog
+            ? row.freshness.latestSyslogAt : row.fileMetrics?.latestAt || row.freshness.latestCdrAt, 'UTC')}</td>
+          <td>{sourceCapabilities(row).syslog ? (row.revision.aligned ? 'aligned' : 'rebuild') : '—'}</td>
         </tr>)}</tbody></table>
       {snapshot && snapshot.devices.length === 0 &&
-        <div className="table-empty"><strong>SMG ещё не добавлены</strong></div>}
+        <div className="table-empty"><strong>Источники данных ещё не добавлены</strong></div>}
     </section>
   </section>
 }
@@ -628,11 +673,79 @@ function formatPercent(total?: number, failed?: number) {
   return `${Math.max(0, ((total - (failed || 0)) / total) * 100).toFixed(1)}%`
 }
 
-function DeviceNavigation({ active, onChange }: { active: Dataset; onChange: (value: Dataset) => void }) {
+function DeviceNavigation({ device, active, onChange }: {
+  device: Device
+  active: Dataset
+  onChange: (value: Dataset) => void
+}) {
+  const capabilities = sourceCapabilities(device)
+  const items = sourceCategory(device) === 'softswitch'
+    ? [rawCdrNavigation]
+    : navigation.filter((item) =>
+      (item.id !== 'calls' || capabilities.typedCdr) &&
+      (item.id !== 'antifraud' || capabilities.antifraud) &&
+      (item.id !== 'radius' || capabilities.radius) &&
+      (item.id === 'calls' || item.id === 'antifraud' || item.id === 'radius' || capabilities.syslog))
   return <nav className="device-nav">
-    {navigation.map((item) => <button key={item.id} className={active === item.id ? 'active' : ''}
+    {items.map((item) => <button key={item.id} className={active === item.id ? 'active' : ''}
       onClick={() => onChange(item.id)}><item.icon size={14} />{item.label}</button>)}
   </nav>
+}
+
+function CdrFilesPage({ device }: { device: Device }) {
+  const [files, setFiles] = useState<CdrIngestFile[]>([])
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const load = useCallback(() => {
+    return api<{ items: CdrIngestFile[] }>(`/devices/${device.id}/ingest-files`)
+      .then(({ items }) => {
+        setFiles(items || [])
+        setError('')
+      })
+      .catch((reason) => setError(
+        reason instanceof Error ? reason.message : 'Не удалось загрузить список CDR',
+      ))
+      .finally(() => setLoading(false))
+  }, [device.id])
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(load, 10000)
+    return () => window.clearInterval(timer)
+  }, [load])
+  return <section className="data-view">
+    <div className="toolbar">
+      <div><h3>CDR-файлы</h3><span>Неизменённые оригиналы, принятые через FTP</span></div>
+      <div className="toolbar-actions">
+        <button className="secondary" disabled={loading} onClick={() => {
+          setLoading(true)
+          void load()
+        }}>Обновить</button>
+      </div>
+    </div>
+    {error && <div className="form-error">{error}</div>}
+    <div className="table-shell">
+      {loading && <div className="table-loading" />}
+      <table className="ingest-files-table">
+        <thead><tr><th>Файл</th><th>Статус</th><th>Размер</th><th>SHA-256</th>
+          <th>Получен</th><th>Ошибка</th><th /></tr></thead>
+        <tbody>{files.map((file) => <tr key={file.id}>
+          <td title={file.originalName}>{file.originalName}</td>
+          <td><span className={`parse-status ${file.status}`}>
+            {file.status === 'archived' ? 'Архивирован' : file.status}</span></td>
+          <td>{formatBytes(file.sizeBytes)}</td>
+          <td className="mono">{file.sha256 || '—'}</td>
+          <td className="mono">{formatTime(file.receivedAt, activeDeviceTimezone(device))}</td>
+          <td title={file.error}>{file.error || '—'}</td>
+          <td><a className="secondary download-link"
+            href={`/api/devices/${device.id}/ingest-files/${file.id}/download`}>Скачать</a></td>
+        </tr>)}</tbody>
+      </table>
+      {!loading && files.length === 0 && <div className="table-empty">
+        <strong>CDR-файлы ещё не получены</strong>
+        <p>Загрузите исходный файл в корень выданного FTP-каталога.</p>
+      </div>}
+    </div>
+  </section>
 }
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
@@ -730,7 +843,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
   return <section className="data-view">
     {diagnostics?.activeRevision === 0 && <div className="timezone-rebuild">
-      Инициализация SMG: создаётся первый согласованный read model для Syslog, CDR,
+      Инициализация оборудования: создаётся первый согласованный read model для Syslog, CDR,
       RADIUS и AntiFraud. Приём данных продолжается, таблицы появятся после атомарной активации.
     </div>}
     {device.timezoneRevision !== device.activeTimezoneRevision && <div className="timezone-rebuild">
@@ -784,7 +897,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
 function CdrIngestBanner({ files }: { files: CdrIngestFile[] }) {
   if (files.length === 0) {
     return <div className="timezone-rebuild">
-      CDR ingest: файлов в ledger ещё нет. Если SMG уже отправляет CDR по FTP —
+      CDR ingest: файлов в ledger ещё нет. Если оборудование уже отправляет CDR по FTP —
       проверьте, что файлы лежат в корне FTP home (не в подкаталоге).
     </div>
   }
@@ -873,7 +986,7 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
 function RadiusEmptyState() {
   return <div className="table-empty">
     <strong>RADIUS-сообщения не получены</strong>
-    <p>Проверьте наличие тестового вызова, включение «АнтиФрод» в активном RADIUS-профиле SMG,
+    <p>Проверьте наличие тестового вызова, включение «АнтиФрод» в активном RADIUS-профиле оборудования,
       группы Access/Accounting серверов и уровень трассировки Syslog. Режим Custom сам по себе
       задаёт формат RADIUS, но не создаёт события без вызовов.</p>
   </div>
@@ -948,7 +1061,7 @@ function AntifraudDrawer({ device, row, onClose }: {
       <span><small>Latency / retries</small><strong>{row.latencyMs == null ? '—' : `${row.latencyMs} мс`} / {row.retries}</strong></span>
       <span><small>Accounting</small><strong>{row.accountingStatus || '—'}</strong></span>
       <span><small>CDR legs</small><strong>{row.legCount}</strong></span>
-      <span><small>SMG timezone</small><strong>{row.sourceTimezone || activeDeviceTimezone(device)}</strong></span>
+      <span><small>Timezone источника</small><strong>{row.sourceTimezone || activeDeviceTimezone(device)}</strong></span>
       <span><small>AntiFraud local / UTC</small><strong>{row.firstEventLocal || formatTime(row.firstEventAt, activeDeviceTimezone(device))}
         {' / '}{row.firstEventAt}</strong></span>
       <span><small>CDR setup local / UTC</small><strong>{row.cdrSetupLocal || formatTime(row.cdrSetupTime, activeDeviceTimezone(device))}
@@ -1043,7 +1156,7 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
       <div className="timeline">{group.items.map((event) => <div
         className="timeline-item" key={event.eventId}>
         <i /><div><time>{formatTime(event.eventTime || event.receivedAt, timezone)}</time>
-          <strong>{event.component || 'SMG'}</strong>
+          <strong>{event.component || 'Оборудование'}</strong>
           <p>{event.message}</p><small>{event.method} · confidence {event.confidence.toFixed(2)}</small>
         </div>
       </div>)}</div>
@@ -1138,20 +1251,44 @@ function EventDrawer({ event, timezone, onClose }: {
   </div>
 }
 
-function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (device: Device) => void }) {
+function CreateDeviceDialog({ category, templates, onClose, onCreated }: {
+  category: SourceCategory
+  templates: EquipmentTemplate[]
+  onClose: () => void
+  onCreated: (device: Device) => void
+}) {
+  const available = templatesFor(templates, category)
+  const options = available.length ? available : templatesFor(fallbackTemplates, category)
+  const defaultTemplate = options[0]
+  const isSoftswitch = category === 'softswitch'
   const [form, setForm] = useState({
-    name: '', model: 'SMG-1016M', firmware: '3.23.2', timezone: 'Asia/Novosibirsk',
-    managementIp: '', syslogSourceIp: '', deviceSign: '', antifraudEnabled: true, antifraudMode: 'Custom',
+    name: '', templateKey: defaultTemplate.key, sourceCategory: category,
+    model: isSoftswitch ? '' : 'SMG-1016M',
+    firmware: defaultTemplate.key.endsWith('3.410') ? '3.410' : isSoftswitch ? '' : '3.23.2',
+    timezone: 'Asia/Novosibirsk', managementIp: '', syslogSourceIp: '', deviceSign: '',
+    antifraudEnabled: !isSoftswitch, antifraudMode: isSoftswitch ? 'OFF' : 'Custom',
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const update = (field: string, value: string | boolean) => setForm((current) => ({ ...current, [field]: value }))
+  const updateTemplate = (templateKey: string) => setForm((current) => ({
+    ...current,
+    templateKey,
+    firmware: templateKey.endsWith('3.410') ? '3.410' :
+      templateKey.endsWith('3.23.2') ? '3.23.2' : '',
+  }))
   async function submit(event: FormEvent) {
     event.preventDefault()
     setBusy(true)
     try {
+      const payload = isSoftswitch
+        ? {
+          name: form.name, templateKey: form.templateKey,
+          sourceCategory: form.sourceCategory, timezone: form.timezone,
+        }
+        : form
       const device = await api<Device>('/devices', {
-        method: 'POST', body: JSON.stringify(form),
+        method: 'POST', body: JSON.stringify(payload),
       })
       onCreated(device)
     } catch (reason) {
@@ -1160,26 +1297,31 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
       setBusy(false)
     }
   }
-  return <Modal title="Добавление SMG-1016M" onClose={onClose}>
+  return <Modal title={isSoftswitch ? 'Добавление софтсвитча' : 'Добавление оборудования'} onClose={onClose}>
     <form className="device-form" onSubmit={submit}>
       <div className="form-grid">
         <label>Название<input autoFocus required value={form.name} onChange={(e) => update('name', e.target.value)} /></label>
-        <label>Device Sign<input value={form.deviceSign} onChange={(e) => update('deviceSign', e.target.value)} /></label>
-        <label>IP управления<input placeholder="10.0.0.10" value={form.managementIp} onChange={(e) => update('managementIp', e.target.value)} /></label>
-        <label>IP-источник Syslog<input required placeholder="10.0.0.10" value={form.syslogSourceIp} onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
-        <label>Прошивка<select required value={form.firmware}
-          onChange={(e) => update('firmware', e.target.value)}>
-          <option value="3.23.2">3.23.2</option>
-          <option value="3.410">3.410</option>
-        </select></label>
+        <label>{isSoftswitch ? 'Шаблон приёма' : 'Оборудование'}
+          <select required value={form.templateKey}
+            onChange={(e) => updateTemplate(e.target.value)}>
+            {options.map((item) => <option key={item.key} value={item.key}>{item.displayName}</option>)}
+          </select></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
-        <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
-          onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
-        <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled} value={form.antifraudMode}
-          onChange={(e) => update('antifraudMode', e.target.value)}>
-          <option>Custom</option><option>Astarta</option><option>Intek</option><option>OFF</option>
-        </select></label>
+        {!isSoftswitch && <>
+          <label>Device Sign<input value={form.deviceSign}
+            onChange={(e) => update('deviceSign', e.target.value)} /></label>
+          <label>IP управления<input placeholder="10.0.0.10" value={form.managementIp}
+            onChange={(e) => update('managementIp', e.target.value)} /></label>
+          <label>IP-источник Syslog<input required placeholder="10.0.0.10"
+            value={form.syslogSourceIp} onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
+          <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
+            onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
+          <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled} value={form.antifraudMode}
+            onChange={(e) => update('antifraudMode', e.target.value)}>
+            <option>Custom</option><option>Astarta</option><option>Intek</option><option>OFF</option>
+          </select></label>
+        </>}
       </div>
       {error && <div className="form-error">{error}</div>}
       <div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>Отмена</button>
@@ -1188,16 +1330,26 @@ function CreateDeviceDialog({ onClose, onCreated }: { onClose: () => void; onCre
   </Modal>
 }
 
-function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting = false }: {
+function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, initialDeleting = false }: {
   device: Device
+  templates: EquipmentTemplate[]
   onClose: () => void
   onSaved: (device: Device) => void
   onDeleted: () => void
   initialDeleting?: boolean
 }) {
+  const isSoftswitch = sourceCategory(device) === 'softswitch'
+  const categoryTemplates = templatesFor(templates, sourceCategory(device))
+  const templateOptions = categoryTemplates.length
+    ? categoryTemplates : templatesFor(fallbackTemplates, sourceCategory(device))
   const [form, setForm] = useState({
-    name: device.name, firmware: normalizeFirmwareScheme(device.firmware), timezone: device.timezone,
-    managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp,
+    templateKey: device.templateKey || (normalizeFirmwareScheme(device.firmware) === '3.410'
+      ? 'eltex-smg-1016m-3.410' : isSoftswitch
+        ? 'softswitch-cdr-raw-v1' : 'eltex-smg-1016m-3.23.2'),
+    sourceCategory: sourceCategory(device),
+    name: device.name, firmware: isSoftswitch ? '' : normalizeFirmwareScheme(device.firmware),
+    timezone: device.timezone,
+    managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp || '',
     deviceSign: device.deviceSign, antifraudEnabled: device.antifraudEnabled,
     antifraudMode: device.antifraudMode, enabled: device.enabled,
   })
@@ -1208,6 +1360,11 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
   const [phaseIndex, setPhaseIndex] = useState(0)
   const update = (field: string, value: string | boolean) =>
     setForm((current) => ({ ...current, [field]: value }))
+  const updateTemplate = (templateKey: string) => setForm((current) => ({
+    ...current,
+    templateKey,
+    firmware: templateKey.endsWith('3.410') ? '3.410' : '3.23.2',
+  }))
   useEffect(() => {
     if (!busy || !deleting) return
     const timer = window.setInterval(() => {
@@ -1220,8 +1377,14 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
     setBusy(true)
     setError('')
     try {
+      const payload = isSoftswitch
+        ? {
+          name: form.name, templateKey: form.templateKey,
+          sourceCategory: form.sourceCategory, timezone: form.timezone, enabled: form.enabled,
+        }
+        : form
       onSaved(await api<Device>(`/devices/${device.id}`, {
-        method: 'PATCH', body: JSON.stringify(form),
+        method: 'PATCH', body: JSON.stringify(payload),
       }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Ошибка сохранения')
@@ -1250,9 +1413,10 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
     return <Modal title={`Полное удаление ${device.name}`} onClose={busy ? () => undefined : onClose}>
       <div className="danger-panel" data-testid="purge-dialog">
         <strong>Операция необратима.</strong>
-        <p>Будут синхронно удалены Syslog, CDR, RADIUS/АнтиФрод, связи,
-          архив MinIO, FTP-файлы, очереди, ревизии и аудит этого SMG.</p>
-        <label>Введите точное имя SMG для подтверждения
+        <p>{isSoftswitch
+          ? 'Будут удалены raw CDR, архив MinIO, FTP-файлы, журнал приёма и аудит источника.'
+          : 'Будут удалены Syslog, CDR, RADIUS/АнтиФрод, связи, архив MinIO, FTP-файлы, очереди, ревизии и аудит оборудования.'}</p>
+        <label>Введите точное имя источника для подтверждения
           <input autoFocus value={deleteName} onChange={(event) => setDeleteName(event.target.value)}
             disabled={busy} data-testid="purge-confirm-name" />
         </label>
@@ -1280,32 +1444,35 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
       <div className="form-grid">
         <label>Название<input autoFocus required value={form.name}
           onChange={(e) => update('name', e.target.value)} /></label>
-        <label>Device Sign<input value={form.deviceSign}
-          onChange={(e) => update('deviceSign', e.target.value)} /></label>
-        <label>IP управления<input value={form.managementIp}
-          onChange={(e) => update('managementIp', e.target.value)} /></label>
-        <label>IP-источник Syslog<input required value={form.syslogSourceIp}
-          onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
-        <label>Прошивка<select required value={normalizeFirmwareScheme(form.firmware)}
-          onChange={(e) => update('firmware', e.target.value)}>
-          <option value="3.23.2">3.23.2</option>
-          <option value="3.410">3.410</option>
-        </select></label>
+        <label>{isSoftswitch ? 'Шаблон приёма' : 'Оборудование'}
+          <select required value={form.templateKey} disabled={isSoftswitch}
+            onChange={(e) => updateTemplate(e.target.value)}>
+            {templateOptions.map((item) =>
+              <option key={item.key} value={item.key}>{item.displayName}</option>)}
+          </select></label>
         <label>Часовой пояс устройства<TimezoneSelect value={form.timezone}
           onChange={(value) => update('timezone', value)} /></label>
-        <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
-          onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
-        <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled}
-          value={form.antifraudMode} onChange={(e) => update('antifraudMode', e.target.value)}>
-          <option>Custom</option><option>Astarta</option><option>Intek</option><option>OFF</option>
-        </select></label>
+        {!isSoftswitch && <>
+          <label>Device Sign<input value={form.deviceSign}
+            onChange={(e) => update('deviceSign', e.target.value)} /></label>
+          <label>IP управления<input value={form.managementIp}
+            onChange={(e) => update('managementIp', e.target.value)} /></label>
+          <label>IP-источник Syslog<input required value={form.syslogSourceIp}
+            onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
+          <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
+            onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
+          <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled}
+            value={form.antifraudMode} onChange={(e) => update('antifraudMode', e.target.value)}>
+            <option>Custom</option><option>Astarta</option><option>Intek</option><option>OFF</option>
+          </select></label>
+        </>}
         <label className="checkbox-row"><input type="checkbox" checked={form.enabled}
           onChange={(e) => update('enabled', e.target.checked)} /> Приём данных включён</label>
       </div>
       {error && <div className="form-error">{error}</div>}
       <div className="dialog-actions">
         <button type="button" className="danger ghost" disabled={busy}
-          onClick={() => setDeleting(true)}>Удалить SMG…</button>
+          onClick={() => setDeleting(true)}>Удалить источник…</button>
         <button type="button" className="secondary"
         onClick={onClose}>Отмена</button>
         <button className="primary" disabled={busy}>{busy ? 'Сохранение…' : 'Сохранить'}</button></div>
@@ -1612,10 +1779,13 @@ function UserPasswordReset({ user, disabled, onReset, onClose }: {
 }
 
 function CredentialsDialog({ device, onClose }: { device: Device; onClose: () => void }) {
+  const capabilities = sourceCapabilities(device)
   return <Modal title="Параметры приёма данных" onClose={onClose}>
     <div className="credentials-warning">Пароль FTP отображается один раз. Сохраните его в защищённом хранилище.</div>
     <dl className="credentials">
-      <dt>Syslog сервер</dt><dd className="mono">{window.location.hostname}:514 / UDP</dd>
+      {capabilities.syslog && <>
+        <dt>Syslog сервер</dt><dd className="mono">{window.location.hostname}:514 / UDP</dd>
+      </>}
       <dt>FTP сервер</dt><dd className="mono">{window.location.hostname}:21</dd>
       <dt>FTP пользователь</dt><dd className="mono">{device.ftpUsername}</dd>
       <dt>FTP пароль</dt><dd className="mono secret">{device.generatedPassword}</dd>
@@ -1683,10 +1853,19 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   </div></div>
 }
 
-function EmptyDevices({ canCreate, onCreate }: { canCreate: boolean; onCreate: () => void }) {
-  return <div className="empty-devices"><Server size={28} /><h3>Нет подключённого оборудования</h3>
-    <p>Добавьте SMG-1016M, чтобы получить изолированные параметры Syslog и FTP.</p>
-    {canCreate && <button className="primary" onClick={onCreate}>Добавить устройство</button>}</div>
+function EmptyDevices({ category, canCreate, onCreate }: {
+  category: SourceCategory
+  canCreate: boolean
+  onCreate: () => void
+}) {
+  const softswitch = category === 'softswitch'
+  return <div className="empty-devices"><Server size={28} />
+    <h3>{softswitch ? 'Нет подключённых софтсвитчей' : 'Нет подключённого оборудования'}</h3>
+    <p>{softswitch
+      ? 'Добавьте софтсвитч, чтобы получить изолированный FTP для исходных CDR-файлов.'
+      : 'Добавьте оборудование и выберите шаблон обработки его данных.'}</p>
+    {canCreate && <button className="primary" onClick={onCreate}>
+      {softswitch ? 'Добавить софтсвитч' : 'Добавить оборудование'}</button>}</div>
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
@@ -1699,6 +1878,14 @@ function activeDeviceTimezone(device: Device) {
 
 function formatCount(value?: number) {
   return Number.isFinite(value) ? Number(value).toLocaleString('ru-RU') : '0'
+}
+
+function formatBytes(value?: number) {
+  if (!Number.isFinite(value)) return '—'
+  const bytes = Number(value)
+  if (bytes < 1024) return `${bytes} Б`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
 }
 
 function formatTime(value?: string, timezone = 'UTC') {

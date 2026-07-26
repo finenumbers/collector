@@ -41,8 +41,21 @@ flowchart LR
 - `durable spool`: две независимые BoltDB-очереди. `ingress.db` удерживает datagram до ACK после device validation и записи в `syslog.db`; `syslog.db` удерживает envelope до JetStream publish. Файлы не открываются двумя процессами одновременно; повреждённые envelopes атомарно переносятся в quarantine bucket.
 - `NATS JetStream`: disk-backed work queue между spool publisher и parser; без time-based eviction, duplicate window 72 часа, лимит 20 GiB и `discard=new`, чтобы переполнение оставляло данные в local spool. Некорректные envelopes сохраняются в отдельном `SYSLOG_DLQ`.
 - `MinIO`: неизменяемые исходные CDR. Архивация Syslog в MinIO пока не реализована; canonical raw-копия хранится в ClickHouse.
-- `SFTPGo`: FTP endpoint, динамическая отдельная учётная запись и home каждого SMG.
+- `SFTPGo`: FTP endpoint, динамическая отдельная учётная запись и home каждого источника CDR.
 - `Nginx Proxy Manager`: существующий внешний TLS/reverse proxy в Docker-сети `proxy`; Collector доступен ему как `smg-collector:8080`, но app port и инфраструктурные API наружу не публикуются.
+
+## Категории источников и шаблоны
+
+`devices` остаётся общей таблицей источников и сохраняет все существующие FK. Поля
+`source_category` и `template_key` выбирают неизменяемый каталог шаблонов из кода:
+оборудование Eltex использует Syslog, typed CDR, raw archive и AntiFraud/RADIUS;
+`softswitch-cdr-raw-v1` использует только FTP и raw archive. Поле `firmware` сохранено
+для совместимости, но выбор pipeline выполняется только по `template_key`.
+
+Raw-only файл проходит SHA-256 dedup, PostgreSQL ledger и MinIO, получает статус
+`archived`, после чего локальная копия удаляется. Decode, parser, ClickHouse и
+correlation для такого источника не запускаются. Исходник скачивается потоково через
+authenticated device-scoped API с записью в audit log.
 
 ## Границы надёжности
 

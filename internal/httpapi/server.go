@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"collector/internal/analytics"
 	"collector/internal/archive"
 	"collector/internal/config"
+	"collector/internal/equipment"
 	ftpclient "collector/internal/ftp"
 	"collector/internal/ingest"
 	"collector/internal/spool"
@@ -68,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 			private.Post("/auth/logout", s.logout)
 			private.Get("/system/info", s.systemInfo)
 			private.Get("/dashboard", s.dashboard)
+			private.Get("/equipment-templates", s.listEquipmentTemplates)
 			private.With(s.requireAdmin).Get("/system/users", s.listUsers)
 			private.With(s.requireAdmin).Post("/system/users", s.createUser)
 			private.With(s.requireAdmin).Patch("/system/users/{userID}", s.updateUser)
@@ -84,6 +87,8 @@ func (s *Server) Handler() http.Handler {
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
 			private.Get("/devices/{deviceID}/antifraud", s.listAntifraud)
 			private.Get("/devices/{deviceID}/stats", s.deviceStats)
+			private.Get("/devices/{deviceID}/ingest-files", s.listIngestFiles)
+			private.Get("/devices/{deviceID}/ingest-files/{fileID}/download", s.downloadIngestFile)
 			private.With(s.requireAdmin).Get("/devices/{deviceID}/syslog-diagnostics", s.syslogDiagnostics)
 			private.Get("/devices/{deviceID}/calls/{recordID}/timeline", s.callTimeline)
 			private.Get("/devices/{deviceID}/antifraud/{transactionID}/timeline", s.antifraudTimeline)
@@ -207,12 +212,22 @@ func (s *Server) logout(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) listDevices(writer http.ResponseWriter, request *http.Request) {
-	devices, err := s.Store.ListDevices(request.Context())
+	category := request.URL.Query().Get("category")
+	if category != "" && category != equipment.CategoryEquipment &&
+		category != equipment.CategorySoftswitch {
+		writeError(writer, http.StatusBadRequest, "category must be equipment or softswitch")
+		return
+	}
+	devices, err := s.Store.ListDevicesByCategory(request.Context(), category)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to list devices")
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": devices})
+}
+
+func (s *Server) listEquipmentTemplates(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]any{"items": equipment.List()})
 }
 
 func (s *Server) systemInfo(writer http.ResponseWriter, request *http.Request) {
@@ -262,34 +277,59 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	var weightedTalk float64
 	activeDevices := 0
 	for _, configured := range devices {
-		metrics := fleet.Devices[configured.ID]
-		if metrics == nil {
-			metrics = &analytics.DashboardDevice{DeviceID: configured.ID}
+		var metrics *analytics.DashboardDevice
+		var fileMetrics *store.IngestFileMetrics
+		if configured.Capabilities.TypedCDR || configured.Capabilities.Syslog {
+			metrics = fleet.Devices[configured.ID]
+			if metrics == nil {
+				metrics = &analytics.DashboardDevice{DeviceID: configured.ID}
+			}
+		} else {
+			ledger, ledgerErr := s.Store.DeviceIngestFileMetrics(request.Context(), configured.ID)
+			if ledgerErr != nil {
+				fleet.Diagnostics = append(fleet.Diagnostics, "ingest ledger: "+ledgerErr.Error())
+			} else {
+				fileMetrics = &ledger
+			}
 		}
 		if configured.Enabled && configured.PurgeState == "active" {
 			activeDevices++
 		}
-		calls += metrics.Calls
-		failed += metrics.FailedCalls
-		alarms += metrics.Alarms
-		unknown += metrics.Unknown
-		antifraud += metrics.Antifraud
-		rejects += metrics.AntifraudRejected
-		incomplete += metrics.AntifraudIncomplete
-		weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
-		rows = append(rows, map[string]any{
-			"id": configured.ID, "name": configured.Name, "model": configured.Model,
-			"firmware": configured.Firmware, "timezone": configured.Timezone,
-			"enabled": configured.Enabled, "metrics": metrics,
-			"freshness": map[string]any{
-				"latestSyslogAt": metrics.LatestSyslogAt, "latestCdrAt": metrics.LatestCDRAt,
-			},
-			"revision": map[string]any{
+		if metrics != nil {
+			calls += metrics.Calls
+			failed += metrics.FailedCalls
+			alarms += metrics.Alarms
+			unknown += metrics.Unknown
+			antifraud += metrics.Antifraud
+			rejects += metrics.AntifraudRejected
+			incomplete += metrics.AntifraudIncomplete
+			weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
+		}
+		var latestSyslogAt, latestCDRAt any
+		if metrics != nil {
+			latestSyslogAt, latestCDRAt = metrics.LatestSyslogAt, metrics.LatestCDRAt
+		} else if fileMetrics != nil {
+			latestCDRAt = fileMetrics.LatestAt
+		}
+		revision := any(nil)
+		if metrics != nil {
+			revision = map[string]any{
 				"configured": configured.TimezoneRevision,
 				"active":     metrics.ActiveRevision, "building": metrics.BuildingRevision,
 				"status":  metrics.RevisionStatus,
 				"aligned": uint64(configured.ActiveTimezoneRevision) == metrics.ActiveRevision,
+			}
+		}
+		rows = append(rows, map[string]any{
+			"id": configured.ID, "name": configured.Name, "model": configured.Model,
+			"firmware": configured.Firmware, "timezone": configured.Timezone,
+			"sourceCategory": configured.SourceCategory, "templateKey": configured.TemplateKey,
+			"capabilities": configured.Capabilities,
+			"enabled":      configured.Enabled, "metrics": metrics, "fileMetrics": fileMetrics,
+			"freshness": map[string]any{
+				"latestSyslogAt": latestSyslogAt, "latestCdrAt": latestCDRAt,
 			},
+			"revision": revision,
 		})
 	}
 	averageTalk := float64(0)
@@ -491,12 +531,14 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := ingest.UnblockIngressSource(
-		request.Context(), s.Config.IngressControlPath, device.SyslogSourceIP,
-	); err != nil {
-		_ = s.Store.DeleteDevice(request.Context(), device.ID, session.User, request.RemoteAddr)
-		writeError(writer, http.StatusBadGateway, "unable to enable source-preserving Syslog ingress")
-		return
+	if device.Capabilities.Syslog {
+		if err := ingest.UnblockIngressSource(
+			request.Context(), s.Config.IngressControlPath, device.SyslogSourceIP,
+		); err != nil {
+			_ = s.Store.DeleteDevice(request.Context(), device.ID, session.User, request.RemoteAddr)
+			writeError(writer, http.StatusBadGateway, "unable to enable source-preserving Syslog ingress")
+			return
+		}
 	}
 	if s.FTP != nil {
 		if err := s.FTP.CreateUser(request.Context(), device.FTPUsername, device.GeneratedPassword, device.FTPHome); err != nil {
@@ -506,14 +548,16 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	if err := s.Analytics.ScheduleDeviceRebuild(
-		request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
-	); err != nil {
-		slog.Error("unable to initialize device derived revision",
-			"device", device.ID, "error", err)
-		writeError(writer, http.StatusInternalServerError,
-			"device created, but derived revision initialization failed")
-		return
+	if (device.Capabilities.Syslog || device.Capabilities.TypedCDR) && s.Analytics != nil {
+		if err := s.Analytics.ScheduleDeviceRebuild(
+			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
+		); err != nil {
+			slog.Error("unable to initialize device derived revision",
+				"device", device.ID, "error", err)
+			writeError(writer, http.StatusInternalServerError,
+				"device created, but derived revision initialization failed")
+			return
+		}
 	}
 	writeJSON(writer, http.StatusCreated, device)
 }
@@ -550,7 +594,8 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	if previous.SyslogSourceIP != device.SyslogSourceIP {
+	if previous.Capabilities.Syslog &&
+		(!device.Capabilities.Syslog || previous.SyslogSourceIP != device.SyslogSourceIP) {
 		if _, err := ingest.PurgeIngressSource(
 			request.Context(), s.Config.IngressControlPath, previous.SyslogSourceIP,
 		); err != nil {
@@ -558,13 +603,16 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	if err := ingest.UnblockIngressSource(
-		request.Context(), s.Config.IngressControlPath, device.SyslogSourceIP,
-	); err != nil {
-		writeError(writer, http.StatusBadGateway, "device saved; Syslog source could not be enabled")
-		return
+	if device.Capabilities.Syslog {
+		if err := ingest.UnblockIngressSource(
+			request.Context(), s.Config.IngressControlPath, device.SyslogSourceIP,
+		); err != nil {
+			writeError(writer, http.StatusBadGateway, "device saved; Syslog source could not be enabled")
+			return
+		}
 	}
-	if device.TimezoneRevision != device.ActiveTimezoneRevision {
+	if (device.Capabilities.Syslog || device.Capabilities.TypedCDR) &&
+		device.TimezoneRevision != device.ActiveTimezoneRevision {
 		if err := s.Analytics.ScheduleDeviceRebuild(
 			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
 		); err != nil {
@@ -607,9 +655,11 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 		slog.Error("device purge failed", "device", id, "phase", phase, "error", purgeErr)
 		writeError(writer, http.StatusInternalServerError, phase+": "+purgeErr.Error())
 	}
-	if _, err := ingest.PurgeIngressSource(ctx, s.Config.IngressControlPath, device.SyslogSourceIP); err != nil {
-		fail("ingress", fmt.Errorf("unable to purge ingress queue: %w", err))
-		return
+	if device.Capabilities.Syslog {
+		if _, err := ingest.PurgeIngressSource(ctx, s.Config.IngressControlPath, device.SyslogSourceIP); err != nil {
+			fail("ingress", fmt.Errorf("unable to purge ingress queue: %w", err))
+			return
+		}
 	}
 	if s.FTP != nil {
 		if err := s.FTP.DeleteUser(ctx, device.FTPUsername); err != nil {
@@ -617,7 +667,7 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	if s.Spool != nil {
+	if device.Capabilities.Syslog && s.Spool != nil {
 		if _, err := s.Spool.DeleteMatching(func(payload []byte) bool {
 			var raw ingest.RawSyslog
 			return json.Unmarshal(payload, &raw) == nil && raw.DeviceID == id
@@ -626,21 +676,24 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	if err := ingest.PurgeDeviceNATS(ctx, s.NATS, id); err != nil {
-		fail("nats", fmt.Errorf("unable to purge NATS messages: %w", err))
-		return
+	if device.Capabilities.Syslog {
+		if err := ingest.PurgeDeviceNATS(ctx, s.NATS, id); err != nil {
+			fail("nats", fmt.Errorf("unable to purge NATS messages: %w", err))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			fail("drain", ctx.Err())
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
-	// The worker fetch timeout is one second. Let already fetched messages observe
-	// the durable deleting tombstone and terminate before analytics mutations.
-	select {
-	case <-ctx.Done():
-		fail("drain", ctx.Err())
-		return
-	case <-time.After(2 * time.Second):
-	}
-	if err := s.Analytics.PurgeDeviceData(ctx, id); err != nil {
-		fail("clickhouse", err)
-		return
+	hasAnalytics := device.Capabilities.Syslog || device.Capabilities.TypedCDR
+	if hasAnalytics {
+		if err := s.Analytics.PurgeDeviceData(ctx, id); err != nil {
+			fail("clickhouse", err)
+			return
+		}
 	}
 	if s.Archive != nil {
 		if err := s.Archive.DeletePrefix(ctx, "cdr/"+id.String()+"/"); err != nil {
@@ -654,9 +707,11 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 	}
 	// A second synchronous sweep closes races with correlation/rebuild work that
 	// started before the deleting fence was visible.
-	if err := s.Analytics.PurgeDeviceData(ctx, id); err != nil {
-		fail("clickhouse-resweep", err)
-		return
+	if hasAnalytics {
+		if err := s.Analytics.PurgeDeviceData(ctx, id); err != nil {
+			fail("clickhouse-resweep", err)
+			return
+		}
 	}
 	if err := s.Store.FinalizeDevicePurge(ctx, id); err != nil {
 		fail("postgres", fmt.Errorf("unable to purge PostgreSQL device data: %w", err))
@@ -665,9 +720,104 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 	writer.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) listIngestFiles(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	if _, err := s.Store.Device(request.Context(), deviceID); errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return
+	} else if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load device")
+		return
+	}
+	limit, _ := strconv.Atoi(request.URL.Query().Get("limit"))
+	items, err := s.Store.ListRecentIngestFiles(request.Context(), deviceID, limit)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to list ingest files")
+		return
+	}
+	if items == nil {
+		items = []store.IngestFileSummary{}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) downloadIngestFile(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	fileID, err := uuid.Parse(chi.URLParam(request, "fileID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid ingest file id")
+		return
+	}
+	item, err := s.Store.IngestFile(request.Context(), deviceID, fileID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "ingest file not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load ingest file")
+		return
+	}
+	if s.Archive == nil {
+		writeError(writer, http.StatusServiceUnavailable, "archive unavailable")
+		return
+	}
+	object, err := s.Archive.OpenObject(request.Context(), item.ObjectKey)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "unable to open archived file")
+		return
+	}
+	defer object.Reader.Close()
+	session := currentSession(request)
+	if err := s.Store.AuditIngestFileDownload(
+		request.Context(), fileID, session.User, request.RemoteAddr,
+	); err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to audit file download")
+		return
+	}
+	filename := sanitizeDownloadName(item.OriginalName)
+	writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
+		"filename": filename,
+	}))
+	contentType := object.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Content-Length", strconv.FormatInt(object.Size, 10))
+	writer.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(writer, object.Reader); err != nil {
+		slog.Warn("archived file response interrupted", "file", fileID, "error", err)
+	}
+}
+
+func sanitizeDownloadName(value string) string {
+	value = filepath.Base(strings.ReplaceAll(value, "\\", "/"))
+	value = strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return -1
+		}
+		return character
+	}, value)
+	if value == "" || value == "." {
+		return "cdr-file"
+	}
+	return value
+}
+
 func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
+		return
+	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Syslog
+	}, "Syslog events") {
 		return
 	}
 	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
@@ -708,6 +858,11 @@ func (s *Server) listSyslogConstructs(writer http.ResponseWriter, request *http.
 	}
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
+		return
+	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Syslog
+	}, "Syslog constructs") {
 		return
 	}
 	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
@@ -754,6 +909,11 @@ func (s *Server) getSyslogConstruct(writer http.ResponseWriter, request *http.Re
 	if !ok {
 		return
 	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Syslog
+	}, "Syslog constructs") {
+		return
+	}
 	constructID, err := uuid.Parse(chi.URLParam(request, "constructID"))
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid Syslog construct id")
@@ -776,6 +936,11 @@ func (s *Server) getSyslogConstruct(writer http.ResponseWriter, request *http.Re
 func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
+		return
+	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.TypedCDR
+	}, "typed CDR calls") {
 		return
 	}
 	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
@@ -811,6 +976,11 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 func (s *Server) listAntifraud(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
+		return
+	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Antifraud && device.Capabilities.Radius
+	}, "AntiFraud/RADIUS") {
 		return
 	}
 	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
@@ -852,6 +1022,11 @@ func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) 
 	if !ok {
 		return
 	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Syslog || device.Capabilities.TypedCDR
+	}, "analytics statistics") {
+		return
+	}
 	stats, err := s.Analytics.Stats(request.Context(), deviceID)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query device statistics")
@@ -863,6 +1038,11 @@ func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) 
 func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
+		return
+	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Syslog
+	}, "Syslog diagnostics") {
 		return
 	}
 	diagnostics, err := s.Analytics.SyslogDiagnostics(request.Context(), deviceID)
@@ -959,6 +1139,11 @@ func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request)
 	if !ok {
 		return
 	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.TypedCDR
+	}, "typed CDR calls") {
+		return
+	}
 	recordID, err := uuid.Parse(chi.URLParam(request, "recordID"))
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid record id")
@@ -975,6 +1160,11 @@ func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request)
 func (s *Server) antifraudTimeline(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
+		return
+	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Antifraud && device.Capabilities.Radius
+	}, "AntiFraud/RADIUS") {
 		return
 	}
 	transactionID, err := uuid.Parse(chi.URLParam(request, "transactionID"))
@@ -1006,6 +1196,26 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	dataset := request.URL.Query().Get("dataset")
+	switch dataset {
+	case "calls":
+		if !device.Capabilities.TypedCDR {
+			writeError(writer, http.StatusConflict,
+				"typed CDR calls are not supported by this source template")
+			return
+		}
+	case "antifraud":
+		if !device.Capabilities.Antifraud || !device.Capabilities.Radius {
+			writeError(writer, http.StatusConflict,
+				"AntiFraud/RADIUS is not supported by this source template")
+			return
+		}
+	default:
+		if !device.Capabilities.Syslog {
+			writeError(writer, http.StatusConflict,
+				"Syslog events are not supported by this source template")
+			return
+		}
+	}
 	search := request.URL.Query().Get("q")
 	workbook := excelize.NewFile()
 	defer workbook.Close()
@@ -1182,6 +1392,29 @@ func parseDeviceID(writer http.ResponseWriter, request *http.Request) (uuid.UUID
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+func (s *Server) requireDeviceCapability(
+	writer http.ResponseWriter,
+	request *http.Request,
+	deviceID uuid.UUID,
+	supported func(store.Device) bool,
+	feature string,
+) bool {
+	device, err := s.Store.Device(request.Context(), deviceID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return false
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load device")
+		return false
+	}
+	if !supported(device) {
+		writeError(writer, http.StatusConflict, feature+" is not supported by this source template")
+		return false
+	}
+	return true
 }
 
 func currentSession(request *http.Request) store.Session {

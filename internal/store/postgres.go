@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"collector/internal/equipment"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,27 +60,30 @@ type UserUpdate struct {
 }
 
 type Device struct {
-	ID                     uuid.UUID `json:"id"`
-	Name                   string    `json:"name"`
-	Model                  string    `json:"model"`
-	Firmware               string    `json:"firmware"`
-	Timezone               string    `json:"timezone"`
-	ActiveTimezone         string    `json:"activeTimezone"`
-	TimezoneRevision       int64     `json:"timezoneRevision"`
-	ActiveTimezoneRevision int64     `json:"activeTimezoneRevision"`
-	CDRSourceTimezone      string    `json:"cdrSourceTimezone"`
-	ManagementIP           *string   `json:"managementIp,omitempty"`
-	SyslogSourceIP         string    `json:"syslogSourceIp"`
-	DeviceSign             string    `json:"deviceSign"`
-	AntifraudEnabled       bool      `json:"antifraudEnabled"`
-	AntifraudMode          string    `json:"antifraudMode"`
-	FTPUsername            string    `json:"ftpUsername"`
-	FTPHome                string    `json:"ftpHome"`
-	Enabled                bool      `json:"enabled"`
-	PurgeState             string    `json:"purgeState"`
-	PurgeError             string    `json:"purgeError,omitempty"`
-	CreatedAt              time.Time `json:"createdAt"`
-	GeneratedPassword      string    `json:"generatedPassword,omitempty"`
+	ID                     uuid.UUID              `json:"id"`
+	Name                   string                 `json:"name"`
+	SourceCategory         string                 `json:"sourceCategory"`
+	TemplateKey            string                 `json:"templateKey"`
+	Capabilities           equipment.Capabilities `json:"capabilities"`
+	Model                  string                 `json:"model"`
+	Firmware               string                 `json:"firmware"`
+	Timezone               string                 `json:"timezone"`
+	ActiveTimezone         string                 `json:"activeTimezone"`
+	TimezoneRevision       int64                  `json:"timezoneRevision"`
+	ActiveTimezoneRevision int64                  `json:"activeTimezoneRevision"`
+	CDRSourceTimezone      string                 `json:"cdrSourceTimezone"`
+	ManagementIP           *string                `json:"managementIp,omitempty"`
+	SyslogSourceIP         string                 `json:"syslogSourceIp"`
+	DeviceSign             string                 `json:"deviceSign"`
+	AntifraudEnabled       bool                   `json:"antifraudEnabled"`
+	AntifraudMode          string                 `json:"antifraudMode"`
+	FTPUsername            string                 `json:"ftpUsername"`
+	FTPHome                string                 `json:"ftpHome"`
+	Enabled                bool                   `json:"enabled"`
+	PurgeState             string                 `json:"purgeState"`
+	PurgeError             string                 `json:"purgeError,omitempty"`
+	CreatedAt              time.Time              `json:"createdAt"`
+	GeneratedPassword      string                 `json:"generatedPassword,omitempty"`
 }
 
 type DeviceTimeConfig struct {
@@ -90,6 +95,8 @@ type DeviceTimeConfig struct {
 
 type NewDevice struct {
 	Name             string `json:"name"`
+	SourceCategory   string `json:"sourceCategory"`
+	TemplateKey      string `json:"templateKey"`
 	Model            string `json:"model"`
 	Firmware         string `json:"firmware"`
 	Timezone         string `json:"timezone"`
@@ -102,6 +109,8 @@ type NewDevice struct {
 
 type DeviceUpdate struct {
 	Name             string `json:"name"`
+	SourceCategory   string `json:"sourceCategory"`
+	TemplateKey      string `json:"templateKey"`
 	Firmware         string `json:"firmware"`
 	Timezone         string `json:"timezone"`
 	ManagementIP     string `json:"managementIp"`
@@ -505,15 +514,27 @@ func CanonicalFirmware(value string) (string, error) {
 }
 
 func normalizeDeviceFirmware(device *Device) {
-	device.Firmware = NormalizeFirmwareScheme(device.Firmware)
+	if device.SourceCategory == equipment.CategoryEquipment {
+		device.Firmware = NormalizeFirmwareScheme(device.Firmware)
+	}
+	if template, err := equipment.Resolve(device.TemplateKey); err == nil {
+		device.Capabilities = template.Capabilities
+	}
 }
 
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
-	rows, err := s.DB.Query(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
+	return s.ListDevicesByCategory(ctx, "")
+}
+
+func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]Device, error) {
+	if category != "" && category != equipment.CategoryEquipment && category != equipment.CategorySoftswitch {
+		return nil, errors.New("category must be equipment or softswitch")
+	}
+	rows, err := s.DB.Query(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
-		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
+		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
 		ftp_username,ftp_home,enabled,purge_state,purge_error,created_at
-		FROM devices ORDER BY name`)
+		FROM devices WHERE ($1='' OR source_category=$1) ORDER BY name`, category)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +542,8 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	var result []Device
 	for rows.Next() {
 		var device Device
-		if err := rows.Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
+		if err := rows.Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
+			&device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
@@ -580,12 +602,13 @@ func (s *Store) LockDevicePurge(id uuid.UUID) func() {
 
 func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
-	err := s.DB.QueryRow(ctx, `SELECT id,name,model,firmware,timezone,active_timezone,
+	err := s.DB.QueryRow(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
-		host(syslog_source_ip),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
+		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
 		ftp_username,ftp_home,enabled,purge_state,purge_error,created_at
 		FROM devices WHERE id=$1`, id).
-		Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
+		Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
+			&device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
@@ -651,7 +674,8 @@ type IngestFileClaim struct {
 }
 
 func IngestFileFullyIngested(status string, rowsValid uint64) bool {
-	return status == "processed" || (status == "quarantined" && rowsValid > 0)
+	return status == "processed" || status == "archived" ||
+		(status == "quarantined" && rowsValid > 0)
 }
 
 func (s *Store) ClaimIngestFile(
@@ -715,6 +739,8 @@ func (s *Store) RegisterIngestFile(
 type IngestFileSummary struct {
 	ID           uuid.UUID  `json:"id"`
 	OriginalName string     `json:"originalName"`
+	SHA256       string     `json:"sha256"`
+	SizeBytes    int64      `json:"sizeBytes"`
 	Status       string     `json:"status"`
 	RowsTotal    uint64     `json:"rowsTotal"`
 	RowsValid    uint64     `json:"rowsValid"`
@@ -727,7 +753,7 @@ func (s *Store) ListRecentIngestFiles(ctx context.Context, deviceID uuid.UUID, l
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	rows, err := s.DB.Query(ctx, `SELECT id,original_name,status,rows_total,rows_valid,
+	rows, err := s.DB.Query(ctx, `SELECT id,original_name,sha256,size_bytes,status,rows_total,rows_valid,
 		COALESCE(error,''),received_at,processed_at
 		FROM ingest_files WHERE device_id=$1
 		ORDER BY received_at DESC LIMIT $2`, deviceID, limit)
@@ -739,7 +765,8 @@ func (s *Store) ListRecentIngestFiles(ctx context.Context, deviceID uuid.UUID, l
 	for rows.Next() {
 		var item IngestFileSummary
 		if err := rows.Scan(
-			&item.ID, &item.OriginalName, &item.Status, &item.RowsTotal, &item.RowsValid,
+			&item.ID, &item.OriginalName, &item.SHA256, &item.SizeBytes,
+			&item.Status, &item.RowsTotal, &item.RowsValid,
 			&item.Error, &item.ReceivedAt, &item.ProcessedAt,
 		); err != nil {
 			return nil, err
@@ -749,6 +776,50 @@ func (s *Store) ListRecentIngestFiles(ctx context.Context, deviceID uuid.UUID, l
 	return items, rows.Err()
 }
 
+type IngestFileObject struct {
+	IngestFileSummary
+	ObjectKey string
+}
+
+func (s *Store) IngestFile(ctx context.Context, deviceID, fileID uuid.UUID) (IngestFileObject, error) {
+	var item IngestFileObject
+	err := s.DB.QueryRow(ctx, `SELECT id,original_name,sha256,size_bytes,status,
+		rows_total,rows_valid,COALESCE(error,''),received_at,processed_at,object_key
+		FROM ingest_files WHERE device_id=$1 AND id=$2`, deviceID, fileID).Scan(
+		&item.ID, &item.OriginalName, &item.SHA256, &item.SizeBytes, &item.Status,
+		&item.RowsTotal, &item.RowsValid, &item.Error, &item.ReceivedAt,
+		&item.ProcessedAt, &item.ObjectKey,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return IngestFileObject{}, ErrNotFound
+	}
+	return item, err
+}
+
+type IngestFileMetrics struct {
+	Files    uint64     `json:"files"`
+	Bytes    uint64     `json:"bytes"`
+	LatestAt *time.Time `json:"latestAt,omitempty"`
+}
+
+func (s *Store) DeviceIngestFileMetrics(ctx context.Context, deviceID uuid.UUID) (IngestFileMetrics, error) {
+	var metrics IngestFileMetrics
+	err := s.DB.QueryRow(ctx, `SELECT count(*),COALESCE(sum(size_bytes),0),max(received_at)
+		FROM ingest_files WHERE device_id=$1 AND status IN ('archived','processed','quarantined')`,
+		deviceID).Scan(&metrics.Files, &metrics.Bytes, &metrics.LatestAt)
+	return metrics, err
+}
+
+func (s *Store) AuditIngestFileDownload(
+	ctx context.Context, fileID uuid.UUID, actor User, remoteIP string,
+) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO audit_log
+		(actor_id,action,resource_type,resource_id,remote_ip)
+		VALUES($1,'ingest_file_download','ingest_file',$2,$3)`,
+		actor.ID, fileID.String(), nullableIP(remoteIP))
+	return err
+}
+
 func (s *Store) CompleteIngestFile(ctx context.Context, id uuid.UUID, status string, rowsTotal, rowsValid uint64, message string) error {
 	_, err := s.DB.Exec(ctx, `UPDATE ingest_files SET status=$2,rows_total=$3,rows_valid=$4,
 		error=NULLIF($5,''),processed_at=now() WHERE id=$1`, id, status, rowsTotal, rowsValid, message)
@@ -756,11 +827,32 @@ func (s *Store) CompleteIngestFile(ctx context.Context, id uuid.UUID, status str
 }
 
 func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, remoteIP string) (Device, error) {
-	syslogSourceIP, ok := normalizeHostIP(input.SyslogSourceIP)
-	if strings.TrimSpace(input.Name) == "" || !ok {
-		return Device{}, errors.New("name and valid syslogSourceIp are required")
+	if strings.TrimSpace(input.Name) == "" {
+		return Device{}, errors.New("name is required")
 	}
-	input.SyslogSourceIP = syslogSourceIP
+	if input.TemplateKey == "" {
+		input.TemplateKey = equipment.EltexTemplateForFirmware(NormalizeFirmwareScheme(input.Firmware))
+	}
+	template, err := equipment.Resolve(input.TemplateKey)
+	if err != nil {
+		return Device{}, err
+	}
+	if input.SourceCategory == "" {
+		input.SourceCategory = template.Category
+	}
+	if input.SourceCategory != template.Category {
+		return Device{}, errors.New("sourceCategory does not match templateKey")
+	}
+	if template.Capabilities.Syslog {
+		syslogSourceIP, ok := normalizeHostIP(input.SyslogSourceIP)
+		if !ok {
+			return Device{}, errors.New("valid syslogSourceIp is required")
+		}
+		input.SyslogSourceIP = syslogSourceIP
+	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled ||
+		(input.AntifraudMode != "" && input.AntifraudMode != "OFF") {
+		return Device{}, errors.New("raw softswitch does not support syslog or AntiFraud/RADIUS")
+	}
 	if input.ManagementIP != "" {
 		managementIP, valid := normalizeHostIP(input.ManagementIP)
 		if !valid {
@@ -768,15 +860,26 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		}
 		input.ManagementIP = managementIP
 	}
-	if input.Model == "" {
+	if template.Category == equipment.CategorySoftswitch {
+		input.Model = "Softswitch"
+		input.Firmware = "raw"
+		input.ManagementIP = ""
+		input.DeviceSign = ""
+		input.AntifraudMode = "OFF"
+	} else if input.Model == "" {
 		input.Model = "SMG-1016M"
 	}
-	firmware, err := CanonicalFirmware(input.Firmware)
-	if err != nil {
-		return Device{}, err
+	if template.Category == equipment.CategoryEquipment {
+		switch template.Key {
+		case equipment.TemplateEltex3410:
+			input.Firmware = FirmwareScheme3410
+		case equipment.TemplateEltex3232:
+			input.Firmware = FirmwareScheme3232
+		}
 	}
-	input.Firmware = firmware
-	if input.Timezone == "" {
+	if input.Timezone == "" && template.Category == equipment.CategorySoftswitch {
+		return Device{}, errors.New("timezone is required")
+	} else if input.Timezone == "" {
 		input.Timezone = "Asia/Novosibirsk"
 	}
 	if _, err := time.LoadLocation(input.Timezone); err != nil {
@@ -786,7 +889,11 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		input.AntifraudMode = "OFF"
 	}
 	id := uuid.New()
-	ftpUsername := "smg_" + strings.ReplaceAll(id.String()[:13], "-", "")
+	ftpPrefix := "smg_"
+	if template.Category == equipment.CategorySoftswitch {
+		ftpPrefix = "ssw_"
+	}
+	ftpUsername := ftpPrefix + strings.ReplaceAll(id.String()[:13], "-", "")
 	ftpPassword, err := randomToken(18)
 	if err != nil {
 		return Device{}, err
@@ -799,18 +906,20 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	defer tx.Rollback(ctx)
 	var device Device
 	err = tx.QueryRow(ctx, `INSERT INTO devices
-		(id,name,model,firmware,timezone,active_timezone,timezone_revision,
+		(id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,management_ip,syslog_source_ip,device_sign,
 		 antifraud_enabled,antifraud_mode,ftp_username,ftp_home)
-		VALUES($1,$2,$3,$4,$5,$5,1,1,$5,NULLIF($6,'')::inet,$7,$8,$9,$10,$11,$12)
-		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
-		 active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
+		VALUES($1,$2,$3,$4,$5,$6,$7,$7,1,1,$7,NULLIF($8,'')::inet,NULLIF($9,'')::inet,$10,$11,$12,$13,$14)
+		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
+		 active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
 		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
 		 enabled,purge_state,purge_error,created_at`,
-		id, strings.TrimSpace(input.Name), input.Model, input.Firmware, input.Timezone,
+		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
+		input.Model, input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign, input.AntifraudEnabled,
 		input.AntifraudMode, ftpUsername, ftpHome,
-	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
+	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
+		&device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
@@ -837,11 +946,45 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 func (s *Store) UpdateDevice(
 	ctx context.Context, id uuid.UUID, input DeviceUpdate, actor User, remoteIP string,
 ) (Device, error) {
-	syslogSourceIP, ok := normalizeHostIP(input.SyslogSourceIP)
-	if strings.TrimSpace(input.Name) == "" || !ok {
-		return Device{}, errors.New("name and valid syslogSourceIp are required")
+	current, err := s.Device(ctx, id)
+	if err != nil {
+		return Device{}, err
 	}
-	input.SyslogSourceIP = syslogSourceIP
+	if strings.TrimSpace(input.Name) == "" {
+		return Device{}, errors.New("name is required")
+	}
+	if input.TemplateKey == "" {
+		if current.SourceCategory == equipment.CategoryEquipment {
+			input.TemplateKey = equipment.EltexTemplateForFirmware(
+				NormalizeFirmwareScheme(input.Firmware),
+			)
+		} else {
+			input.TemplateKey = current.TemplateKey
+		}
+	}
+	template, err := equipment.Resolve(input.TemplateKey)
+	if err != nil {
+		return Device{}, err
+	}
+	if input.SourceCategory == "" {
+		input.SourceCategory = template.Category
+	}
+	if input.SourceCategory != template.Category {
+		return Device{}, errors.New("sourceCategory does not match templateKey")
+	}
+	if current.SourceCategory != template.Category {
+		return Device{}, errors.New("sourceCategory cannot be changed")
+	}
+	if template.Capabilities.Syslog {
+		syslogSourceIP, ok := normalizeHostIP(input.SyslogSourceIP)
+		if !ok {
+			return Device{}, errors.New("valid syslogSourceIp is required")
+		}
+		input.SyslogSourceIP = syslogSourceIP
+	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled ||
+		(input.AntifraudMode != "" && input.AntifraudMode != "OFF") {
+		return Device{}, errors.New("raw softswitch does not support syslog or AntiFraud/RADIUS")
+	}
 	if _, err := time.LoadLocation(input.Timezone); err != nil {
 		return Device{}, fmt.Errorf("invalid IANA timezone %q", input.Timezone)
 	}
@@ -852,11 +995,21 @@ func (s *Store) UpdateDevice(
 		}
 		input.ManagementIP = managementIP
 	}
-	firmware, err := CanonicalFirmware(input.Firmware)
-	if err != nil {
-		return Device{}, err
+	if template.Category == equipment.CategorySoftswitch {
+		input.Firmware = "raw"
+		input.ManagementIP = ""
+		input.DeviceSign = ""
+		input.AntifraudEnabled = false
+		input.AntifraudMode = "OFF"
+	} else {
+		switch template.Key {
+		case equipment.TemplateEltex3410:
+			input.Firmware = FirmwareScheme3410
+		case equipment.TemplateEltex3232:
+			input.Firmware = FirmwareScheme3232
+		}
 	}
-	input.Firmware = firmware
+	activateTimezoneImmediately := !template.Capabilities.Syslog && !template.Capabilities.TypedCDR
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return Device{}, err
@@ -864,21 +1017,28 @@ func (s *Store) UpdateDevice(
 	defer tx.Rollback(ctx)
 	var device Device
 	err = tx.QueryRow(ctx, `UPDATE devices SET
-		name=$2,firmware=$3,
-		timezone_revision=CASE WHEN timezone IS DISTINCT FROM $4 THEN timezone_revision+1
+		name=$2,source_category=$3,template_key=$4,firmware=$5,
+		timezone_revision=CASE WHEN timezone IS DISTINCT FROM $6 THEN timezone_revision+1
 			ELSE timezone_revision END,
-		timezone=$4,cdr_source_timezone=$4,management_ip=NULLIF($5,'')::inet,
-		syslog_source_ip=$6,device_sign=$7,antifraud_enabled=$8,antifraud_mode=$9,
-		enabled=$10
+		active_timezone=CASE WHEN $13 THEN $6 ELSE active_timezone END,
+		active_timezone_revision=CASE WHEN $13 AND timezone IS DISTINCT FROM $6
+			THEN timezone_revision+1
+			WHEN $13 THEN timezone_revision
+			ELSE active_timezone_revision END,
+		timezone=$6,cdr_source_timezone=$6,management_ip=NULLIF($7,'')::inet,
+		syslog_source_ip=NULLIF($8,'')::inet,device_sign=$9,antifraud_enabled=$10,antifraud_mode=$11,
+		enabled=$12
 		WHERE id=$1 AND purge_state='active'
-		RETURNING id,name,model,firmware,timezone,active_timezone,timezone_revision,
-			active_timezone_revision,cdr_source_timezone,host(management_ip),host(syslog_source_ip),
+		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
+			active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
 			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
 			enabled,purge_state,purge_error,created_at`,
-		id, strings.TrimSpace(input.Name), input.Firmware, input.Timezone,
+		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
+		input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
-		input.AntifraudEnabled, input.AntifraudMode, input.Enabled,
-	).Scan(&device.ID, &device.Name, &device.Model, &device.Firmware, &device.Timezone,
+		input.AntifraudEnabled, input.AntifraudMode, input.Enabled, activateTimezoneImmediately,
+	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
+		&device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,

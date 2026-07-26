@@ -28,7 +28,7 @@ describe('firmware processing schemes', () => {
   })
 })
 
-describe('destructive SMG purge confirmation', () => {
+describe('destructive source purge confirmation', () => {
   it('requires an exact device name match while idle', () => {
     expect(purgeConfirmationReady('SMG-A', 'SMG-A', false)).toBe(true)
     expect(purgeConfirmationReady('SMG-A', 'smg-a', false)).toBe(false)
@@ -38,6 +38,6 @@ describe('destructive SMG purge confirmation', () => {
 
   it('labels retry after a failed purge', () => {
     expect(purgeRetryLabel('purge_failed')).toBe('Повторить полное удаление')
-    expect(purgeRetryLabel('active')).toBe('Удалить все данные и SMG')
+    expect(purgeRetryLabel('active')).toBe('Удалить все данные и источник')
   })
 })

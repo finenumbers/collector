@@ -21,5 +21,5 @@ export function purgeConfirmationReady(deviceName: string, typedName: string, bu
 }
 
 export function purgeRetryLabel(purgeState?: string): string {
-  return purgeState === 'purge_failed' ? 'Повторить полное удаление' : 'Удалить все данные и SMG'
+  return purgeState === 'purge_failed' ? 'Повторить полное удаление' : 'Удалить все данные и источник'
 }

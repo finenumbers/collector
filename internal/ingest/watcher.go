@@ -17,6 +17,7 @@ import (
 
 	"collector/internal/analytics"
 	"collector/internal/archive"
+	"collector/internal/equipment"
 	"collector/internal/store"
 
 	"github.com/google/uuid"
@@ -26,9 +27,13 @@ import (
 type CDRWatcher struct {
 	Root      string
 	Store     *store.Store
-	Analytics *analytics.Client
+	Analytics CDRAnalytics
 	Archive   *archive.Archive
 	MinAge    time.Duration
+}
+
+type CDRAnalytics interface {
+	InsertCDRBatch(context.Context, []analytics.CDRRecord) error
 }
 
 func (w *CDRWatcher) Run(ctx context.Context) error {
@@ -111,6 +116,10 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		return nil
 	}
 	device = current
+	template, err := equipment.Resolve(device.TemplateKey)
+	if err != nil {
+		return err
+	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -127,9 +136,23 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	}
 	fileID := claim.ID
 	objectKey = claim.ObjectKey
-	if err := w.Archive.Put(ctx, objectKey, bytes.NewReader(content), int64(len(content)), "text/csv"); err != nil {
+	contentType := "application/octet-stream"
+	if template.Capabilities.TypedCDR {
+		contentType = "text/csv"
+	}
+	if err := w.Archive.Put(ctx, objectKey, bytes.NewReader(content), int64(len(content)), contentType); err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", 0, 0, err.Error())
 		return err
+	}
+	if !template.Capabilities.TypedCDR {
+		if err := insertCDRForTemplate(ctx, template, w.Analytics, nil); err != nil {
+			_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", 0, 0, err.Error())
+			return err
+		}
+		if err := w.Store.CompleteIngestFile(ctx, fileID, "archived", 0, 0, ""); err != nil {
+			return err
+		}
+		return os.Remove(path)
 	}
 	decoded, err := decodeCDR(content)
 	if err != nil {
@@ -156,7 +179,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		// Keep the file for retry after device_sign / column profile corrections.
 		return fmt.Errorf("CDR parse failed: %w", err)
 	}
-	if err := w.Analytics.InsertCDRBatch(ctx, result.Records); err != nil {
+	if err := insertCDRForTemplate(ctx, template, w.Analytics, result.Records); err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", result.Rows, uint64(len(result.Records)), err.Error())
 		return err
 	}
@@ -170,6 +193,18 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		return err
 	}
 	return os.Remove(path)
+}
+
+func insertCDRForTemplate(
+	ctx context.Context, template equipment.Template, client CDRAnalytics, records []analytics.CDRRecord,
+) error {
+	if !template.Capabilities.TypedCDR {
+		return nil
+	}
+	if client == nil {
+		return errors.New("CDR analytics is unavailable")
+	}
+	return client.InsertCDRBatch(ctx, records)
 }
 
 func decodeCDR(content []byte) ([]byte, error) {

@@ -1,6 +1,12 @@
 package store
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"collector/internal/equipment"
+)
 
 func TestNormalizeHostIP(t *testing.T) {
 	tests := []struct {
@@ -23,6 +29,48 @@ func TestNormalizeHostIP(t *testing.T) {
 			if got != test.want || ok != test.ok {
 				t.Fatalf("normalizeHostIP(%q) = (%q, %v), want (%q, %v)",
 					test.input, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestCreateDeviceValidatesTemplateBeforeDatabase(t *testing.T) {
+	tests := []struct {
+		name  string
+		input NewDevice
+		want  string
+	}{
+		{
+			name: "category mismatch",
+			input: NewDevice{
+				Name: "source", SourceCategory: equipment.CategoryEquipment,
+				TemplateKey: equipment.TemplateSoftswitchRawV1, Timezone: "UTC",
+			},
+			want: "does not match",
+		},
+		{
+			name: "raw source rejects syslog",
+			input: NewDevice{
+				Name: "source", SourceCategory: equipment.CategorySoftswitch,
+				TemplateKey: equipment.TemplateSoftswitchRawV1, Timezone: "UTC",
+				SyslogSourceIP: "192.0.2.1",
+			},
+			want: "does not support",
+		},
+		{
+			name: "raw source requires timezone",
+			input: NewDevice{
+				Name: "source", SourceCategory: equipment.CategorySoftswitch,
+				TemplateKey: equipment.TemplateSoftswitchRawV1,
+			},
+			want: "timezone is required",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := (&Store{}).CreateDevice(context.Background(), test.input, User{}, "")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v want substring %q", err, test.want)
 			}
 		})
 	}

@@ -15,6 +15,12 @@ type Archive struct {
 	Bucket string
 }
 
+type Object struct {
+	Reader      io.ReadCloser
+	Size        int64
+	ContentType string
+}
+
 func (a *Archive) ApplyCDRRetention(ctx context.Context, days int) error {
 	if days < 7 || days > 1095 {
 		return fmt.Errorf("retention days must be between 7 and 1095")
@@ -74,6 +80,18 @@ func (a *Archive) Put(ctx context.Context, key string, reader io.Reader, size in
 		UserMetadata: map[string]string{"immutable": "true"},
 	})
 	return err
+}
+
+func (a *Archive) OpenObject(ctx context.Context, key string) (Object, error) {
+	info, err := a.Client.StatObject(ctx, a.Bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return Object{}, err
+	}
+	reader, err := a.Client.GetObject(ctx, a.Bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return Object{}, err
+	}
+	return Object{Reader: reader, Size: info.Size, ContentType: info.ContentType}, nil
 }
 
 func (a *Archive) DeletePrefix(ctx context.Context, prefix string) error {

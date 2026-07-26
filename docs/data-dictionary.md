@@ -77,7 +77,7 @@ quarantine. Исходная пара `имя → значение` всегда
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Parser `smg-3.410-v12` (имя историческое; правила Syslog **общие** для схем прошивки
+Parser `smg-3.410-v13` (имя историческое; правила Syslog **общие** для схем прошивки
 `3.23.2` и `3.410`) использует **component-first** классификацию: `SIP` / `SIPT[…]` /
 `SIPT Proc` / `Port SIPT` / `PBXIPC-SIP` остаются в `sip` даже при тексте
 `IAM-`/`ISUP`/`SS7` (SIP-I/SIP-T). Keyword `ISUP`/`IAM-` применяется только когда
@@ -111,9 +111,15 @@ Envelope:
 radius/sip/isup burst без context. AVP/hex/digest наследуют RADIUS-родителя; `host_ip`,
 bare SDP, `# cause`/`# requestID`/`# SDP` без `[C…]` — SIP-родителя (`sipBurst`, ≤2s);
 `dotted_hex` / `isup_optional` — ISUP-родителя (`isupBurst`, ≤2s), без radius fallback.
-Raw payload не склеивается: 1 datagram = 1 event. UI группирует списки по
-`call_context` / `parent_event_id` и скрывает `empty_body`/hex/`dotted_hex`/digest
-(SDP-строки оффера и `isup_optional` **не** скрываются).
+Parser также публикует boundary facts `protocol_message_kind`, `direction`,
+`message_name`, `callref`, `sip_call_id`, `packet_identifier` и
+`construct_anchor_event_id`. Raw payload не склеивается: 1 datagram = 1 event.
+
+`readable-syslog-v1` создаёт `syslog_constructs` и ordered
+`syslog_construct_members`; `construct_id` стабилен от
+`device_id + grouping_version + anchor_event_id`. Связи сохраняются в
+`syslog_fragment_links` с method/confidence. UI по умолчанию читает constructs,
+а режим **Raw события** и раскрытие каждого исходного payload остаются доступны.
 
 Категории:
 

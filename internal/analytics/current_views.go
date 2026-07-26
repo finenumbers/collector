@@ -691,6 +691,31 @@ func (c *Client) currentDiagnostics(
 		return result, err
 	}
 	if err := c.Conn.QueryRow(ctx, `SELECT
+		(SELECT count() FROM collector.syslog_constructs FINAL
+		 WHERE device_id=? AND timezone_revision=? AND grouping_version=?),
+		(SELECT count() FROM collector.syslog_construct_members FINAL
+		 WHERE device_id=? AND timezone_revision=? AND grouping_version=?),
+		(SELECT countIf(grouping_method='heuristic')
+		 FROM collector.syslog_constructs FINAL
+		 WHERE device_id=? AND timezone_revision=? AND grouping_version=?),
+		(SELECT count() FROM
+			(SELECT event_id,argMax(attributes,interpreted_at) AS attributes
+			 FROM collector.syslog_facts
+			 WHERE device_id=? AND timezone_revision=?
+			 GROUP BY event_id
+			 HAVING attributes['trace_continuation']='true'
+			    AND event_id NOT IN
+			    (SELECT event_id FROM collector.syslog_construct_members FINAL
+			     WHERE device_id=? AND timezone_revision=? AND grouping_version=?)))`,
+		deviceID, revision, SyslogGroupingVersion,
+		deviceID, revision, SyslogGroupingVersion,
+		deviceID, revision, SyslogGroupingVersion,
+		deviceID, revision, deviceID, revision, SyslogGroupingVersion).
+		Scan(&result.SyslogConstructs, &result.ConstructMembers,
+			&result.HeuristicConstructs, &result.ConstructOrphans); err != nil {
+		return result, err
+	}
+	if err := c.Conn.QueryRow(ctx, `SELECT
 		count(),countIf(state='exact'),countIf(state='composite'),
 		countIf(state='ambiguous'),countIf(state='orphan')
 		FROM

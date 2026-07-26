@@ -19,6 +19,7 @@ func RunDeviceRevisionRebuilds(
 		return err
 	}
 	continuations := NewContinuationAssembler()
+	constructs := NewSyslogConstructAssembler()
 	lastBootstrap := time.Now()
 	for ctx.Err() == nil {
 		if time.Since(lastBootstrap) >= 30*time.Second {
@@ -40,7 +41,9 @@ func RunDeviceRevisionRebuilds(
 			}
 		}
 		for _, initial := range jobs {
-			if err := processDeviceRevisionJob(ctx, client, control, continuations, initial); err != nil {
+			if err := processDeviceRevisionJob(
+				ctx, client, control, continuations, constructs, initial,
+			); err != nil {
 				return err
 			}
 		}
@@ -55,7 +58,8 @@ func RunDeviceRevisionRebuilds(
 
 func processDeviceRevisionJob(
 	ctx context.Context, client *analytics.Client, control *store.Store,
-	continuations *ContinuationAssembler, job analytics.DeviceRevisionJob,
+	continuations *ContinuationAssembler, constructs *SyslogConstructAssembler,
+	job analytics.DeviceRevisionJob,
 ) error {
 	release := control.LockDeviceWrites(job.DeviceID)
 	defer release()
@@ -89,6 +93,16 @@ func processDeviceRevisionJob(
 		}
 		continuations.Assemble(events)
 		if err := client.InsertSyslogFactsBatch(ctx, events); err != nil {
+			return err
+		}
+		constructRows, memberRows, fragmentLinks := constructs.Assemble(events)
+		if err := client.InsertSyslogFragmentLinksBatch(ctx, fragmentLinks); err != nil {
+			return err
+		}
+		if err := client.InsertSyslogConstructsBatch(ctx, constructRows); err != nil {
+			return err
+		}
+		if err := client.InsertSyslogConstructMembersBatch(ctx, memberRows); err != nil {
 			return err
 		}
 		if err := client.ProcessSyslogShadowDerivedBatch(ctx, events); err != nil {
@@ -197,6 +211,7 @@ func RunHistoricalSyslogReprocessOnce(
 	var processed uint64
 	configs := make(map[uuid.UUID]deviceReprocessConfig)
 	continuations := NewContinuationAssembler()
+	constructs := NewSyslogConstructAssembler()
 	for ctx.Err() == nil {
 		rows, err := client.NextSyslogReplayBatch(ctx, analytics.SyslogParserVersion, 500)
 		if err != nil {
@@ -229,13 +244,25 @@ func RunHistoricalSyslogReprocessOnce(
 				SourceIP: row.SourceIP.String(), SourcePort: row.SourcePort, Payload: row.Payload,
 				Timezone: config.timezone, TimezoneRevision: config.revision,
 			}, location)
-			if err := client.ProcessSyslogDerived(ctx, event); err != nil {
-				return err
-			}
 			events = append(events, event)
 		}
 		continuations.Assemble(events)
+		for _, event := range events {
+			if err := client.ProcessSyslogDerived(ctx, event); err != nil {
+				return err
+			}
+		}
 		if err := client.InsertSyslogInterpretationsBatch(ctx, events); err != nil {
+			return err
+		}
+		constructRows, memberRows, fragmentLinks := constructs.Assemble(events)
+		if err := client.InsertSyslogFragmentLinksBatch(ctx, fragmentLinks); err != nil {
+			return err
+		}
+		if err := client.InsertSyslogConstructsBatch(ctx, constructRows); err != nil {
+			return err
+		}
+		if err := client.InsertSyslogConstructMembersBatch(ctx, memberRows); err != nil {
 			return err
 		}
 		ledger := append(events, skipped...)

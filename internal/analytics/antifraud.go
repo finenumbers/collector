@@ -911,7 +911,7 @@ func (c *Client) NextSyslogReplayBatch(
 		LEFT JOIN collector.syslog_reprocess_ledger l
 			ON l.event_id=r.event_id AND l.parser_version=?
 		WHERE l.event_id=toUUID('00000000-0000-0000-0000-000000000000')
-		GROUP BY r.event_id ORDER BY any(r.received_at) LIMIT ?`, parserVersion, limit)
+		GROUP BY r.event_id ORDER BY any(r.received_at),r.event_id LIMIT ?`, parserVersion, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -457,8 +457,8 @@ func TestParseLastMessageRepeated(t *testing.T) {
 func TestClassifyCDRRotateAndAlarmSideChannels(t *testing.T) {
 	received := time.Date(2026, 7, 24, 12, 33, 50, 0, time.UTC)
 	tests := []struct {
-		payload  string
-		category string
+		payload   string
+		category  string
 		component string
 	}{
 		{
@@ -971,5 +971,41 @@ func TestDottedHexDoesNotInheritRADIUS(t *testing.T) {
 	}
 	if events[1].Attributes["parent_event_id"] != "" {
 		t.Fatalf("dotted hex must not inherit RADIUS parent: %#v", events[1].Attributes)
+	}
+}
+
+func TestConstructHintsAndStableAnchor(t *testing.T) {
+	deviceID := uuid.New()
+	start := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	events := []analytics.SyslogEvent{
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start,
+			SourceIP: "5.227.161.181",
+			Payload: []byte(
+				`<14> <smg1016m>  10:00:00.000000  [INFO] [C0A001] SIP. TX. Callref 061d. INVITE sip:74951234567@example.test SIP/2.0`,
+			),
+		}),
+		ParseSyslog(RawSyslog{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: start.Add(time.Millisecond),
+			SourceIP: "5.227.161.181",
+			Payload:  []byte(`<14> <smg1016m>  10:00:00.001000  [INFO] a=sendrecv`),
+		}),
+	}
+	if events[0].Attributes["direction"] != "TX" ||
+		events[0].Attributes["message_name"] != "INVITE" ||
+		events[0].Attributes["callref"] != "061d" ||
+		events[0].Attributes["protocol_message_kind"] != "sip_exchange" {
+		t.Fatalf("construct hints: %#v", events[0].Attributes)
+	}
+	NewContinuationAssembler().Assemble(events)
+	if events[0].Attributes["construct_anchor_event_id"] != events[0].EventID.String() {
+		t.Fatalf("parent anchor: %#v", events[0].Attributes)
+	}
+	if events[1].Attributes["construct_anchor_event_id"] != events[0].EventID.String() {
+		t.Fatalf("fragment anchor: %#v", events[1].Attributes)
+	}
+	if events[1].Attributes["fragment_link_method"] != "sip_burst" ||
+		events[1].Attributes["fragment_link_confidence"] != "0.7" {
+		t.Fatalf("fragment provenance: %#v", events[1].Attributes)
 	}
 }

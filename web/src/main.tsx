@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Activity, AlertTriangle, CirclePlus, Database, FileClock,
@@ -8,6 +8,9 @@ import './styles.css'
 import {
   canManageUsers, normalizeFirmwareScheme, purgeConfirmationReady, purgeRetryLabel,
 } from './settings'
+import {
+  constructMemberParameters, isTechnicalConstructMember, orderedConstructMembers,
+} from './syslogConstructs'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
 type ManagedUser = User & { active: boolean; createdAt: string }
@@ -48,6 +51,25 @@ type EventRow = {
   attributes: Record<string, string>
 }
 type TimelineRow = EventRow & { method: string; confidence: number }
+type SyslogConstruct = {
+  constructId: string
+  startedAt: string
+  endedAt?: string
+  constructType: string
+  category: string
+  direction?: string
+  title: string
+  summary: string
+  callContext?: string
+  messageName?: string
+  completeness: string
+  groupingMethod: string
+  groupingReason?: string
+  confidence?: number
+  memberCount: number
+  hiddenCount: number
+  attributes: Record<string, string>
+}
 type DeviceStats = {
   calls24h: number; failedCalls24h: number; averageTalkMs: number
   alarms24h: number; radius24h: number; unknown24h: number
@@ -99,6 +121,10 @@ type SyslogDiagnostics = {
   missingCdrInterpretations: number
   radiusRawFragments: number
   lifecycleDerived: number
+  syslogConstructs: number
+  constructMembers: number
+  constructOrphans: number
+  heuristicConstructs: number
   correlationTotal: number
   correlationOrphan: number
   ingestRevision: number
@@ -182,11 +208,13 @@ type AntifraudRow = {
   cdrSetupLocal: string
 }
 type PageCursor = { before: string; beforeId: string }
-type PageResponse = {
-  items: Array<EventRow | CallRow | AntifraudRow>
+type PageResponse<T> = {
+  items: T[]
   hasMore: boolean
   nextCursor?: PageCursor
 }
+type DataRow = EventRow | CallRow | AntifraudRow | SyslogConstruct
+type SyslogViewMode = 'constructs' | 'raw'
 type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
   'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
   'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown'
@@ -452,11 +480,20 @@ function DeviceNavigation({ active, onChange }: { active: Dataset; onChange: (va
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
-  const [rows, setRows] = useState<Array<EventRow | CallRow | AntifraudRow>>([])
+  const [viewMode, setViewMode] = useState<SyslogViewMode>(
+    dataset === 'calls' || dataset === 'antifraud' ? 'raw' : 'constructs',
+  )
+  const [constructKind, setConstructKind] = useState('')
+  const [constructDirection, setConstructDirection] = useState('')
+  const [messageFilter, setMessageFilter] = useState('')
+  const [contextFilter, setContextFilter] = useState('')
+  const [problemsOnly, setProblemsOnly] = useState(false)
+  const [rows, setRows] = useState<DataRow[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
   const [selectedAntifraud, setSelectedAntifraud] = useState<AntifraudRow | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
+  const [selectedConstruct, setSelectedConstruct] = useState<SyslogConstruct | null>(null)
   const [stats, setStats] = useState<DeviceStats | null>(null)
   const [diagnostics, setDiagnostics] = useState<SyslogDiagnostics | null>(null)
   const [cursor, setCursor] = useState<PageCursor | null>(null)
@@ -467,6 +504,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const generationRef = useRef(0)
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const category = dataset === 'syslog_all' ? 'all' : dataset
+  const canUseConstructs = dataset !== 'calls' && dataset !== 'antifraud'
+  const usesConstructs = canUseConstructs && viewMode === 'constructs'
   const exportDataset = dataset === 'calls' ? 'calls' : dataset === 'antifraud' ? 'antifraud' : 'events'
   const exportUrl = `/api/devices/${device.id}/export.xlsx?dataset=${exportDataset}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}`
   const pagePath = useCallback((pageCursor?: PageCursor) => {
@@ -474,11 +513,19 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
       : dataset === 'antifraud'
         ? `/devices/${device.id}/antifraud?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
-        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+        : usesConstructs
+          ? `/devices/${device.id}/syslog-constructs?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}` +
+            `&kind=${encodeURIComponent(constructKind)}&direction=${encodeURIComponent(constructDirection)}` +
+            `&message_name=${encodeURIComponent(messageFilter)}&call_context=${encodeURIComponent(contextFilter)}` +
+            `&problems=${problemsOnly}`
+          : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [category, dataset, device.id, query])
+  }, [
+    category, constructDirection, constructKind, contextFilter, dataset, device.id,
+    messageFilter, problemsOnly, query, usesConstructs,
+  ])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -497,9 +544,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setRows([])
       setCursor(null)
       setHasMore(false)
+      setSelectedConstruct(null)
+      setSelectedEvent(null)
       if (tableShellRef.current) tableShellRef.current.scrollTop = 0
       setBusy(true)
-      api<PageResponse>(pagePath())
+      api<PageResponse<DataRow>>(pagePath())
         .then(({ items, hasMore: more, nextCursor }) => {
           if (!active || generation !== generationRef.current) return
           setRows(items || [])
@@ -519,7 +568,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     if (!cursor || !hasMore || loadingRef.current) return
     const generation = generationRef.current
     setBusy(true)
-    api<PageResponse>(pagePath(cursor))
+    api<PageResponse<DataRow>>(pagePath(cursor))
       .then(({ items, hasMore: more, nextCursor }) => {
         if (generation !== generationRef.current) return
         setRows((current) => [...current, ...(items || [])])
@@ -565,13 +614,46 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>}
     {admin && diagnostics && <SyslogDiagnosticPanel value={diagnostics} />}
     <div className="toolbar">
-      <div><h3>{title}</h3><span>{rows.length} записей в текущей выборке</span></div>
+      <div><h3>{title}</h3><span>{rows.length} {usesConstructs ? 'конструкций' : 'записей'} в текущей выборке</span></div>
       <div className="toolbar-actions">
+        {canUseConstructs && <div className="view-toggle" role="group" aria-label="Режим просмотра">
+          <button type="button" className={viewMode === 'constructs' ? 'active' : ''}
+            aria-pressed={viewMode === 'constructs'} onClick={() => setViewMode('constructs')}>
+            Конструкты
+          </button>
+          <button type="button" className={viewMode === 'raw' ? 'active' : ''}
+            aria-pressed={viewMode === 'raw'} onClick={() => setViewMode('raw')}>
+            Raw события
+          </button>
+        </div>}
         <div className="search"><Search size={14} /><input placeholder="Поиск по данным…"
           value={query} onChange={(event) => setQuery(event.target.value)} /></div>
         <button className="secondary" onClick={() => { window.location.href = exportUrl }}>Экспорт XLSX</button>
       </div>
     </div>
+    {usesConstructs && <div className="construct-filters" aria-label="Фильтры конструкций">
+      <select value={constructKind} onChange={(event) => setConstructKind(event.target.value)}
+        aria-label="Протокол">
+        <option value="">Все протоколы</option>
+        <option value="sip_exchange">SIP / SDP</option>
+        <option value="isup_pdu">ISUP</option>
+        <option value="q931_message">Q.931</option>
+        <option value="radius_packet">RADIUS</option>
+        <option value="single_event">Одиночные события</option>
+      </select>
+      <select value={constructDirection}
+        onChange={(event) => setConstructDirection(event.target.value)} aria-label="Направление">
+        <option value="">TX и RX</option>
+        <option value="TX">TX</option>
+        <option value="RX">RX</option>
+      </select>
+      <input value={messageFilter} onChange={(event) => setMessageFilter(event.target.value)}
+        placeholder="Message name / status" aria-label="Имя сообщения" />
+      <input value={contextFilter} onChange={(event) => setContextFilter(event.target.value)}
+        placeholder="Call context" aria-label="Контекст вызова" />
+      <label><input type="checkbox" checked={problemsOnly}
+        onChange={(event) => setProblemsOnly(event.target.checked)} /> Только проблемы</label>
+    </div>}
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
       {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]}
@@ -579,8 +661,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedAntifraud} />
-          : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
-            dataset={dataset} onSelect={setSelectedEvent} />}
+          : usesConstructs
+            ? <SyslogConstructList rows={rows as SyslogConstruct[]}
+              timezone={activeDeviceTimezone(device)} onSelect={setSelectedConstruct} />
+            : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
+              onSelect={setSelectedEvent} />}
       {showRadiusEmpty && <RadiusEmptyState />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
@@ -592,6 +677,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       onClose={() => setSelectedAntifraud(null)} />}
     {selectedEvent && <EventDrawer event={selectedEvent} timezone={activeDeviceTimezone(device)}
       onClose={() => setSelectedEvent(null)} />}
+    {selectedConstruct && <ConstructDrawer key={selectedConstruct.constructId}
+      device={device} initial={selectedConstruct}
+      timezone={activeDeviceTimezone(device)} onClose={() => setSelectedConstruct(null)} />}
   </section>
 }
 
@@ -649,6 +737,8 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>Replay CDR: <strong>{formatCount(value.cdrReplayProcessed)} / {formatCount(value.cdrReplayTotal)}</strong></span>
       <span>CDR без time fact: <strong>{formatCount(value.missingCdrInterpretations)}</strong></span>
       <span>RADIUS raw / lifecycle: <strong>{formatCount(value.radiusRawFragments)} / {formatCount(value.lifecycleDerived)}</strong></span>
+      <span>Syslog constructs / members: <strong>{formatCount(value.syslogConstructs)} / {formatCount(value.constructMembers)}</strong></span>
+      <span>Construct heuristic / orphan: <strong>{formatCount(value.heuristicConstructs)} / {formatCount(value.constructOrphans)}</strong></span>
       <span>Последний raw / fact: <strong>{formatTime(value.latestRawAt, 'UTC')} / {formatTime(value.latestFactAt, 'UTC')}</strong></span>
       <span>Последний lifecycle / link: <strong>{formatTime(value.latestLifecycleAt, 'UTC')} / {formatTime(value.latestAssignmentAt, 'UTC')}</strong></span>
       <span>Dirty buckets: <strong>{formatCount(value.pendingDirtyBuckets)} · oldest {formatTime(value.oldestDirtyAt, 'UTC')}</strong></span>
@@ -885,99 +975,164 @@ function groupCallTimeline(items: TimelineRow[]) {
     .filter((group) => group.items.length > 0)
 }
 
-const threadedDatasets = new Set<Dataset>([
-  'syslog_all', 'call_trace', 'radius', 'sip', 'isup', 'ip_connections', 'q931',
-])
-
-function isTechnicalFragment(row: EventRow): boolean {
-  const attrs = row.attributes || {}
-  if (attrs.empty_body === 'true') return true
-  const kind = attrs.fragment_kind || ''
-  return kind === 'hex' || kind === 'dotted_hex' || kind === 'digest' || kind === 'empty'
+function SyslogConstructList({ rows, timezone, onSelect }: {
+  rows: SyslogConstruct[]
+  timezone: string
+  onSelect: (row: SyslogConstruct) => void
+}) {
+  return <div className="construct-list">
+    {rows.map((row) => <button className="construct-row" type="button"
+      key={row.constructId} onClick={() => onSelect(row)}>
+      <time className="mono">{formatTime(row.startedAt, timezone)}</time>
+      <span className={`construct-direction ${(row.direction || '').toLowerCase()}`}>
+        {formatDirection(row.direction)}
+      </span>
+      <SyslogConstructSummary row={row} />
+      <span className="construct-meta">
+        <span>{row.memberCount.toLocaleString('ru-RU')} событий</span>
+        <span className={`parse-status ${row.completeness}`}>{row.completeness || '—'}</span>
+        <span className={`grouping-indicator ${isExactGrouping(row.groupingMethod) ? 'exact' : 'heuristic'}`}>
+          {isExactGrouping(row.groupingMethod) ? 'точная связь' : 'эвристика'}
+        </span>
+      </span>
+    </button>)}
+    {rows.length === 0 && <div className="table-empty">
+      <strong>Конструкты не найдены</strong>
+      <p>Измените поисковый запрос или проверьте наличие Syslog в этом разделе.</p>
+    </div>}
+  </div>
 }
 
-function eventThreadKey(row: EventRow): string {
-  const ctx = row.attributes?.call_context
-  if (ctx) return `call:${ctx}`
-  const parent = row.attributes?.parent_event_id
-  if (parent) return `parent:${parent}`
-  return `event:${row.eventId}`
+function SyslogConstructSummary({ row }: { row: SyslogConstruct }) {
+  return <span className="construct-summary">
+    <span className="construct-heading">
+      <span className="tag">{row.category || row.constructType}</span>
+      <strong>{row.title || row.messageName || row.constructType}</strong>
+      {row.messageName && row.messageName !== row.title &&
+        <span className="mono">{row.messageName}</span>}
+    </span>
+    <span className="construct-description">{row.summary || 'Без описания'}</span>
+    {row.callContext && <span className="construct-context">
+      Call context: <span className="mono">{row.callContext}</span>
+    </span>}
+  </span>
 }
 
-function buildEventThreads(rows: EventRow[], hideTech: boolean) {
-  const order: string[] = []
-  const buckets = new Map<string, EventRow[]>()
-  for (const row of rows) {
-    if (hideTech && isTechnicalFragment(row)) continue
-    const key = eventThreadKey(row)
-    if (!buckets.has(key)) {
-      order.push(key)
-      buckets.set(key, [])
-    }
-    buckets.get(key)!.push(row)
-  }
-  return order.map((id) => {
-    const items = buckets.get(id) || []
-    const summary = items.find((item) => item.attributes?.trace_continuation !== 'true') || items[0]
-    const fragments = items.filter((item) => item.eventId !== summary.eventId)
-    return { id, summary, fragments, total: items.length }
-  })
+function ConstructDrawer({ device, initial, timezone, onClose }: {
+  device: Device
+  initial: SyslogConstruct
+  timezone: string
+  onClose: () => void
+}) {
+  const [detail, setDetail] = useState<{ construct: SyslogConstruct; members: EventRow[] } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [showTechnical, setShowTechnical] = useState(false)
+  useEffect(() => {
+    let active = true
+    api<{ construct: SyslogConstruct; members: EventRow[] }>(
+      `/devices/${device.id}/syslog-constructs/${initial.constructId}`,
+    ).then((response) => {
+      if (active) setDetail(response)
+    }).catch((reason) => {
+      if (active) setError(reason instanceof Error ? reason.message : 'Ошибка загрузки конструкта')
+    }).finally(() => {
+      if (active) setLoading(false)
+    })
+    return () => { active = false }
+  }, [device.id, initial.constructId])
+  const construct = detail?.construct || initial
+  const members = useMemo(() => orderedConstructMembers(detail?.members || []), [detail?.members])
+  const technicalCount = members.filter(isTechnicalConstructMember).length
+  const visibleMembers = showTechnical
+    ? members
+    : members.filter((member) => !isTechnicalConstructMember(member))
+  const reportedHiddenCount = Math.max(technicalCount, construct.hiddenCount || 0)
+
+  return <div className="drawer construct-drawer">
+    <div className="drawer-header"><div><h3>{construct.title || construct.messageName || 'Syslog-конструкт'}</h3>
+      <span className="mono">{construct.constructId}</span></div>
+      <button type="button" aria-label="Закрыть" onClick={onClose}>×</button></div>
+    <div className="construct-drawer-summary">
+      <div className="construct-heading">
+        <span className="tag">{construct.category || construct.constructType}</span>
+        <span className={`construct-direction ${(construct.direction || '').toLowerCase()}`}>
+          {formatDirection(construct.direction)}
+        </span>
+        <span className={`grouping-indicator ${isExactGrouping(construct.groupingMethod) ? 'exact' : 'heuristic'}`}>
+          {isExactGrouping(construct.groupingMethod) ? 'точная связь' : 'эвристика'}
+        </span>
+      </div>
+      <p>{construct.summary || 'Без описания'}</p>
+    </div>
+    <div className="call-facts">
+      <span><small>Начало</small><strong>{formatTime(construct.startedAt, timezone)}</strong></span>
+      <span><small>Окончание</small><strong>{formatTime(construct.endedAt, timezone)}</strong></span>
+      <span><small>Call context</small><strong className="mono">{construct.callContext || '—'}</strong></span>
+      <span><small>Message name</small><strong className="mono">{construct.messageName || '—'}</strong></span>
+      <span><small>Полнота</small><strong>{construct.completeness || '—'}</strong></span>
+      <span><small>Группировка</small><strong>{construct.groupingMethod || '—'}</strong></span>
+      <span><small>Причина</small><strong>{construct.groupingReason || '—'}</strong></span>
+      <span><small>Confidence</small><strong>
+        {construct.confidence == null ? '—' : construct.confidence.toFixed(2)}
+      </strong></span>
+    </div>
+    <div className="construct-members-heading">
+      <h4>События конструкта · {visibleMembers.length}/{members.length || construct.memberCount}</h4>
+      {reportedHiddenCount > 0 && <button type="button" className="secondary"
+        aria-pressed={showTechnical} onClick={() => setShowTechnical((current) => !current)}>
+        {showTechnical ? 'Скрыть технические' : `Показать технические (${reportedHiddenCount})`}
+      </button>}
+    </div>
+    {loading && <div className="drawer-state">Загрузка событий…</div>}
+    {error && <div className="form-error drawer-state">{error}</div>}
+    {!loading && !error && visibleMembers.length === 0 &&
+      <div className="drawer-state">Читаемые события отсутствуют.</div>}
+    <div className="construct-members">
+      {visibleMembers.map((member) => <ConstructMember key={member.eventId}
+        member={member} timezone={timezone} />)}
+    </div>
+  </div>
 }
 
-function EventsTable({ rows, timezone, dataset, onSelect }: {
+function ConstructMember({ member, timezone }: { member: EventRow; timezone: string }) {
+  const parameters = constructMemberParameters(member)
+  return <article className={`construct-member ${isTechnicalConstructMember(member) ? 'technical' : ''}`}>
+    <div className="construct-member-head">
+      <time className="mono">{formatTime(member.eventTime || member.receivedAt, timezone)}</time>
+      <span className="tag">{member.category}</span>
+      <strong>{member.component || 'SMG'}</strong>
+      {isTechnicalConstructMember(member) && <span className="technical-label">technical</span>}
+    </div>
+    <pre className="construct-member-message">{member.message || '—'}</pre>
+    {parameters.map(([name, value]) => <div className="construct-parameter" key={name}>
+      <small>{name}</small><pre>{value}</pre>
+    </div>)}
+    <details className="raw-drilldown">
+      <summary>Raw payload</summary>
+      <pre className="raw-payload">{member.rawPayload || '—'}</pre>
+    </details>
+  </article>
+}
+
+function isExactGrouping(method?: string) {
+  return (method || '').toLowerCase() !== 'heuristic'
+}
+
+function formatDirection(direction?: string) {
+  const normalized = (direction || '').toUpperCase()
+  return normalized === 'TX' || normalized === 'RX' ? normalized : '—'
+}
+
+function EventsTable({ rows, timezone, onSelect }: {
   rows: EventRow[]
   timezone: string
-  dataset: Dataset
   onSelect: (row: EventRow) => void
 }) {
-  const threaded = threadedDatasets.has(dataset)
-  const [hideTech, setHideTech] = useState(true)
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
-  const threads = useMemo(
-    () => (threaded ? buildEventThreads(rows, hideTech) : null),
-    [hideTech, rows, threaded],
-  )
-  const hiddenTech = threaded ? rows.filter(isTechnicalFragment).length : 0
-  return <>
-    {threaded && <div className="thread-toolbar">
-      <label className="thread-filter">
-        <input type="checkbox" checked={hideTech} onChange={(e) => setHideTech(e.target.checked)} />
-        Скрыть технические фрагменты
-        {hiddenTech > 0 ? ` (${hiddenTech})` : ''}
-      </label>
-      <span className="muted">{threads?.length || 0} блоков · {rows.length} строк</span>
-    </div>}
-    <table><thead><tr><th>Получено</th><th>Раздел</th><th>Компонент</th>
+  return <table><thead><tr><th>Получено</th><th>Раздел</th><th>Компонент</th>
       <th>Сообщение</th><th>Статус</th><th>Атрибуты</th></tr></thead>
-      <tbody>
-        {!threaded && rows.map((row) => <EventTableRow key={row.eventId} row={row}
-          timezone={timezone} onSelect={onSelect} />)}
-        {threaded && threads?.map((thread) => {
-          const open = expanded[thread.id] ?? false
-          const hasChildren = thread.fragments.length > 0
-          return <Fragment key={thread.id}>
-            <tr className={hasChildren ? 'thread-summary' : undefined}
-              onClick={() => onSelect(thread.summary)}>
-              <td className="mono">{formatTime(thread.summary.eventTime || thread.summary.receivedAt, timezone)}</td>
-              <td><span className="tag">{thread.summary.category}</span></td>
-              <td className="mono">{thread.summary.component || '—'}</td>
-              <td className="message-cell">
-                {hasChildren && <button type="button" className="thread-toggle"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    setExpanded((current) => ({ ...current, [thread.id]: !open }))
-                  }}>{open ? '▾' : '▸'} {thread.total}</button>}
-                <span>{thread.summary.message || '—'}</span>
-              </td>
-              <td><span className={`parse-status ${thread.summary.parseStatus}`}>{thread.summary.parseStatus}</span></td>
-              <td className="mono">{formatEventAttrs(thread.summary)}</td>
-            </tr>
-            {open && thread.fragments.map((row) => <EventTableRow key={row.eventId} row={row}
-              timezone={timezone} onSelect={onSelect} nested />)}
-          </Fragment>
-        })}
-      </tbody></table>
-  </>
+    <tbody>{rows.map((row) => <EventTableRow key={row.eventId} row={row}
+      timezone={timezone} onSelect={onSelect} />)}</tbody></table>
 }
 
 function formatEventAttrs(row: EventRow) {

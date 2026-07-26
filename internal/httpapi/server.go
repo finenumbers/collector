@@ -75,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
 			private.Get("/devices/{deviceID}/events", s.listEvents)
+			private.Get("/devices/{deviceID}/syslog-constructs", s.listSyslogConstructs)
+			private.Get("/devices/{deviceID}/syslog-constructs/{constructID}", s.getSyslogConstruct)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
 			private.Get("/devices/{deviceID}/antifraud", s.listAntifraud)
 			private.Get("/devices/{deviceID}/stats", s.deviceStats)
@@ -524,6 +526,68 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
 	})
+}
+
+func (s *Server) listSyslogConstructs(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
+	var cursor *analytics.SyslogConstructCursor
+	before := request.URL.Query().Get("before")
+	beforeID := request.URL.Query().Get("before_id")
+	if before != "" || beforeID != "" {
+		startedAt, timeErr := time.Parse(time.RFC3339Nano, before)
+		constructID, idErr := uuid.Parse(beforeID)
+		if timeErr != nil || idErr != nil {
+			writeError(writer, http.StatusBadRequest, "invalid Syslog construct cursor")
+			return
+		}
+		cursor = &analytics.SyslogConstructCursor{
+			StartedAt: startedAt, ConstructID: constructID,
+		}
+	}
+	page, err := s.Analytics.ListSyslogConstructsFilteredPage(
+		request.Context(), deviceID, analytics.SyslogConstructFilters{
+			Category:     request.URL.Query().Get("category"),
+			Search:       request.URL.Query().Get("q"),
+			Kind:         request.URL.Query().Get("kind"),
+			Direction:    strings.ToUpper(request.URL.Query().Get("direction")),
+			MessageName:  request.URL.Query().Get("message_name"),
+			CallContext:  request.URL.Query().Get("call_context"),
+			ProblemsOnly: request.URL.Query().Get("problems") == "true",
+		}, limit, cursor,
+	)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to query Syslog constructs")
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
+}
+
+func (s *Server) getSyslogConstruct(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	constructID, err := uuid.Parse(chi.URLParam(request, "constructID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid Syslog construct id")
+		return
+	}
+	detail, err := s.Analytics.GetSyslogConstruct(
+		request.Context(), deviceID, constructID,
+	)
+	if errors.Is(err, analytics.ErrSyslogConstructNotFound) {
+		writeError(writer, http.StatusNotFound, "Syslog construct not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to query Syslog construct")
+		return
+	}
+	writeJSON(writer, http.StatusOK, detail)
 }
 
 func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {

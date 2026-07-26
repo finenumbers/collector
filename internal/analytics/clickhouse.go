@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const SyslogParserVersion = "smg-3.410-v12"
+const SyslogParserVersion = "smg-3.410-v13"
 
 type Client struct {
 	Conn            clickhouse.Conn
@@ -126,6 +126,10 @@ type SyslogDiagnostics struct {
 	MissingCDRTimes      uint64               `json:"missingCdrInterpretations"`
 	RadiusRawFragments   uint64               `json:"radiusRawFragments"`
 	LifecycleDerived     uint64               `json:"lifecycleDerived"`
+	SyslogConstructs     uint64               `json:"syslogConstructs"`
+	ConstructMembers     uint64               `json:"constructMembers"`
+	ConstructOrphans     uint64               `json:"constructOrphans"`
+	HeuristicConstructs  uint64               `json:"heuristicConstructs"`
 	CorrelationTotal     uint64               `json:"correlationTotal"`
 	CorrelationOrphan    uint64               `json:"correlationOrphan"`
 	LatestRawAt          time.Time            `json:"latestRawAt"`

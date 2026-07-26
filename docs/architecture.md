@@ -50,7 +50,7 @@ UDP Syslog не имеет acknowledgement: packet может потерятьс
 
 CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
 
-Parser version `smg-3.410-v12` разделяет envelope (включая `CONFIG` без wall-clock),
+Parser version `smg-3.410-v13` разделяет envelope (включая `CONFIG` без wall-clock),
 component-first classification и typed attributes, а фрагменты
 (`#`/`##`/bare SDP/ISUP dotted-hex/`SIPT Proc`/AVP/hex/host_ip) связывает с родителем по
 `device_id + call_context` (RADIUS/SIP/ISUP burst — отдельно). Правила Syslog общие для схем
@@ -58,6 +58,13 @@ component-first classification и typed attributes, а фрагменты
 пакетно строит `syslog_facts`, `cdr_time_facts`, `radius_fragments` и
 `antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и
 остаётся read model до проверки counts и короткой catch-up фазы.
+
+Поверх неизменяемых raw datagram'ов `readable-syslog-v1` строит отдельный versioned read
+model: `syslog_fragment_links` сохраняет provenance связи, `syslog_constructs` — summary
+протокольного message, а `syslog_construct_members` — его ordered raw members. Exact
+идентификаторы и parent links помечаются deterministic; временные burst-связи никогда не
+пересекают device/source/call context и явно публикуют confidence. API пагинирует по
+`(started_at, construct_id)`, поэтому construct не разрезается границей страницы.
 
 Eltex/RFC3164 и CDR wall clock конкретного SMG интерпретируются в одной активной IANA
 timezone этого устройства. Оба потока переводятся во внутренний canonical UTC instant;

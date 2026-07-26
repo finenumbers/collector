@@ -36,34 +36,39 @@ var (
 	callContextAny   = regexp.MustCompile(`\[(C[A-Za-z0-9_-]+)\]`)
 	componentPattern = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_./ -]{0,127}?)(?::|\.)\s*(.*)$`)
 	// After a false component split on HH:MM:SS, remainder looks like "MM:SS ..." / "MM:SS.ffffff ...".
-	componentTimeRest  = regexp.MustCompile(`^\d{2}:\d{2}(?:\.\d{1,6})?(?:\s|$)`)
-	portSIPTPattern    = regexp.MustCompile(`(?i)^(Port\s+SIPT)\s*:\s*(.*)$`)
-	siptBracketPattern = regexp.MustCompile(`(?i)^(SIPT?\[[0-9A-Fa-f]+\])\.\s*(.*)$`)
-	radiusRejectedPat  = regexp.MustCompile(`(?i)^RADIUS\s+server\s+rejected:\s*(.*)$`)
-	connComponentPat   = regexp.MustCompile(`(?i)^(Conn\[[0-9A-Fa-f]+\])\s*:\s*(.*)$`)
-	siptInMessage      = regexp.MustCompile(`(?i)\bSIPT?\[[0-9A-Fa-f]+\]`)
-	repeatedMessage    = regexp.MustCompile(`(?i)^last message repeated (\d+) times$`)
-	radiusPair         = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
-	radiusSession      = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
-	radiusVSAPair      = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
-	radiusPacket       = regexp.MustCompile(`(?i)\b(Access-Request|Access-Accept|Access-Reject|Accounting-Request|Accounting-Response)\b`)
-	radiusAttribute    = regexp.MustCompile(`(?i)^(?:User-Name|User-Password|Calling-Station-Id|Called-Station-Id|Acct-Session-Id|NAS-Port|NAS-Port-Type|Framed-IP-Address|Event-Timestamp|Acct-Delay-Time|Acct-Session-Time|Cisco-AVPair|Eltex-AVPair|h323-[A-Za-z0-9-]+)\s*(?:\([0-9]+\))?\s*[=:]`)
-	avpLinePattern     = regexp.MustCompile(`(?i)^[A-Za-z][A-Za-z0-9-]+\s*=\s*`)
-	radiusRequestID    = regexp.MustCompile(`(?i)\b(?:Request|Packet)\s+ID\s*\[?([0-9]{1,3})\]?`)
-	radiusServer       = regexp.MustCompile(`(?i)\b(?:server|address)\s*[=:]?\s*((?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?)`)
-	radiusLatency      = regexp.MustCompile(`(?i)\b(?:in|latency\s*[=:]?)\s*([0-9]+)\s*ms\b`)
-	radiusRetry        = regexp.MustCompile(`(?i)\bretr(?:y|ies)\s*[=:]?\s*([0-9]+)\b`)
-	q850CausePattern   = regexp.MustCompile(`(?i)\b(?:Q\.?850|disconnect-cause|release-cause)\s*[=:]\s*([0-9]{1,3})`)
-	sipCallIDPattern   = regexp.MustCompile(`(?i)\bCall-ID\s*[=:]\s*["']?([^'"\s,;]+)`)
-	globalCallPattern  = regexp.MustCompile(`(?i)\b(?:Global[- ]Callref|GCR)\s*[=:]\s*["']?([^'"\s,;]+)`)
-	systemAppPattern   = regexp.MustCompile(`(?i)\b(?:webapp|webspp)(?:\[[0-9]+\])?:\s*(?:WEBS|SEC)\s*:`)
-	systemBodyPattern  = regexp.MustCompile(`(?i)^\s*(?:WEBS|SEC)\s*:`)
-	alarmPattern       = regexp.MustCompile(`(?i)(?:^|[\s:;,])ALARMS?(?:$|[\s:;,])|АВАР`)
-	callPattern        = regexp.MustCompile(`(?i)(?:^|[\s:;,])CALL(?:$|[\s:;,])|(?:^|[\s:;,])PORT\s+[0-9]`)
-	traceContinuation  = regexp.MustCompile(`(?i)^#+\s*(requestID|trunkID|Keep\s+alive\s+type|cause|connected\s+number|number)\b\s*[:=]?\s*['"]?([^'"]*)`)
-	codecLinePattern   = regexp.MustCompile(`(?i)^a\[[0-9]+\]:`)
-	hexOnlyPattern     = regexp.MustCompile(`(?i)^[0-9a-f]{8,}$`)
-	digestLabelPat     = regexp.MustCompile(`(?i)^(Reply|Calculated|Calculating)\s+digest\b`)
+	componentTimeRest   = regexp.MustCompile(`^\d{2}:\d{2}(?:\.\d{1,6})?(?:\s|$)`)
+	portSIPTPattern     = regexp.MustCompile(`(?i)^(Port\s+SIPT)\s*:\s*(.*)$`)
+	siptBracketPattern  = regexp.MustCompile(`(?i)^(SIPT?\[[0-9A-Fa-f]+\])\.\s*(.*)$`)
+	radiusRejectedPat   = regexp.MustCompile(`(?i)^RADIUS\s+server\s+rejected:\s*(.*)$`)
+	connComponentPat    = regexp.MustCompile(`(?i)^(Conn\[[0-9A-Fa-f]+\])\s*:\s*(.*)$`)
+	siptInMessage       = regexp.MustCompile(`(?i)\bSIPT?\[[0-9A-Fa-f]+\]`)
+	repeatedMessage     = regexp.MustCompile(`(?i)^last message repeated (\d+) times$`)
+	radiusPair          = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9-]{1,63})\s*(?:\(\d+\))?\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|([^,;\s]+))`)
+	radiusSession       = regexp.MustCompile(`(?i)Acct-Session-Id\s*(?:\(\d+\))?\s*[=:]\s*["']([^"']+)["']`)
+	radiusVSAPair       = regexp.MustCompile(`(?i)\b(xpgk-[a-z0-9-]+|in-trunkgroup-label|out-trunkgroup-label|h323-remote-id|h323-redirect-number|numplan)=([^,'"\s]+)`)
+	radiusPacket        = regexp.MustCompile(`(?i)\b(Access-Request|Access-Accept|Access-Reject|Accounting-Request|Accounting-Response)\b`)
+	radiusAttribute     = regexp.MustCompile(`(?i)^(?:User-Name|User-Password|Calling-Station-Id|Called-Station-Id|Acct-Session-Id|NAS-Port|NAS-Port-Type|Framed-IP-Address|Event-Timestamp|Acct-Delay-Time|Acct-Session-Time|Cisco-AVPair|Eltex-AVPair|h323-[A-Za-z0-9-]+)\s*(?:\([0-9]+\))?\s*[=:]`)
+	avpLinePattern      = regexp.MustCompile(`(?i)^[A-Za-z][A-Za-z0-9-]+\s*=\s*`)
+	radiusRequestID     = regexp.MustCompile(`(?i)\b(?:Request|Packet)\s+ID\s*\[?([0-9]{1,3})\]?`)
+	radiusServer        = regexp.MustCompile(`(?i)\b(?:server|address)\s*[=:]?\s*((?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?)`)
+	radiusLatency       = regexp.MustCompile(`(?i)\b(?:in|latency\s*[=:]?)\s*([0-9]+)\s*ms\b`)
+	radiusRetry         = regexp.MustCompile(`(?i)\bretr(?:y|ies)\s*[=:]?\s*([0-9]+)\b`)
+	q850CausePattern    = regexp.MustCompile(`(?i)\b(?:Q\.?850|disconnect-cause|release-cause)\s*[=:]\s*([0-9]{1,3})`)
+	sipCallIDPattern    = regexp.MustCompile(`(?i)\bCall-ID\s*[=:]\s*["']?([^'"\s,;]+)`)
+	globalCallPattern   = regexp.MustCompile(`(?i)\b(?:Global[- ]Callref|GCR)\s*[=:]\s*["']?([^'"\s,;]+)`)
+	localCallrefPattern = regexp.MustCompile(`(?i)\bCallref\s*[=:]?\s*([0-9a-f]+)\b`)
+	traceDirectionPat   = regexp.MustCompile(`(?i)(?:^|[.\s])(TX|RX)(?:[.\s]|$)`)
+	sipMessagePat       = regexp.MustCompile(`(?i)\b(INVITE|ACK|BYE|CANCEL|OPTIONS|REGISTER|UPDATE|PRACK|INFO|REFER|NOTIFY|SUBSCRIBE|MESSAGE|SIP/2\.0\s+[1-6][0-9]{2})\b`)
+	isupMessagePat      = regexp.MustCompile(`(?i)\b(IAM|ACM|ANM|REL|RLC|CPG)-?\b`)
+	q931MessagePat      = regexp.MustCompile(`(?i)\b(SETUP|CALL\s+PROCEEDING|ALERTING|CONNECT|DISCONNECT|RELEASE(?:\s+COMPLETE)?)\b`)
+	systemAppPattern    = regexp.MustCompile(`(?i)\b(?:webapp|webspp)(?:\[[0-9]+\])?:\s*(?:WEBS|SEC)\s*:`)
+	systemBodyPattern   = regexp.MustCompile(`(?i)^\s*(?:WEBS|SEC)\s*:`)
+	alarmPattern        = regexp.MustCompile(`(?i)(?:^|[\s:;,])ALARMS?(?:$|[\s:;,])|АВАР`)
+	callPattern         = regexp.MustCompile(`(?i)(?:^|[\s:;,])CALL(?:$|[\s:;,])|(?:^|[\s:;,])PORT\s+[0-9]`)
+	traceContinuation   = regexp.MustCompile(`(?i)^#+\s*(requestID|trunkID|Keep\s+alive\s+type|cause|connected\s+number|number)\b\s*[:=]?\s*['"]?([^'"]*)`)
+	codecLinePattern    = regexp.MustCompile(`(?i)^a\[[0-9]+\]:`)
+	hexOnlyPattern      = regexp.MustCompile(`(?i)^[0-9a-f]{8,}$`)
+	digestLabelPat      = regexp.MustCompile(`(?i)^(Reply|Calculated|Calculating)\s+digest\b`)
 	// Bare IPv4 lines from SIP HostIPlist / addr-list dumps (often tab-indented).
 	ipv4OnlyPattern = regexp.MustCompile(`^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$`)
 	// 3.410 bare SDP lines (no ## prefix), often after `# SDP len (N): 'v=0`.
@@ -96,6 +101,7 @@ type RawSyslog struct {
 
 type continuationParent struct {
 	eventID     uuid.UUID
+	anchorID    uuid.UUID
 	receivedAt  time.Time
 	sourceIP    string
 	category    string
@@ -144,10 +150,12 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 		callContext := event.Attributes["call_context"]
 		if event.Attributes["trace_continuation"] != "true" {
 			parent := continuationParent{
-				eventID: event.EventID, receivedAt: event.ReceivedAt,
+				eventID: event.EventID, anchorID: event.EventID, receivedAt: event.ReceivedAt,
 				sourceIP: sourceIP, category: event.Category,
 				component: event.Component, callContext: callContext,
 			}
+			event.Attributes["construct_anchor_event_id"] = event.EventID.String()
+			event.Attributes["construct_anchor"] = event.EventID.String()
 			if callContext != "" {
 				key := continuationCallKey(event.DeviceID, callContext)
 				if event.Category == "radius" {
@@ -173,15 +181,18 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 			kind == "sdp" || kind == "typed_hash" || kind == "hash_detail" || kind == "codec"
 		isupBurstFragment := kind == "dotted_hex" || kind == "isup_optional"
 		parent, ok := continuationParent{}, false
+		linkMethod := ""
 		if callContext != "" {
 			key := continuationCallKey(event.DeviceID, callContext)
 			if radiusFragment {
 				parent, ok = a.byCallRadius[key]
+				linkMethod = "call_context_radius"
 				if ok && !parentFresh(parent, event, sourceIP, 2*time.Second) {
 					ok = false
 				}
 			} else {
 				parent, ok = a.byCallSignal[key]
+				linkMethod = "call_context_signal"
 				if ok && !parentFresh(parent, event, sourceIP, 2*time.Second) {
 					ok = false
 				}
@@ -189,24 +200,28 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 		}
 		if !ok && radiusFragment {
 			parent, ok = a.radiusBurst[event.DeviceID]
+			linkMethod = "radius_burst"
 			if !ok || parent.category != "radius" || !parentFresh(parent, event, sourceIP, 2*time.Second) {
 				ok = false
 			}
 		}
 		if !ok && sipBurstFragment {
 			parent, ok = a.sipBurst[event.DeviceID]
+			linkMethod = "sip_burst"
 			if !ok || parent.category != "sip" || !parentFresh(parent, event, sourceIP, 2*time.Second) {
 				ok = false
 			}
 		}
 		if !ok && isupBurstFragment {
 			parent, ok = a.isupBurst[event.DeviceID]
+			linkMethod = "isup_burst"
 			if !ok || parent.category != "isup" || !parentFresh(parent, event, sourceIP, 2*time.Second) {
 				ok = false
 			}
 		}
 		if !ok && callContext == "" && !radiusFragment && !isupBurstFragment {
 			parent, ok = a.radiusBurst[event.DeviceID]
+			linkMethod = "radius_short_burst"
 			if !ok || parent.category != "radius" ||
 				!parentFresh(parent, event, sourceIP, 100*time.Millisecond) {
 				ok = false
@@ -214,6 +229,14 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 		}
 		if ok {
 			event.Attributes["parent_event_id"] = parent.eventID.String()
+			event.Attributes["construct_anchor_event_id"] = parent.anchorID.String()
+			event.Attributes["construct_anchor"] = parent.anchorID.String()
+			event.Attributes["fragment_link_method"] = linkMethod
+			if strings.Contains(linkMethod, "burst") {
+				event.Attributes["fragment_link_confidence"] = "0.7"
+			} else {
+				event.Attributes["fragment_link_confidence"] = "1"
+			}
 			event.Attributes["inherited_category"] = "true"
 			event.Category = parent.category
 			if event.Component == "" {
@@ -224,19 +247,28 @@ func (a *ContinuationAssembler) Assemble(events []analytics.SyslogEvent) {
 		// even when the preceding line was itself a continuation (# SDP len).
 		if event.Category == "sip" {
 			a.sipBurst[event.DeviceID] = continuationParent{
-				eventID: event.EventID, receivedAt: event.ReceivedAt,
+				eventID: event.EventID, anchorID: constructAnchorID(event), receivedAt: event.ReceivedAt,
 				sourceIP: sourceIP, category: event.Category,
 				component: event.Component, callContext: callContext,
 			}
 		}
 		if event.Category == "isup" {
 			a.isupBurst[event.DeviceID] = continuationParent{
-				eventID: event.EventID, receivedAt: event.ReceivedAt,
+				eventID: event.EventID, anchorID: constructAnchorID(event), receivedAt: event.ReceivedAt,
 				sourceIP: sourceIP, category: event.Category,
 				component: event.Component, callContext: callContext,
 			}
 		}
 	}
+}
+
+func constructAnchorID(event *analytics.SyslogEvent) uuid.UUID {
+	if value := event.Attributes["construct_anchor_event_id"]; value != "" {
+		if parsed, err := uuid.Parse(value); err == nil {
+			return parsed
+		}
+	}
+	return event.EventID
 }
 
 type SyslogReceiver struct {
@@ -521,6 +553,7 @@ func RunSyslogWorker(
 	}
 	timeConfigs := make(map[uuid.UUID]cachedTimeConfig)
 	continuations := NewContinuationAssembler()
+	constructs := NewSyslogConstructAssembler()
 	for ctx.Err() == nil {
 		messages, err := subscription.Fetch(250, nats.MaxWait(time.Second))
 		if errors.Is(err, nats.ErrTimeout) {
@@ -594,8 +627,30 @@ func RunSyslogWorker(
 			if len(activeEvents) == 0 {
 				return false
 			}
+			constructRows, memberRows, fragmentLinks := constructs.Assemble(activeEvents)
 			if err := client.InsertSyslogBatch(ctx, activeEvents); err != nil {
 				slog.Error("syslog batch persistence failed", "count", len(activeEvents), "error", err)
+				for _, item := range activeParsed {
+					_ = item.message.NakWithDelay(5 * time.Second)
+				}
+				return true
+			}
+			if err := client.InsertSyslogFragmentLinksBatch(ctx, fragmentLinks); err != nil {
+				slog.Error("Syslog fragment link persistence failed", "error", err)
+				for _, item := range activeParsed {
+					_ = item.message.NakWithDelay(5 * time.Second)
+				}
+				return true
+			}
+			if err := client.InsertSyslogConstructsBatch(ctx, constructRows); err != nil {
+				slog.Error("Syslog construct persistence failed", "error", err)
+				for _, item := range activeParsed {
+					_ = item.message.NakWithDelay(5 * time.Second)
+				}
+				return true
+			}
+			if err := client.InsertSyslogConstructMembersBatch(ctx, memberRows); err != nil {
+				slog.Error("Syslog construct member persistence failed", "error", err)
 				for _, item := range activeParsed {
 					_ = item.message.NakWithDelay(5 * time.Second)
 				}
@@ -747,6 +802,7 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		extractRadiusAttributes(text, &event)
 	}
 	extractProtocolAttributes(text, &event)
+	extractConstructHints(&event)
 	offsetTime := raw.ReceivedAt.In(location)
 	if event.EventTime != nil {
 		offsetTime = event.EventTime.In(location)
@@ -1100,6 +1156,55 @@ func extractProtocolAttributes(text string, event *analytics.SyslogEvent) {
 	}
 	if match := globalCallPattern.FindStringSubmatch(text); match != nil {
 		event.Attributes["global_callref"] = match[1]
+	}
+	if match := localCallrefPattern.FindStringSubmatch(text); match != nil {
+		event.Attributes["callref"] = strings.ToLower(match[1])
+	}
+}
+
+func extractConstructHints(event *analytics.SyslogEvent) {
+	text := strings.Join([]string{event.Component, event.Message}, " ")
+	if match := traceDirectionPat.FindStringSubmatch(text); match != nil {
+		event.Attributes["direction"] = strings.ToUpper(match[1])
+	}
+	var messageName string
+	switch event.Category {
+	case "sip":
+		if match := sipMessagePat.FindStringSubmatch(text); match != nil {
+			messageName = strings.ToUpper(strings.Join(strings.Fields(match[1]), " "))
+		}
+	case "isup":
+		if match := isupMessagePat.FindStringSubmatch(text); match != nil {
+			messageName = strings.ToUpper(match[1])
+		}
+	case "q931":
+		if match := q931MessagePat.FindStringSubmatch(text); match != nil {
+			messageName = strings.ToUpper(strings.Join(strings.Fields(match[1]), " "))
+		}
+	case "radius":
+		messageName = firstNonEmpty(
+			event.Attributes["packet_code"],
+			event.Attributes["request_type"],
+		)
+	}
+	if messageName != "" {
+		event.Attributes["message_name"] = messageName
+	}
+	event.Attributes["protocol_message_kind"] = constructTypeForCategory(event.Category)
+}
+
+func constructTypeForCategory(category string) string {
+	switch category {
+	case "sip":
+		return "sip_exchange"
+	case "isup":
+		return "isup_pdu"
+	case "q931":
+		return "q931_message"
+	case "radius":
+		return "radius_packet"
+	default:
+		return "single_event"
 	}
 }
 

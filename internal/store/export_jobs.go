@@ -188,6 +188,15 @@ func (s *Store) FailStaleExportJob(
 	return tag.RowsAffected() != 0, err
 }
 
+func (s *Store) FailQueuedExportJob(
+	ctx context.Context, deviceID, jobID uuid.UUID, message string,
+) (bool, error) {
+	tag, err := s.DB.Exec(ctx, `UPDATE export_jobs SET status='failed',error=$3,
+		finished_at=now(),expires_at=now()+interval '7 days',updated_at=now()
+		WHERE id=$1 AND device_id=$2 AND status='queued'`, jobID, deviceID, message)
+	return tag.RowsAffected() != 0, err
+}
+
 func (s *Store) ListExportJobs(
 	ctx context.Context, deviceID uuid.UUID, limit int, cursor *ExportJobCursor,
 ) ([]ExportJob, bool, error) {
@@ -283,7 +292,7 @@ func (s *Store) ClaimExportJob(
 		return ExportJob{}, err
 	}
 	return scanExportJob(s.DB.QueryRow(ctx, `WITH candidate AS (
-		SELECT id FROM export_jobs
+		SELECT id AS job_id FROM export_jobs
 		WHERE status='queued'
 		   OR (status='running' AND lease_expires_at<now())
 		ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
@@ -291,7 +300,7 @@ func (s *Store) ClaimExportJob(
 	UPDATE export_jobs j SET status='running',worker_id=$1,
 		started_at=COALESCE(started_at,now()),heartbeat_at=now(),
 		lease_expires_at=now()+make_interval(secs=>$2),updated_at=now()
-	FROM candidate WHERE j.id=candidate.id RETURNING `+exportJobColumns,
+	FROM candidate WHERE j.id=candidate.job_id RETURNING `+exportJobColumns,
 		workerID, seconds))
 }
 

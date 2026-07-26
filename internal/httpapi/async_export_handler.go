@@ -132,7 +132,7 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusServiceUnavailable, "analytics unavailable")
 		return
 	}
-	if s.ExportHealth != nil && !s.ExportHealth.Available(10*time.Second) {
+	if s.ExportHealth != nil && !s.ExportHealth.Available(store.ExportHeartbeatTimeout) {
 		writeError(writer, http.StatusServiceUnavailable,
 			"export worker is unavailable; retry in a few seconds")
 		return
@@ -208,13 +208,27 @@ func (s *Server) listExportJobs(writer http.ResponseWriter, request *http.Reques
 func (s *Server) getExportJob(writer http.ResponseWriter, request *http.Request) {
 	deviceID, job, ok := s.exportJobFromRequest(writer, request)
 	if ok {
-		if changed, err := s.Store.FailStaleExportJob(
+		changed, err := s.Store.FailStaleExportJob(
 			request.Context(), deviceID, job.ID,
 			store.QueuedExportTimeout, store.ExportHeartbeatTimeout,
-		); err != nil {
+		)
+		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "unable to validate export worker")
 			return
-		} else if changed {
+		}
+		if !changed && job.Status == "queued" && s.ExportHealth != nil &&
+			s.ExportHealth.LastError() != "" &&
+			!s.ExportHealth.Available(store.ExportHeartbeatTimeout) {
+			changed, err = s.Store.FailQueuedExportJob(
+				request.Context(), deviceID, job.ID,
+				"export worker is unavailable; retry the export",
+			)
+			if err != nil {
+				writeError(writer, http.StatusInternalServerError, "unable to fail unavailable export")
+				return
+			}
+		}
+		if changed {
 			job, err = s.Store.ExportJob(request.Context(), deviceID, job.ID)
 			if err != nil {
 				writeError(writer, http.StatusInternalServerError, "unable to reload export job")

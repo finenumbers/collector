@@ -79,3 +79,25 @@ func TestWorkerPublishesHealthWhilePolling(t *testing.T) {
 		t.Fatal("worker health was not published")
 	}
 }
+
+func TestWorkerHealthRejectsRepeatedClaimFailuresAndRecovers(t *testing.T) {
+	health := &Health{}
+	health.recordSuccess()
+	if !health.Available(time.Second) {
+		t.Fatal("successful claim loop was not healthy")
+	}
+	claimErr := errors.New("claim query failed")
+	for range 3 {
+		health.recordFailure(claimErr)
+	}
+	if health.Available(time.Second) {
+		t.Fatal("repeated claim failures were reported as healthy")
+	}
+	if health.LastError() != claimErr.Error() {
+		t.Fatalf("last error = %q", health.LastError())
+	}
+	health.recordSuccess()
+	if !health.Available(time.Second) || health.LastError() != "" {
+		t.Fatal("successful claim loop did not restore health")
+	}
+}

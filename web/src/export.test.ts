@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   canCancelExport, canDownloadExport, createExportRequest, type ExportJob, exportDownloadURL,
-  exportETASeconds, exportJobsURL, exportJobURL, exportProgress, exportStatusLabel, exportTarget,
-  exportURL, formatExportBytes, formatExportDuration, isExportActive, localDateInTimezone, pollDelay,
-  type ExportJobStatus, type ExportNavigationDataset,
+  exportETASeconds, exportJobsURL, exportJobDisposition, exportJobURL, exportProgress,
+  exportStatusLabel, exportStorageKey, exportTarget, exportURL, formatExportBytes,
+  formatExportDuration, isExportActive, localDateInTimezone, pollDelay, restoreExportTracking,
+  serializeExportTracking, type ExportJobStatus, type ExportNavigationDataset,
 } from './export'
 
 const job = (overrides: Partial<ExportJob> = {}): ExportJob => ({
@@ -118,6 +119,56 @@ describe('async export state presentation', () => {
     expect(canDownloadExport(job({ status: 'completed', expiresAt: '2026-07-26T13:00:00Z' }), now)).toBe(true)
     expect(canDownloadExport(job({ status: 'completed', expiresAt: '2026-07-26T11:00:00Z' }), now)).toBe(false)
     expect(canDownloadExport(job({ status: 'failed' }), now)).toBe(false)
+  })
+
+  it('restores the real completed status without fabricating a queued job', () => {
+    const completed = job({
+      status: 'completed',
+      filename: 'alarms.zip',
+      finishedAt: '2026-07-26T10:01:00Z',
+    })
+    expect(restoreExportTracking(serializeExportTracking(completed))).toEqual({
+      job: completed,
+      legacyJobID: null,
+    })
+    expect(exportJobDisposition(completed)).toBe('offer_download')
+  })
+
+  it('hydrates legacy job IDs instead of assigning an invented status', () => {
+    const legacyJobID = '7845e6d4-b8f1-4d0f-a8d4-c527f6868d02'
+    expect(restoreExportTracking(legacyJobID)).toEqual({
+      job: null,
+      legacyJobID,
+    })
+    expect(restoreExportTracking('')).toEqual({ job: null, legacyJobID: null })
+    expect(restoreExportTracking('{broken-json')).toEqual({ job: null, legacyJobID: null })
+    expect(restoreExportTracking('{"version":1,"job":{"id":"partial"}}')).toEqual({
+      job: null,
+      legacyJobID: null,
+    })
+  })
+
+  it('never treats polling completion as an automatic download command', () => {
+    const now = new Date('2026-07-26T12:00:00Z').getTime()
+    expect(exportJobDisposition(job({ status: 'queued' }), now)).toBe('poll')
+    expect(exportJobDisposition(job({
+      status: 'completed', expiresAt: '2026-07-26T13:00:00Z',
+    }), now)).toBe('offer_download')
+    expect(exportJobDisposition(job({
+      status: 'completed', expiresAt: '2026-07-26T11:00:00Z',
+    }), now)).toBe('clear')
+    expect(exportJobDisposition(job({ status: 'failed' }), now)).toBe('clear')
+  })
+
+  it('isolates persisted jobs across section, date, and query remounts', () => {
+    const base = exportStorageKey('device-1', 'alarms', '2026-07-26', '')
+    expect(exportStorageKey('device-1', 'sip', '2026-07-26', '')).not.toBe(base)
+    expect(exportStorageKey('device-1', 'alarms', '2026-07-27', '')).not.toBe(base)
+    expect(exportStorageKey('device-1', 'alarms', '2026-07-26', 'critical')).not.toBe(base)
+    const completed = job({ status: 'completed' })
+    expect(exportJobDisposition(
+      restoreExportTracking(serializeExportTracking(completed)).job!,
+    )).toBe('offer_download')
   })
 })
 

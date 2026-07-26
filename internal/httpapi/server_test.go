@@ -220,6 +220,45 @@ func TestExportJobPresentationMatchesFrontendContract(t *testing.T) {
 		response.BytesWritten != 2048 {
 		t.Fatalf("unexpected public export response: %#v", response)
 	}
+	writer := httptest.NewRecorder()
+	writeJSON(writer, http.StatusOK, map[string]any{"job": response})
+	if disposition := writer.Header().Get("Content-Disposition"); disposition != "" {
+		t.Fatalf("status response unexpectedly triggers a download: %q", disposition)
+	}
+	if contentType := writer.Header().Get("Content-Type"); !strings.HasPrefix(
+		contentType, "application/json",
+	) {
+		t.Fatalf("status response content type = %q", contentType)
+	}
+}
+
+func TestExportDownloadRequiresExplicitAvailableArtifact(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+	if exportDownloadAvailable(store.ExportJob{Status: "running"}, now) {
+		t.Fatal("running export became downloadable")
+	}
+	if exportDownloadAvailable(store.ExportJob{Status: "completed", ExpiresAt: &past}, now) {
+		t.Fatal("expired export became downloadable")
+	}
+	job := store.ExportJob{
+		Status: "completed", ExpiresAt: &future, Filename: "../../alarms.csv.zip",
+		ContentType: "application/zip", SHA256: "abc123",
+	}
+	if !exportDownloadAvailable(job, now) {
+		t.Fatal("completed unexpired export is unavailable")
+	}
+	header := make(http.Header)
+	setExportDownloadHeaders(header, job, 42)
+	if got := header.Get("Content-Disposition"); !strings.Contains(got, "attachment") ||
+		!strings.Contains(got, "alarms.csv.zip") {
+		t.Fatalf("content disposition = %q", got)
+	}
+	if header.Get("Content-Type") != "application/zip" ||
+		header.Get("Content-Length") != "42" || header.Get("ETag") != `"abc123"` {
+		t.Fatalf("download headers = %#v", header)
+	}
 }
 
 func TestParseExportDateUsesDeviceTimezoneAndExclusiveEnd(t *testing.T) {

@@ -16,7 +16,22 @@ fields. Исходные записи не изменяются.
 device_id + normalize(RADIUS Accounting-Session-Id)
 ```
 
-Нормализация удаляет whitespace и приводит регистр. Это единственное документированное прямое CDR↔AntiFraud RADIUS соответствие. `device_id` обязателен: RFC не гарантирует глобальную уникальность Acct-Session-Id между NAS/reboot.
+Нормализация удаляет whitespace и приводит регистр. Для operation-to-CDR projection
+сначала проверяется leg `Acct-Session-Id`, затем canonical call `h323-conf-id` против
+`cdr_records.radius_session_id_normalized`. Второй способ нужен для B2BUA outbound leg,
+у которого собственный session отличается от CDR session. `device_id` обязателен:
+RFC не гарантирует глобальную уникальность идентификаторов между NAS/reboot.
+Любое множество из нескольких exact-кандидатов остаётся `ambiguous`; временная
+сортировка используется только для детерминированного evidence, а не для выбора записи.
+
+### v16 staged canary
+
+1. Дождаться, пока shadow replay достигнет watermark, не активируя новую projection.
+2. Сверить для canary device: `unknown`, `ambiguous_response`, долю linked operations
+   и golden summary (2 request + 2 response, 2 operations, 1 call, 1 CDR).
+3. Записать `active` marker только для canary device и проверить Call Drawer/API.
+4. При отсутствии регрессий активировать остальные devices по одному. Откат выполняется
+   сменой read marker; immutable raw Syslog и v15 projection не удаляются.
 
 Приход RADIUS или CDR пакетно ставит `device + timezone revision + UTC day` в durable
 dirty queue. Worker повторно собирает весь малый day bucket идемпотентно, поэтому

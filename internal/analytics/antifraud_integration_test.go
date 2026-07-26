@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"strconv"
@@ -756,8 +757,20 @@ func TestAntiFraudOperationProjectionClickHouse(t *testing.T) {
 				"packet_identifier": strconv.Itoa(int(requestID)),
 			},
 		}
-		events = append(events, request, response)
+		events = append(events, request)
 		requestEvents = append(requestEvents, request)
+		if index == 0 {
+			retry := request
+			retry.EventID = uuid.New()
+			retry.ReceivedAt = requestAt.Add(50 * time.Millisecond)
+			retry.EventTime = &retry.ReceivedAt
+			retry.Attributes = cloneStringMap(request.Attributes)
+			retry.Attributes["construct_anchor_event_id"] = retry.EventID.String()
+			retry.Attributes["retry"] = "1"
+			events = append(events, retry)
+			requestEvents = append(requestEvents, retry)
+		}
+		events = append(events, response)
 		responseEvents = append(responseEvents, response)
 	}
 	if err := client.InsertSyslogBatch(ctx, events); err != nil {
@@ -785,7 +798,7 @@ func TestAntiFraudOperationProjectionClickHouse(t *testing.T) {
 		Scan(&packets, &operations, &calls); err != nil {
 		t.Fatal(err)
 	}
-	if packets != 6 || operations != 3 || calls != 1 {
+	if packets != 7 || operations != 3 || calls != 1 {
 		t.Fatalf("packets=%d operations=%d calls=%d", packets, operations, calls)
 	}
 	var currentSession, currentIdentity string
@@ -830,7 +843,11 @@ func TestAntiFraudOperationProjectionClickHouse(t *testing.T) {
 	for _, item := range page.Items {
 		operationTypes[item.RequestType] = true
 		timeline, timelineErr := client.AntifraudTimeline(ctx, deviceID, item.TransactionID)
-		if timelineErr != nil || len(timeline) != 2 {
+		wantTimeline := 2
+		if item.RequestType == "number" {
+			wantTimeline = 3
+		}
+		if timelineErr != nil || len(timeline) != wantTimeline {
 			t.Fatalf("operation timeline rows=%d err=%v", len(timeline), timelineErr)
 		}
 	}
@@ -875,6 +892,64 @@ func TestAntiFraudOperationProjectionClickHouse(t *testing.T) {
 	if linked != 3 {
 		t.Fatalf("all operations must share one CDR, linked=%d", linked)
 	}
+	summary, err := client.CallAntiFraudSummary(ctx, deviceID, firstRecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ProjectionStatus != "active" || summary.Building ||
+		len(summary.Operations) != 3 || summary.Call == nil ||
+		summary.OverallStatus != "neutral" {
+		t.Fatalf("active call summary is incomplete: %#v", summary)
+	}
+	for _, operation := range summary.Operations {
+		if operation.CorrelationMethod != "exact_acct_session" ||
+			operation.CorrelationEvidence["method"] == "" {
+			t.Fatalf("summary correlation evidence is incomplete: %#v", operation)
+		}
+	}
+	var sawRetry bool
+	for _, operation := range summary.Operations {
+		if operation.Type == "number" && operation.Retries == 1 {
+			sawRetry = true
+		}
+	}
+	if !sawRetry {
+		t.Fatalf("summary did not aggregate operation retries: %#v", summary.Operations)
+	}
+	if _, err := client.CallAntiFraudSummary(ctx, deviceID, uuid.New()); !errors.Is(err, ErrCallCDRNotFound) {
+		t.Fatalf("missing CDR error=%v", err)
+	}
+	staleOperation := summary.Operations[0].OperationID
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.antifraud_operation_cdr_links
+		(device_id,timezone_revision,parser_version,operation_id,updated_at,cdr_record_id,
+		 state,method,time_delta_ms,reason)
+		VALUES(?,?,?,?,now64(6),NULL,'unlinked','',0,'newer_unlinked_test')`,
+		deviceID, revision, SyslogParserVersion, staleOperation); err != nil {
+		t.Fatal(err)
+	}
+	withoutStaleLink, err := client.CallAntiFraudSummary(ctx, deviceID, firstRecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutStaleLink.Operations) != 2 {
+		t.Fatalf("newer unlinked assignment retained stale CDR: %#v", withoutStaleLink)
+	}
+	operationPage, err := client.ListAntifraudPage(ctx, deviceID, "", 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range operationPage.Items {
+		if item.TransactionID == staleOperation && len(item.LinkedRecordIDs) != 0 {
+			t.Fatalf("operation view retained stale nullable link: %#v", item)
+		}
+	}
+	if err := client.Conn.Exec(ctx, `INSERT INTO collector.antifraud_operation_cdr_links
+		(device_id,timezone_revision,parser_version,operation_id,updated_at,cdr_record_id,
+		 state,method,time_delta_ms,reason)
+		VALUES(?,?,?,?,now64(6),?,'linked','exact_acct_session',0,'')`,
+		deviceID, revision, SyslogParserVersion, staleOperation, firstRecordID); err != nil {
+		t.Fatal(err)
+	}
 	secondRecordID := uuid.New()
 	if err := client.InsertCDRBatch(ctx, []CDRRecord{{
 		RecordID: secondRecordID, DeviceID: deviceID, FileID: uuid.New(), RowNumber: 2,
@@ -917,6 +992,22 @@ func TestAntiFraudOperationProjectionClickHouse(t *testing.T) {
 		fallbackDeviceID, fallbackRevision, fallbackTransactionID, now, now); err != nil {
 		t.Fatal(err)
 	}
+	fallbackRecordID := uuid.New()
+	if err := client.InsertCDRBatch(ctx, []CDRRecord{{
+		RecordID: fallbackRecordID, DeviceID: fallbackDeviceID, FileID: uuid.New(),
+		RowNumber: 1, IngestedAt: now, SetupTime: &now, TimezoneRevision: fallbackRevision,
+		SourceTimezone: "UTC", RawFields: map[string]string{},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	buildingSummary, err := client.CallAntiFraudSummary(ctx, fallbackDeviceID, fallbackRecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !buildingSummary.Building || buildingSummary.ProjectionStatus != "building" ||
+		len(buildingSummary.Operations) != 0 {
+		t.Fatalf("building summary mixed projections: %#v", buildingSummary)
+	}
 	fallbackPage, err := client.ListAntifraudPage(ctx, fallbackDeviceID, "", 10, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -924,5 +1015,84 @@ func TestAntiFraudOperationProjectionClickHouse(t *testing.T) {
 	if len(fallbackPage.Items) != 1 ||
 		fallbackPage.Items[0].TransactionID != fallbackTransactionID {
 		t.Fatalf("legacy lifecycle fallback failed: %#v", fallbackPage.Items)
+	}
+}
+
+func TestAntiFraudProjectionPersistsAcrossSingleEventCalls(t *testing.T) {
+	address := os.Getenv("CLICKHOUSE_TEST_ADDR")
+	if address == "" {
+		t.Skip("CLICKHOUSE_TEST_ADDR is not set")
+	}
+	client, err := Open(
+		address, "collector", os.Getenv("CLICKHOUSE_TEST_USER"),
+		os.Getenv("CLICKHOUSE_TEST_PASSWORD"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := client.Migrate(ctx, "../../migrations/clickhouse"); err != nil {
+		t.Fatal(err)
+	}
+	deviceID := uuid.New()
+	revision := uint64(193)
+	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	anchor := uuid.New()
+	header := SyslogEvent{
+		EventID: anchor, DeviceID: deviceID, ReceivedAt: now, Category: "radius",
+		TimezoneRevision: revision, SourceTimezone: "UTC",
+		Attributes: map[string]string{
+			"construct_anchor_event_id": anchor.String(), "call_context": "C-SPLIT-LIVE",
+			"packet_code": "access-request", "packet_direction": "request",
+			"packet_identifier": "44",
+		},
+	}
+	avp := SyslogEvent{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.Add(time.Millisecond),
+		Category: "radius", TimezoneRevision: revision, SourceTimezone: "UTC",
+		Payload: []byte(`Acct-Session-Id="split leg" ` +
+			`Eltex-AVPair="h323-conf-id=split call" ` +
+			`Eltex-AVPair="xpgk-request-type=number"`),
+		Attributes: map[string]string{
+			"construct_anchor_event_id": anchor.String(), "call_context": "C-SPLIT-LIVE",
+			"acct_session_id": "split leg", "h323_conf_id": "split call",
+			"xpgk_request_type": "number", "is_antifraud": "true",
+		},
+	}
+	if err := client.ProcessSyslogDerived(ctx, header); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ProcessSyslogDerived(ctx, avp); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ProcessSyslogDerived(ctx, avp); err != nil {
+		t.Fatal(err)
+	}
+	var packets, operations, calls uint64
+	var identity, session string
+	if err := client.Conn.QueryRow(ctx, `SELECT
+		(SELECT count() FROM collector.current_antifraud_packets
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT count() FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT count() FROM collector.current_antifraud_calls
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT any(identity_kind) FROM collector.current_antifraud_calls
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
+		(SELECT any(acct_session_id_normalized) FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND timezone_revision=? AND parser_version=?)`,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+		deviceID, revision, SyslogParserVersion,
+	).Scan(&packets, &operations, &calls, &identity, &session); err != nil {
+		t.Fatal(err)
+	}
+	if packets != 1 || operations != 1 || calls != 1 ||
+		identity != "h323_conf_id" || session != "splitleg" {
+		t.Fatalf("packets=%d operations=%d calls=%d identity=%q session=%q",
+			packets, operations, calls, identity, session)
 	}
 }

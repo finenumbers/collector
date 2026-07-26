@@ -1,0 +1,27 @@
+{
+  "template": "eltex-smg-1016m-3.410",
+  "receivedAt": "2026-07-26T22:30:31Z",
+  "cdr": {
+    "setupTime": "2026-07-26T22:30:32Z",
+    "durationSeconds": 28,
+    "q850Cause": 16,
+    "incomingCgpn": "9586786161",
+    "incomingCdpn": "8435999999",
+    "outgoingCgpn": "79586786161",
+    "outgoingCdpn": "78435999999",
+    "incomingRoute": "Tattelecom Kazan",
+    "outgoingRoute": "PSTN_Kazan_RTU_MTS_Local",
+    "radiusSessionId": "0600000f 6a666058 66cb3590 505c7af3"
+  },
+  "payloads": [
+    "<14> <smg1016m> 22:30:31.000000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Request [068] --",
+    "<14> <smg1016m> 22:30:31.001000 [INFO] [C0000A7] \tAcct-Session-Id = \"0600000f 6a666058 66cb3590 505c7af3\" Eltex-AVPair=\"h323-conf-id=0600000f 6a666058 66cb3590 505c7af3\" Eltex-AVPair=\"xpgk-request-type=number\" Eltex-AVPair=\"xpgk-src-number-in=9586786161\" Eltex-AVPair=\"xpgk-dst-number-in=8435999999\" Eltex-AVPair=\"xpgk-src-number-out=79586786161\" Eltex-AVPair=\"xpgk-dst-number-out=78435999999\" Eltex-AVPair=\"in-trunkgroup-label=Tattelecom Kazan\" Eltex-AVPair=\"out-trunkgroup-label=PSTN_Kazan_RTU_MTS_Local\"",
+    "<14> <smg1016m> 22:30:31.111000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Reply [068] --",
+    "<14> <smg1016m> 22:30:31.112000 [INFO] [C0000A7] RADIUS. Proc Reply. Request ID [068] Accs-Reply [accept]. Time [0:111]",
+    "<14> <smg1016m> 22:30:31.500000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Request [069] --",
+    "<14> <smg1016m> 22:30:31.501000 [INFO] [C0000A7] \tAcct-Session-Id = \"110004a2 6a66605d 1df9c0e5 13ff5281\" Eltex-AVPair=\"h323-conf-id=0600000f 6a666058 66cb3590 505c7af3\" Eltex-AVPair=\"xpgk-request-type=number\" Eltex-AVPair=\"xpgk-src-number-in=9586786161\" Eltex-AVPair=\"xpgk-dst-number-in=8435999999\" Eltex-AVPair=\"xpgk-src-number-out=79586786161\" Eltex-AVPair=\"xpgk-dst-number-out=78435999999\"",
+    "<14> <smg1016m> 22:30:31.599000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Reply [069] --",
+    "<14> <smg1016m> 22:30:31.600000 [INFO] [C0000A7] RADIUS. Proc Reply. Request ID [069] Accs-Reply [accept]. Time [0:99]",
+    "<14> <smg1016m> 22:31:00.000000 [INFO] [C0000A7] RADIUS server rejected: :0 (replied 0)"
+  ]
+}

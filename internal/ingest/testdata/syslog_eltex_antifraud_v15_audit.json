@@ -1,14 +1,14 @@
 {
   "total": 18,
   "categories": {
+    "call_trace": 1,
     "isup": 4,
-    "radius": 7,
+    "radius": 6,
     "sip": 7
   },
   "unknown_reasons": {},
   "source_confusions": 0,
   "coverage": {
-    "access_reject_response": 1,
     "access_request_alias": 2,
     "antifraud_control": 1,
     "hash_detail": 2,

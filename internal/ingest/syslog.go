@@ -49,6 +49,8 @@ var (
 	radiusPacket        = regexp.MustCompile(`(?i)\b(Access-Request|Access-Accept|Access-Reject|Accounting-Request|Accounting-Response)\b`)
 	radiusRequestAlias  = regexp.MustCompile(`(?i)\b(Accs-Request|Antifraud-Auth-Request)\b`)
 	radiusAliasID       = regexp.MustCompile(`(?i)\b(?:Accs-Request|Antifraud-Auth-Request)\s*\[([0-9]{1,3})\]`)
+	radiusReplyAlias    = regexp.MustCompile(`(?i)--\s*RADIUS\.\s*Accs-Reply\s*\[([0-9]{1,3})\]\s*--`)
+	radiusProcReply     = regexp.MustCompile(`(?i)\bProc\s+Reply.*?\bRequest\s+ID\s*\[([0-9]{1,3})\]\s+Accs-Reply\s*\[(accept|reject)\]\.\s*Time\s*\[([0-9]+):([0-9]+)\]`)
 	radiusAttribute     = regexp.MustCompile(`(?i)^(?:User-Name|User-Password|Calling-Station-Id|Called-Station-Id|Acct-Session-Id|NAS-Port|NAS-Port-Type|Framed-IP-Address|Event-Timestamp|Acct-Delay-Time|Acct-Session-Time|Cisco-AVPair|Eltex-AVPair|h323-[A-Za-z0-9-]+)\s*(?:\([0-9]+\))?\s*[=:]`)
 	avpLinePattern      = regexp.MustCompile(`(?i)^[A-Za-z][A-Za-z0-9-]+\s*=\s*`)
 	radiusRequestID     = regexp.MustCompile(`(?i)\b(?:Request|Packet)\s+ID\s*\[?([0-9]{1,3})\]?`)
@@ -56,6 +58,7 @@ var (
 	antifraudControlPat = regexp.MustCompile(`(?i)\b(?:ANTIFRAUD|RADIUS(?:[- ](?:profile|build|wait|config|control)))\b`)
 	radiusServer        = regexp.MustCompile(`(?i)\b(?:server|address)\s*[=:]?\s*((?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]+)?)`)
 	radiusLatency       = regexp.MustCompile(`(?i)\b(?:in|latency\s*[=:]?)\s*([0-9]+)\s*ms\b`)
+	bareCDRRejectDump   = regexp.MustCompile(`(?i)^server\s+rejected:\s*:0\s+\(replied\s+0\)$`)
 	radiusRetry         = regexp.MustCompile(`(?i)\bretr(?:y|ies)\s*[=:]?\s*([0-9]+)\b`)
 	q850CausePattern    = regexp.MustCompile(`(?i)\b(?:Q\.?850|disconnect-cause|release-cause)\s*[=:]\s*([0-9]{1,3})`)
 	sipCallIDPattern    = regexp.MustCompile(`(?i)\bCall-ID\s*[=:]\s*["']?([^'"\s,;]+)`)
@@ -874,6 +877,22 @@ func ParseSyslogInLocation(raw RawSyslog, location *time.Location) analytics.Sys
 		event.Component = component
 		event.Message = rest
 	}
+	if bareCDRRejectDump.MatchString(strings.TrimSpace(event.Message)) {
+		event.Component = "CDR"
+		event.Category = "call_trace"
+		event.Attributes["classification_result"] = event.Category
+		setClassificationProvenance(&event)
+		event.Attributes["intrinsic_kind"] = "cdr_dump_field"
+		event.Attributes["semantic_category"] = "call_trace"
+		event.Attributes["source_family"] = "cdr"
+		offsetTime := raw.ReceivedAt.In(location)
+		if event.EventTime != nil {
+			offsetTime = event.EventTime.In(location)
+		}
+		_, offsetSeconds := offsetTime.Zone()
+		event.SourceUTCOffsetMinutes = int16(offsetSeconds / 60)
+		return event
+	}
 	eltexTraceContext := event.HeaderFormat == "eltex-trace"
 	hostIPContext := eltexTraceContext && (raw.TemplateKey == "" ||
 		raw.TemplateKey == "eltex-smg-1016m-3.23.2" ||
@@ -919,6 +938,7 @@ func classify(component, application, message, payload, dialect string, hostIPCo
 		strings.Contains(upperMessage, "RADIUS") ||
 		radiusRequestAlias.MatchString(message)
 	radiusEvidence := radiusPacket.MatchString(message) || radiusRequestAlias.MatchString(message) ||
+		radiusReplyAlias.MatchString(message) || radiusProcReply.MatchString(message) ||
 		radiusAttribute.MatchString(trimmedMessage) ||
 		(!(allows3410Dialect(dialect) && isBareSDPLine(trimmedMessage)) &&
 			avpLinePattern.MatchString(trimmedMessage)) ||
@@ -1245,7 +1265,13 @@ func extractRadiusAttributes(text string, event *analytics.SyslogEvent) {
 	lowerText := strings.ToLower(text)
 	for _, match := range radiusPair.FindAllStringSubmatch(text, -1) {
 		value := firstNonEmpty(match[2], match[3], match[4])
-		event.Attributes[normalizeAttribute(match[1])] = strings.TrimSpace(value)
+		key := normalizeAttribute(match[1])
+		value = strings.TrimSpace(value)
+		event.Attributes[key] = value
+		if (key == "eltex_avpair" || key == "cisco_avpair") && strings.Contains(value, "=") {
+			vsa := strings.SplitN(value, "=", 2)
+			event.Attributes[normalizeAttribute(vsa[0])] = strings.TrimSpace(vsa[1])
+		}
 	}
 	if match := radiusSession.FindStringSubmatch(text); match != nil {
 		event.Attributes["acct_session_id"] = strings.TrimSpace(match[1])
@@ -1267,6 +1293,19 @@ func extractRadiusAttributes(text string, event *analytics.SyslogEvent) {
 		case radiusRequestAlias.MatchString(text):
 			event.Attributes["packet_code"] = "access-request"
 			event.Attributes["packet_direction"] = "request"
+			event.Attributes["packet_dump_anchor"] = "true"
+		case radiusReplyAlias.MatchString(text):
+			event.Attributes["packet_code"] = "access-response"
+			event.Attributes["packet_direction"] = "response"
+			event.Attributes["packet_dump_anchor"] = "true"
+		case radiusProcReply.MatchString(text):
+			match := radiusProcReply.FindStringSubmatch(text)
+			event.Attributes["packet_identifier"] = match[1]
+			event.Attributes["result"] = strings.ToLower(match[2])
+			event.Attributes["packet_code"] = "access-" + strings.ToLower(match[2])
+			event.Attributes["packet_direction"] = "response"
+			event.Attributes["latency_ms"] = radiusReplyLatencyMS(match[3], match[4])
+			event.Attributes["packet_status_event"] = "true"
 		case strings.Contains(lowerText, "radius server rejected"):
 			event.Attributes["packet_code"] = "access-reject"
 			event.Attributes["packet_direction"] = "response"
@@ -1280,6 +1319,8 @@ func extractRadiusAttributes(text string, event *analytics.SyslogEvent) {
 	if match := radiusRequestID.FindStringSubmatch(text); match != nil {
 		event.Attributes["packet_identifier"] = match[1]
 	} else if match := radiusAliasID.FindStringSubmatch(text); match != nil {
+		event.Attributes["packet_identifier"] = match[1]
+	} else if match := radiusReplyAlias.FindStringSubmatch(text); match != nil {
 		event.Attributes["packet_identifier"] = match[1]
 	}
 	if match := radiusServer.FindStringSubmatch(text); match != nil {
@@ -1316,6 +1357,20 @@ func extractRadiusAttributes(text string, event *analytics.SyslogEvent) {
 	if packetCode == "accounting-response" {
 		event.Attributes["accounting_status"] = "complete"
 	}
+}
+
+func radiusReplyLatencyMS(seconds, fraction string) string {
+	whole, wholeErr := strconv.ParseUint(seconds, 10, 64)
+	part, partErr := strconv.ParseUint(fraction, 10, 64)
+	if wholeErr != nil || partErr != nil {
+		return ""
+	}
+	// Eltex releases have emitted both milliseconds and microseconds after the
+	// separator. Values wider than three digits are therefore reduced to ms.
+	if len(fraction) > 3 {
+		part /= 1000
+	}
+	return strconv.FormatUint(whole*1000+part, 10)
 }
 
 func extractProtocolAttributes(text string, event *analytics.SyslogEvent) {

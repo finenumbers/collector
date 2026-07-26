@@ -334,6 +334,44 @@ tbody tr { cursor: pointer; }
 .call-facts small { color: var(--muted); font-size: 9px; text-transform: uppercase; margin-bottom: 4px; }
 .call-facts strong { font-size: 11px; }
 .drawer h4 { margin: 18px 15px 10px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.antifraud-summary { margin: 14px 15px 4px; }
+.drawer .antifraud-summary h4 { margin: 0 0 8px; }
+.antifraud-summary-state, .antifraud-overall { margin: 0; padding: 10px; border: 1px solid var(--line);
+  background: #f7f9fc; color: #475467; font-size: 11px; line-height: 1.45; }
+.antifraud-summary-error { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border-color: #e8b4b4; background: #fff0f0; color: #8f2424; }
+.antifraud-summary-error button { flex: none; }
+.antifraud-skeleton { display: inline-block; width: 56px; height: 8px; margin-right: 8px;
+  border-radius: 4px; background: #dbe1ea; animation: antifraud-pulse 1.2s ease-in-out infinite; }
+@keyframes antifraud-pulse { 50% { opacity: .45; } }
+.antifraud-overall { border-color: #cdd7e4; background: #f5f8fc; color: #344054; font-weight: 600; }
+.antifraud-call { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-top: 0; }
+.antifraud-call span { min-width: 0; padding: 8px; border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line); }
+.antifraud-call small, .antifraud-call strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+.antifraud-call small, .antifraud-operation small { color: var(--muted); font-size: 9px; }
+.antifraud-call strong { margin-top: 3px; font-size: 10px; }
+.antifraud-operations { display: grid; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; }
+.antifraud-operation { border: 1px solid var(--line); background: #fff; }
+.antifraud-operation.outcome-failure { border-left: 3px solid #b42318; }
+.antifraud-operation.outcome-warning { border-left: 3px solid #d28b00; }
+.antifraud-operation.outcome-success { border-left: 3px solid #27855b; }
+.antifraud-operation-main { display: grid; grid-template-columns: 36px minmax(120px, 1fr) 76px 58px 45px;
+  align-items: center; gap: 7px; padding: 9px; }
+.antifraud-leg { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 22px;
+  border-radius: 2px; background: #e9edf3; color: #475467; font: 700 9px ui-monospace, monospace; }
+.antifraud-operation-type, .antifraud-packets, .antifraud-metric { min-width: 0; }
+.antifraud-operation-type strong, .antifraud-operation-type small,
+.antifraud-packets small, .antifraud-packets strong, .antifraud-metric small, .antifraud-metric strong {
+  display: block; overflow: hidden; text-overflow: ellipsis; }
+.antifraud-operation-type strong, .antifraud-packets strong, .antifraud-metric strong { font-size: 10px; }
+.antifraud-operation-type small { margin-top: 3px; white-space: normal; line-height: 1.3; }
+.antifraud-evidence { border-top: 1px solid var(--line); background: #fbfcfe; }
+.antifraud-evidence summary { padding: 7px 9px; color: #596579; cursor: pointer; font-size: 10px; }
+.antifraud-evidence dl { display: grid; gap: 5px; margin: 0; padding: 0 9px 9px; }
+.antifraud-evidence dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 8px; }
+.antifraud-evidence dt { color: var(--muted); font-size: 9px; }
+.antifraud-evidence dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #344054; font-size: 10px; }
 .raw-payload { margin: 0 15px; padding: 10px; overflow: auto; border: 1px solid var(--line);
   background: #f7f9fc; color: #344054; font: 10px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .timeline-groups { padding: 0 15px 20px; }
@@ -382,4 +420,10 @@ tbody tr { cursor: pointer; }
   .settings-page { flex-direction: column; }
   .settings-tabs { width: 100%; flex-direction: row; }
   .dashboard-kpis { grid-template-columns: 1fr; }
+  .drawer { width: calc(100vw - 150px); }
+  .antifraud-operation-main { grid-template-columns: 36px minmax(0, 1fr) 74px; }
+  .antifraud-operation-main .antifraud-metric { grid-column: auto; }
+  .antifraud-operation-main .antifraud-metric:last-child { grid-column: 3; }
+  .antifraud-call { grid-template-columns: 1fr; }
+  .antifraud-evidence dl div { grid-template-columns: 1fr; gap: 2px; }
 }

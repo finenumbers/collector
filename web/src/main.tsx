@@ -9,8 +9,14 @@ import {
   canManageUsers, normalizeFirmwareScheme, purgeConfirmationReady, purgeRetryLabel,
   retentionDescription, retentionLabel,
 } from './settings'
-import { antifraudOutcome, cdrOutcome, outcomeLabel } from './outcomes'
+import {
+  antifraudOutcome, cdrOutcome, decisionLabel, operationTypeLabel, outcomeLabel,
+  terminalReasonLabel,
+} from './outcomes'
 import { readModelNotice } from './readModelNotice'
+import {
+  AntiFraudSummary, AntiFraudSummaryState, CallAntiFraudSummary,
+} from './antifraudSummary'
 import {
   defaultSourceDataset, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
   sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
@@ -1251,7 +1257,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         {loading && rows.length > 0 ? 'Загрузка следующих 100 записей…' : hasMore ? '' : rows.length > 0 ? 'Все записи загружены' : ''}
       </div>
     </div>
-    {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
+    {selectedCall && <CallDrawer key={selectedCall.recordId} device={device} call={selectedCall}
+      onClose={() => setSelectedCall(null)} />}
     {selectedSatelCall && <SatelCallDrawer call={selectedSatelCall}
       timezone={activeDeviceTimezone(device)} onClose={() => setSelectedSatelCall(null)} />}
     {selectedAntifraud && <AntifraudDrawer device={device} row={selectedAntifraud}
@@ -1638,10 +1645,35 @@ function SatelCallDrawer({ call, timezone, onClose }: {
 
 function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; onClose: () => void }) {
   const [timeline, setTimeline] = useState<TimelineRow[]>([])
+  const [summaryState, setSummaryState] = useState<AntiFraudSummaryState>({ kind: 'loading' })
+  const [summaryRequest, setSummaryRequest] = useState(0)
+  const summaryRequestId = useRef(0)
   useEffect(() => {
     api<{ items: TimelineRow[] }>(`/devices/${device.id}/calls/${call.recordId}/timeline`)
       .then(({ items }) => setTimeline(items || []))
   }, [device.id, call.recordId])
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++summaryRequestId.current
+    api<CallAntiFraudSummary>(
+      `/devices/${device.id}/calls/${call.recordId}/antifraud-summary`,
+      { signal: controller.signal },
+    ).then((summary) => {
+      if (requestId === summaryRequestId.current) {
+        setSummaryState({ kind: 'ready', summary })
+      }
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || requestId !== summaryRequestId.current) return
+      setSummaryState({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'неизвестная ошибка',
+      })
+    })
+    return () => {
+      controller.abort()
+      if (requestId === summaryRequestId.current) summaryRequestId.current += 1
+    }
+  }, [device.id, call.recordId, summaryRequest])
   const groups = groupCallTimeline(timeline)
   const timezone = activeDeviceTimezone(device)
   return <div className="drawer">
@@ -1653,6 +1685,10 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
       <span><small>Q.850</small><strong>{call.releaseCause ?? '—'} · {call.releaseInfo || '—'}</strong></span>
       <span><small>Acct-Session-Id</small><strong className="mono">{call.radiusSessionId || '—'}</strong></span>
     </div>
+    <AntiFraudSummary state={summaryState} onRetry={() => {
+      setSummaryState({ kind: 'loading' })
+      setSummaryRequest((value) => value + 1)
+    }} />
     <h4>Связанные события АнтиФрод и Syslog</h4>
     {timeline.length === 0 && <div className="timeline"><p>Связанные события пока не найдены.</p></div>}
     <div className="timeline-groups">{groups.map((group) => <section
@@ -2382,40 +2418,6 @@ function formatTime(value?: string, timezone = 'UTC') {
     minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3,
     timeZone: timezone,
   }).format(new Date(value))
-}
-
-function decisionLabel(value: string) {
-  switch (value) {
-    case 'accept':
-    case 'verification_accept': return 'Пропущен'
-    case 'reject':
-    case 'verification_reject': return 'Заблокирован'
-    case 'timeout_fail_open':
-    case 'verification_fail_open': return 'Пропущен по timeout'
-    case 'informational': return 'Информационный'
-    default: return 'Ожидается / неизвестно'
-  }
-}
-
-function operationTypeLabel(value: string) {
-  switch (value) {
-    case 'number': return 'Индикация номера'
-    case 'save_call': return 'Сохранение вызова'
-    case 'check_call': return 'Проверка вызова'
-    case 'accounting': return 'Accounting'
-    default: return value || 'не определена'
-  }
-}
-
-function terminalReasonLabel(value: string) {
-  switch (value) {
-    case 'indication_response': return 'Информационный ответ'
-    case 'timeout_or_unavailable': return 'Timeout / сервер недоступен'
-    case 'incomplete_response': return 'Ответ без запроса'
-    case 'ambiguous': return 'Неоднозначное соответствие ответа'
-    case 'ambiguous_session_collision': return 'Несколько CDR с одной сессией'
-    default: return value || '—'
-  }
 }
 
 createRoot(document.getElementById('root')!).render(<App />)

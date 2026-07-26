@@ -1,0 +1,27 @@
+{
+  "packets": 4,
+  "operations": [
+    {
+      "type": "number",
+      "session": "0600000f6a66605866cb3590505c7af3",
+      "requestIdentifier": 68,
+      "responseIdentifier": 68,
+      "responseCode": "access-accept",
+      "latencyMs": 111,
+      "terminalState": "response_received",
+      "terminalReason": "no_block_evidence"
+    },
+    {
+      "type": "number",
+      "session": "110004a26a66605d1df9c0e513ff5281",
+      "requestIdentifier": 69,
+      "responseIdentifier": 69,
+      "responseCode": "access-accept",
+      "latencyMs": 99,
+      "terminalState": "response_received",
+      "terminalReason": "no_block_evidence"
+    }
+  ],
+  "calls": 1,
+  "bogusRejects": 0
+}

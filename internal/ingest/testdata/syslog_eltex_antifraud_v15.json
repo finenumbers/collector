@@ -66,11 +66,11 @@
       "<14> <smg1016m> 10:00:00.001000 [INFO] [CRAD] -- RADIUS. Antifraud-Auth-Request [203] --",
       "<14> <smg1016m> 10:00:00.002000 [INFO] [CRAD] RADIUS server rejected: :0 (replied 0)"
     ],
-    "categories": ["radius", "radius", "radius"],
+    "categories": ["radius", "radius", "call_trace"],
     "attributes": [
       {"packet_code": "access-request", "packet_direction": "request", "packet_identifier": "196"},
       {"packet_code": "access-request", "packet_direction": "request", "packet_identifier": "203"},
-      {"packet_code": "access-reject", "packet_direction": "response"}
+      {"intrinsic_kind": "cdr_dump_field", "semantic_category": "call_trace"}
     ]
   },
   {

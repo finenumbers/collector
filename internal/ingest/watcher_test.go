@@ -319,12 +319,17 @@ func TestSatelArchiveReplayRestartAndPartialQuarantine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	template, err := equipment.Resolve(device.TemplateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, expectedParserVersion := ingestParserIdentity(device, template)
 	foundNewUpload := false
 	for _, item := range ledger {
 		if item.OriginalName == "new-satel.csv" {
 			foundNewUpload = true
 			if item.ParserTemplate != equipment.TemplateSatelRTUCDRV1 ||
-				item.ParserVersion != analytics.SatelRTUParserVersion ||
+				item.ParserVersion != expectedParserVersion ||
 				item.Status != "processed" {
 				t.Fatalf("new Satel upload provenance = %#v", item)
 			}

@@ -138,7 +138,7 @@ func (s *Server) exportEltexCalls(
 		if asynchronous {
 			page, err = s.Analytics.ListExportCallsPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, exportPageSize, cursor,
+				search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
 			)
 		} else {
 			page, err = s.Analytics.ListCallsPage(
@@ -228,7 +228,7 @@ func (s *Server) exportSatelCalls(
 		if asynchronous {
 			page, err = s.Analytics.ListExportSatelRTUCallsPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, exportPageSize, cursor,
+				search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
 			)
 		} else {
 			page, err = s.Analytics.ListSatelRTUCallsPage(
@@ -333,7 +333,7 @@ func (s *Server) exportAntifraud(
 		if asynchronous {
 			page, err = s.Analytics.ListExportAntifraudPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, exportPageSize, cursor,
+				search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
 			)
 		} else {
 			page, err = s.Analytics.ListAntifraudPage(
@@ -422,7 +422,7 @@ func (s *Server) exportEvents(
 		if asynchronous {
 			page, err = s.Analytics.ListExportEventsPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				category, search, exportPageSize, cursor,
+				category, search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
 			)
 		} else {
 			page, err = s.Analytics.ListEventsPage(

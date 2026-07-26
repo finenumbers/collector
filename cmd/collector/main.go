@@ -100,6 +100,7 @@ func main() {
 	}
 	defer durableSpool.Close()
 	ingestMetrics := &ingest.Metrics{}
+	exportHealth := &exportworker.Health{}
 
 	apiServer := &httpapi.Server{
 		Config: cfg, Store: control, Analytics: warehouse,
@@ -111,6 +112,7 @@ func main() {
 		Spool:              durableSpool,
 		NATS:               nc,
 		IngressStatusPath:  cfg.IngressStatusPath,
+		ExportHealth:       exportHealth,
 		ReconcileRetention: retentionReconciler.RunNow,
 	}
 	server := &http.Server{
@@ -151,7 +153,7 @@ func main() {
 	exportWorker := &exportworker.Worker{
 		Store: control, Archive: rawArchive,
 		WorkerID: fmt.Sprintf("%s-%d", hostname, os.Getpid()),
-		SpoolDir: "/data/spool", Render: apiServer.AsyncExportRenderer(),
+		SpoolDir: "/data/spool", Render: apiServer.AsyncExportRenderer(), Health: exportHealth,
 	}
 	go func() {
 		if err := exportWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {

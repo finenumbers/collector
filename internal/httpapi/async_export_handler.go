@@ -95,10 +95,6 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "format must be auto, xlsx, or csv_zip")
 		return
 	}
-	if input.Format == "csv_zip" && validated.Dataset != "events" {
-		writeError(writer, http.StatusBadRequest, "csv_zip is only supported for events")
-		return
-	}
 	device, ok := s.deviceWithCapability(writer, request, deviceID,
 		func(device store.Device) bool {
 			switch validated.Dataset {
@@ -134,6 +130,11 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 	}
 	if s.Analytics == nil {
 		writeError(writer, http.StatusServiceUnavailable, "analytics unavailable")
+		return
+	}
+	if s.ExportHealth != nil && !s.ExportHealth.Available(10*time.Second) {
+		writeError(writer, http.StatusServiceUnavailable,
+			"export worker is unavailable; retry in a few seconds")
 		return
 	}
 	snapshot, err := s.Analytics.PinExportSnapshot(
@@ -205,8 +206,21 @@ func (s *Server) listExportJobs(writer http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) getExportJob(writer http.ResponseWriter, request *http.Request) {
-	_, job, ok := s.exportJobFromRequest(writer, request)
+	deviceID, job, ok := s.exportJobFromRequest(writer, request)
 	if ok {
+		if changed, err := s.Store.FailStaleExportJob(
+			request.Context(), deviceID, job.ID,
+			store.QueuedExportTimeout, store.ExportHeartbeatTimeout,
+		); err != nil {
+			writeError(writer, http.StatusInternalServerError, "unable to validate export worker")
+			return
+		} else if changed {
+			job, err = s.Store.ExportJob(request.Context(), deviceID, job.ID)
+			if err != nil {
+				writeError(writer, http.StatusInternalServerError, "unable to reload export job")
+				return
+			}
+		}
 		writeJSON(writer, http.StatusOK, map[string]any{"job": presentExportJob(job)})
 	}
 }

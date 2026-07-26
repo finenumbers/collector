@@ -772,6 +772,17 @@ func (c *Client) ListAntifraudPage(
 	limit uint64,
 	cursor *AntifraudCursor,
 ) (AntifraudPage, error) {
+	return c.ListAntifraudPageRange(ctx, deviceID, search, limit, cursor, nil)
+}
+
+func (c *Client) ListAntifraudPageRange(
+	ctx context.Context,
+	deviceID uuid.UUID,
+	search string,
+	limit uint64,
+	cursor *AntifraudCursor,
+	timeRange *TimeRange,
+) (AntifraudPage, error) {
 	if limit == 0 {
 		limit = 200
 	} else if limit > 1000 {
@@ -781,7 +792,7 @@ func (c *Client) ListAntifraudPage(
 		return AntifraudPage{}, err
 	} else if revision != 0 {
 		return c.listCurrentAntifraudPage(
-			ctx, deviceID, revision, search, limit, cursor,
+			ctx, deviceID, revision, search, limit, cursor, timeRange,
 		)
 	}
 	query := `SELECT t.transaction_id,t.first_event_at,t.last_event_at,t.call_context,
@@ -813,6 +824,10 @@ func (c *Client) ListAntifraudPage(
 		) c ON c.device_id=t.device_id AND c.transaction_id=t.transaction_id
 		WHERE t.device_id=? AND t.is_antifraud=1`
 	args := []any{SyslogParserVersion, deviceID}
+	if timeRange != nil {
+		query += ` AND t.last_event_at>=? AND t.last_event_at<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(t.acct_session_id,?)>0
 			OR positionCaseInsensitive(t.calling_station_id,?)>0

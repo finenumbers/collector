@@ -27,7 +27,7 @@ export type ExportJob = {
 
 export type CreateExportJobRequest = ExportTarget & {
   q?: string
-  format: 'auto'
+  format: 'csv_zip'
   from?: string
   to?: string
 }
@@ -49,10 +49,21 @@ export function createExportRequest(
   return {
     ...exportTarget(navigationDataset),
     ...(query ? { q: query } : {}),
-    format: 'auto',
+    format: 'csv_zip',
     ...(from ? { from } : {}),
     ...(to ? { to } : {}),
   }
+}
+
+export function localDateInTimezone(timezone: string, now = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now)
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${value.year}-${value.month}-${value.day}`
 }
 
 export function exportJobsURL(deviceID: string): string {

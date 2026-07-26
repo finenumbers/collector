@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/csv"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -238,6 +240,34 @@ func TestParseExportDateUsesDeviceTimezoneAndExclusiveEnd(t *testing.T) {
 	}
 }
 
+func TestDeviceDateRangeUsesActiveTimezoneAndDST(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/events?date=2026-03-29", nil)
+	response := httptest.NewRecorder()
+	timeRange, ok := deviceDateRange(response, request, store.Device{
+		Timezone: "UTC", ActiveTimezone: "Europe/Berlin",
+	})
+	if !ok {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := timeRange.To.Sub(timeRange.From); got != 23*time.Hour {
+		t.Fatalf("DST day duration = %v, want 23h", got)
+	}
+	if got := timeRange.From.Format(time.RFC3339); got != "2026-03-28T23:00:00Z" {
+		t.Fatalf("from = %s", got)
+	}
+}
+
+func TestDeviceDateRangeRejectsInvalidDate(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/events?date=2026-02-30", nil)
+	response := httptest.NewRecorder()
+	if _, ok := deviceDateRange(response, request, store.Device{ActiveTimezone: "UTC"}); ok {
+		t.Fatal("invalid date was accepted")
+	}
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
 func TestSyncAllSyslogRequiresAsyncExport(t *testing.T) {
 	response := httptest.NewRecorder()
 	(&Server{}).exportXLSX(response, httptest.NewRequest(
@@ -300,6 +330,71 @@ func TestAutoExportUsesCSVForUnknownSyslogEstimate(t *testing.T) {
 	}
 	if useCSVZip(store.ExportJob{Dataset: "events", Format: "xlsx"}) {
 		t.Fatal("explicit XLSX request was not honored")
+	}
+	if !useCSVZip(store.ExportJob{Dataset: "calls", Format: "csv_zip"}) {
+		t.Fatal("explicit calls CSV.zip request was not honored")
+	}
+	if got := csvSafe("=WEBSERVICE(\"https://example.test\")"); got[0] != '\'' {
+		t.Fatalf("CSV formula was not escaped: %q", got)
+	}
+}
+
+func TestCSVArchiveStreamsSafeRows(t *testing.T) {
+	var output bytes.Buffer
+	job := store.ExportJob{
+		DeviceID: uuid.New(), Dataset: "calls",
+		CreatedAt: time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC),
+	}
+	result, err := renderCSVArchive(job, &output, []string{"A", "B"},
+		func(writer *csv.Writer) (int64, error) {
+			return 1, writeCSVValues(writer, "=danger", 42)
+		}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Format != "csv_zip" || result.Rows != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	archive, err := zip.NewReader(bytes.NewReader(output.Bytes()), int64(output.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.File) != 1 {
+		t.Fatalf("archive files=%d", len(archive.File))
+	}
+	entry, err := archive.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Close()
+	rows, err := csv.NewReader(entry).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[1][0] != "'=danger" || rows[1][1] != "42" {
+		t.Fatalf("CSV rows = %#v", rows)
+	}
+}
+
+func BenchmarkCSVArchiveStreaming100k(b *testing.B) {
+	job := store.ExportJob{
+		DeviceID: uuid.New(), Dataset: "events",
+		CreatedAt: time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC),
+	}
+	for range b.N {
+		var output bytes.Buffer
+		_, err := renderCSVArchive(job, &output, []string{"Time", "Message"},
+			func(writer *csv.Writer) (int64, error) {
+				for row := 0; row < 100_000; row++ {
+					if err := writeCSVValues(writer, "2026-07-26T12:00:00+07:00", row); err != nil {
+						return int64(row), err
+					}
+				}
+				return 100_000, nil
+			}, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

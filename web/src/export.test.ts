@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   canCancelExport, canDownloadExport, createExportRequest, type ExportJob, exportDownloadURL,
   exportETASeconds, exportJobsURL, exportJobURL, exportProgress, exportStatusLabel, exportTarget,
-  exportURL, formatExportBytes, formatExportDuration, isExportActive, pollDelay,
+  exportURL, formatExportBytes, formatExportDuration, isExportActive, localDateInTimezone, pollDelay,
   type ExportJobStatus, type ExportNavigationDataset,
 } from './export'
 
@@ -53,19 +53,19 @@ describe('export navigation mapping', () => {
 })
 
 describe('async export request contract', () => {
-  it('builds an auto-format request with filters and event mapping', () => {
+  it('builds a CSV.zip request with the selected day and event mapping', () => {
     expect(createExportRequest('alarms', 'critical', '2026-07-01', '2026-07-26')).toEqual({
       dataset: 'events',
       category: 'alarms',
       q: 'critical',
-      format: 'auto',
+      format: 'csv_zip',
       from: '2026-07-01',
       to: '2026-07-26',
     })
   })
 
   it('omits empty optional filters', () => {
-    expect(createExportRequest('calls', '')).toEqual({ dataset: 'calls', format: 'auto' })
+    expect(createExportRequest('calls', '')).toEqual({ dataset: 'calls', format: 'csv_zip' })
   })
 
   it('encodes device and job identifiers in every endpoint', () => {
@@ -73,6 +73,12 @@ describe('async export request contract', () => {
     expect(exportJobURL('device/one', 'job/two')).toBe('/devices/device%2Fone/export-jobs/job%2Ftwo')
     expect(exportDownloadURL('device/one', 'job/two'))
       .toBe('/api/devices/device%2Fone/export-jobs/job%2Ftwo/download')
+  })
+
+  it('derives today in the equipment timezone', () => {
+    const instant = new Date('2026-07-26T21:30:00Z')
+    expect(localDateInTimezone('UTC', instant)).toBe('2026-07-26')
+    expect(localDateInTimezone('Asia/Novosibirsk', instant)).toBe('2026-07-27')
   })
 })
 

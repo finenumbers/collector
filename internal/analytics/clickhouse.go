@@ -92,6 +92,13 @@ type DeviceStats struct {
 	UnlinkedCalls24h       uint64  `json:"unlinkedCalls24h"`
 }
 
+// TimeRange is a half-open UTC interval used by every dated read model.
+// Callers are responsible for deriving it from the device's active timezone.
+type TimeRange struct {
+	From time.Time
+	To   time.Time
+}
+
 type SyslogBreakdownRow struct {
 	Category       string    `json:"category"`
 	ParseStatus    string    `json:"parseStatus"`
@@ -517,15 +524,26 @@ func (c *Client) ListEvents(ctx context.Context, deviceID uuid.UUID, category, s
 }
 
 func (c *Client) ListEventsPage(ctx context.Context, deviceID uuid.UUID, category, search string, limit uint64, cursor *EventCursor) (EventPage, error) {
+	return c.ListEventsPageRange(ctx, deviceID, category, search, limit, cursor, nil)
+}
+
+func (c *Client) ListEventsPageRange(
+	ctx context.Context, deviceID uuid.UUID, category, search string, limit uint64,
+	cursor *EventCursor, timeRange *TimeRange,
+) (EventPage, error) {
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
 	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
 		return EventPage{}, err
 	} else if revision != 0 {
-		return c.listCurrentEventsPage(ctx, deviceID, revision, category, search, limit, cursor)
+		return c.listCurrentEventsPage(
+			ctx, deviceID, revision, category, search, limit, cursor, timeRange,
+		)
 	} else {
-		return c.listFallbackEventsPage(ctx, deviceID, category, search, limit, cursor)
+		return c.listFallbackEventsPage(
+			ctx, deviceID, category, search, limit, cursor, timeRange,
+		)
 	}
 }
 
@@ -535,13 +553,22 @@ func (c *Client) ListCalls(ctx context.Context, deviceID uuid.UUID, search strin
 }
 
 func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor) (CallPage, error) {
+	return c.ListCallsPageRange(ctx, deviceID, search, limit, cursor, nil)
+}
+
+func (c *Client) ListCallsPageRange(
+	ctx context.Context, deviceID uuid.UUID, search string, limit uint64,
+	cursor *CallCursor, timeRange *TimeRange,
+) (CallPage, error) {
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
 	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
 		return CallPage{}, err
 	} else if revision != 0 {
-		return c.listCurrentCallsPage(ctx, deviceID, revision, search, limit, cursor)
+		return c.listCurrentCallsPage(
+			ctx, deviceID, revision, search, limit, cursor, timeRange,
+		)
 	}
 	query := `SELECT c.record_id,coalesce(t.setup_time,c.setup_time),c.duration_ms,
 		c.release_cause,c.release_info,c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,
@@ -552,6 +579,11 @@ func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search s
 			ON t.device_id=c.device_id AND t.record_id=c.record_id
 		WHERE c.device_id=?`
 	args := []any{deviceID}
+	if timeRange != nil {
+		query += ` AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=?
+			AND coalesce(t.setup_time,c.setup_time,c.ingested_at)<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(c.incoming_cgpn,?)>0 OR positionCaseInsensitive(c.outgoing_cgpn,?)>0
 			OR positionCaseInsensitive(c.incoming_cdpn,?)>0 OR positionCaseInsensitive(c.outgoing_cdpn,?)>0
@@ -635,10 +667,17 @@ func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID)
 }
 
 func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, error) {
+	now := time.Now().UTC()
+	return c.StatsRange(ctx, deviceID, TimeRange{From: now.Add(-24 * time.Hour), To: now})
+}
+
+func (c *Client) StatsRange(
+	ctx context.Context, deviceID uuid.UUID, timeRange TimeRange,
+) (DeviceStats, error) {
 	if revision, err := c.ActiveDeviceRevision(ctx, deviceID); err != nil {
 		return DeviceStats{}, err
 	} else if revision != 0 {
-		return c.currentStats(ctx, deviceID, revision)
+		return c.currentStats(ctx, deviceID, revision, timeRange)
 	}
 	var result DeviceStats
 	err := c.Conn.QueryRow(ctx, `SELECT count(),countIf(release_cause IS NOT NULL AND release_cause!=16),
@@ -646,8 +685,9 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 		FROM collector.cdr_records AS c FINAL
 		LEFT JOIN collector.cdr_time_interpretations AS t FINAL
 			ON t.device_id=c.device_id AND t.record_id=c.record_id
-		WHERE c.device_id=? AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=now()-INTERVAL 24 HOUR`,
-		deviceID).
+		WHERE c.device_id=? AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=?
+			AND coalesce(t.setup_time,c.setup_time,c.ingested_at)<?`,
+		deviceID, timeRange.From, timeRange.To).
 		Scan(&result.Calls24h, &result.FailedCalls24h, &result.AverageTalkMS)
 	if err != nil {
 		return DeviceStats{}, err
@@ -657,7 +697,9 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 		FROM collector.syslog_interpretations AS i FINAL
 		INNER JOIN collector.raw_syslog r ON r.device_id=i.device_id AND r.event_id=i.event_id
 		WHERE i.device_id=? AND i.parser_version=?
-			AND r.received_at>=now()-INTERVAL 24 HOUR`, deviceID, SyslogParserVersion).
+			AND coalesce(i.event_time,r.event_time,r.received_at)>=?
+			AND coalesce(i.event_time,r.event_time,r.received_at)<?`,
+		deviceID, SyslogParserVersion, timeRange.From, timeRange.To).
 		Scan(&result.Alarms24h, &result.Radius24h, &result.Unknown24h)
 	if err != nil {
 		return DeviceStats{}, err
@@ -666,8 +708,8 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 		countIf(completeness!='complete')
 		FROM collector.antifraud_transactions FINAL
 		WHERE device_id=? AND is_antifraud=1
-			AND last_event_at>=now()-INTERVAL 24 HOUR`,
-		deviceID).
+			AND last_event_at>=? AND last_event_at<?`,
+		deviceID, timeRange.From, timeRange.To).
 		Scan(&result.Antifraud24h, &result.AntifraudRejected24h,
 			&result.AntifraudIncomplete24h)
 	if err != nil {
@@ -682,9 +724,10 @@ func (c *Client) Stats(ctx context.Context, deviceID uuid.UUID) (DeviceStats, er
 			FROM collector.call_event_links
 			WHERE parser_version=?
 		) l ON l.device_id=c.device_id AND l.cdr_record_id=c.record_id
-		WHERE c.device_id=? AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=now()-INTERVAL 24 HOUR
+		WHERE c.device_id=? AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=?
+			AND coalesce(t.setup_time,c.setup_time,c.ingested_at)<?
 			AND l.cdr_record_id=toUUID('00000000-0000-0000-0000-000000000000')`,
-		SyslogParserVersion, deviceID).
+		SyslogParserVersion, deviceID, timeRange.From, timeRange.To).
 		Scan(&result.UnlinkedCalls24h)
 	return result, err
 }

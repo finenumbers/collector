@@ -57,3 +57,25 @@ func TestRunRetriesTransientIterationErrors(t *testing.T) {
 		t.Fatalf("worker stopped after %d attempt", attempts)
 	}
 }
+
+func TestWorkerPublishesHealthWhilePolling(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	health := &Health{}
+	worker := &Worker{
+		Store: &store.Store{}, Archive: &archive.Archive{}, WorkerID: "test",
+		Poll: time.Millisecond, Health: health,
+		Render: func(
+			context.Context, store.ExportJob, io.Writer, ProgressFunc,
+		) (RenderResult, error) {
+			return RenderResult{}, nil
+		},
+		runOnce: func(context.Context) (bool, error) {
+			cancel()
+			return false, nil
+		},
+	}
+	_ = worker.Run(ctx)
+	if !health.Available(time.Second) {
+		t.Fatal("worker health was not published")
+	}
+}

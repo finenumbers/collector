@@ -239,7 +239,7 @@ event IDs. Раздел «RADIUS» показывает полный техни�
 
 Additive projection `antifraud_calls` / `antifraud_operations` / `antifraud_packets`
 разделяет три identity. Call прежде всего определяется нормализованным
-`Acct-Session-Id`, затем `h323-conf-id` и bounded `call_context`; несколько операций
+`h323-conf-id`, затем leg `Acct-Session-Id` и bounded `call_context`; несколько операций
 могут принадлежать одному call. `number`, `save_call`, `check_call` и каждый accounting
 occurrence остаются отдельными operations. RADIUS Identifier, retry и ordered
 `attribute_keys` / `attribute_values` относятся только к packet. Packet стабилен от
@@ -247,6 +247,15 @@ raw construct anchor, поэтому replay того же event/burst замен
 `current_antifraud_packets` и `current_antifraud_operations` используют `argMax` по
 revision/version key; старые `antifraud_lifecycles` и `call_assignments` остаются
 совместимым read model на время миграции.
+
+Call-scoped API `GET /devices/{deviceID}/calls/{recordID}/antifraud-summary`
+возвращает CDR, canonical call identity, leg session aliases, упорядоченные операции,
+packet identifiers/codes/latency и correlation evidence. До active marker v16 endpoint
+возвращает `projectionStatus=building` и только безопасные CDR facts, не смешивая v15/v16.
+
+Строка CDR dump `server rejected: :0 (replied 0)` хранится как
+`intrinsic_kind=cdr_dump_field`, `semantic_category=call_trace` и не означает
+RADIUS `Access-Reject`. Настоящий reject требует RADIUS request/server evidence.
 
 Public maps, export и UI удаляют `Password` / `User-Password`; immutable payload в
 `raw_syslog` не изменяется. Operation-to-CDR correlation допускает несколько operations

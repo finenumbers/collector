@@ -38,7 +38,7 @@ func (c *Client) hasProjectedOperation(
 }
 
 // ActivateParserProjection atomically exposes a completely replayed parser projection.
-// Live v15 rows can be written while replay is running, but readers remain on the
+// Live v16 rows can be written while replay is running, but readers remain on the
 // legacy projection until this marker is inserted after the replay watermark is reached.
 func (c *Client) ActivateParserProjection(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, parserVersion string,
@@ -66,13 +66,18 @@ func (c *Client) listOperationAntifraudPage(
 	}
 	query := `WITH links AS
 		(
-			SELECT operation_id,argMax(cdr_record_id,updated_at) AS cdr_record_id,
-				argMax(state,updated_at) AS state,argMax(method,updated_at) AS method,
-				argMax(time_delta_ms,updated_at) AS time_delta_ms,
-				argMax(reason,updated_at) AS reason
-			FROM collector.antifraud_operation_cdr_links
-			WHERE device_id=? AND timezone_revision=? AND parser_version=?
-			GROUP BY operation_id
+			SELECT operation_id,latest.1 AS cdr_record_id,latest.2 AS state,
+				latest.3 AS method,latest.4 AS time_delta_ms,latest.5 AS reason
+			FROM
+			(
+				SELECT operation_id,argMax(
+					tuple(cdr_record_id,state,method,time_delta_ms,reason),
+					tuple(updated_at,state,method,reason)
+				) AS latest
+				FROM collector.antifraud_operation_cdr_links
+				WHERE device_id=? AND timezone_revision=? AND parser_version=?
+				GROUP BY operation_id
+			)
 		),
 		cdr_times AS
 		(
@@ -101,7 +106,9 @@ func (c *Client) listOperationAntifraudPage(
 			ifNull(req.attributes['out_trunkgroup_label'],''),
 			if(o.operation_type='accounting',o.terminal_state,''),
 			o.q850_cause,
-			if(o.terminal_state IN ('outstanding','incomplete_response','ambiguous'),
+			if(o.terminal_state IN (
+				'outstanding','incomplete_response','ambiguous','ambiguous_response'
+			),
 				'incomplete','complete'),
 			mapConcat(ifNull(req.attributes,map()),ifNull(resp.attributes,map()),
 				map('terminal_state',o.terminal_state,'terminal_reason',o.terminal_reason)),

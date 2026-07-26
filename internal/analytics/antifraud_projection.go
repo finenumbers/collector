@@ -42,6 +42,7 @@ type AntiFraudOperation struct {
 	OperationType                 string
 	Occurrence                    uint32
 	CallContext                   string
+	SessionRaw                    string
 	Session                       string
 	RequestPacketID               *uuid.UUID
 	RequestIdentifier             *uint8
@@ -63,6 +64,8 @@ type antiFraudCall struct {
 	SessionRaw, Session       string
 	H323ConfID                string
 	CallContexts              []string
+	LegSessions               []string
+	LegSessionsNormalized     []string
 	RawEventIDs               []uuid.UUID
 	ParserVersion             string
 }
@@ -71,6 +74,63 @@ type antiFraudProjection struct {
 	Packets    []AntiFraudPacket
 	Operations []AntiFraudOperation
 	Calls      []antiFraudCall
+}
+
+type CompactAntiFraudProjection struct {
+	Packets      int                         `json:"packets"`
+	Operations   []CompactAntiFraudOperation `json:"operations"`
+	Calls        int                         `json:"calls"`
+	BogusRejects int                         `json:"bogusRejects"`
+}
+
+type CompactAntiFraudOperation struct {
+	Type               string  `json:"type"`
+	Session            string  `json:"session"`
+	RequestIdentifier  *uint8  `json:"requestIdentifier"`
+	ResponseIdentifier *uint8  `json:"responseIdentifier"`
+	ResponseCode       string  `json:"responseCode"`
+	LatencyMS          *uint32 `json:"latencyMs"`
+	TerminalState      string  `json:"terminalState"`
+	TerminalReason     string  `json:"terminalReason"`
+}
+
+// CompactAntiFraudSummary is a deterministic acceptance-test representation of
+// the projection. It intentionally contains no UUIDs or wall-clock update times.
+func CompactAntiFraudSummary(events []SyslogEvent) CompactAntiFraudProjection {
+	projection := buildAntiFraudProjection(events, nil)
+	result := CompactAntiFraudProjection{
+		Packets: len(projection.Packets), Calls: len(projection.Calls),
+		Operations: make([]CompactAntiFraudOperation, 0, len(projection.Operations)),
+	}
+	packets := make(map[uuid.UUID]AntiFraudPacket, len(projection.Packets))
+	for _, packet := range projection.Packets {
+		packets[packet.PacketID] = packet
+		if packet.Code == "access-reject" &&
+			packet.Attributes["intrinsic_kind"] == "cdr_dump_field" {
+			result.BogusRejects++
+		}
+	}
+	for _, operation := range projection.Operations {
+		item := CompactAntiFraudOperation{
+			Type: operation.OperationType, Session: operation.Session,
+			RequestIdentifier: operation.RequestIdentifier,
+			TerminalState:     operation.TerminalState, TerminalReason: operation.TerminalReason,
+		}
+		if operation.ResponsePacketID != nil {
+			response := packets[*operation.ResponsePacketID]
+			item.ResponseIdentifier = response.Identifier
+			item.ResponseCode = response.Code
+			item.LatencyMS = parseUint32Attribute(response.Attributes["latency_ms"])
+		}
+		result.Operations = append(result.Operations, item)
+	}
+	sort.Slice(result.Operations, func(i, j int) bool {
+		if result.Operations[i].Type != result.Operations[j].Type {
+			return result.Operations[i].Type < result.Operations[j].Type
+		}
+		return result.Operations[i].Session < result.Operations[j].Session
+	})
+	return result
 }
 
 func sanitizePublicAttributes(attributes map[string]string) map[string]string {
@@ -137,11 +197,11 @@ func antiFraudAnchor(event SyslogEvent) uuid.UUID {
 }
 
 func antiFraudCallIdentity(attributes map[string]string, anchor uuid.UUID) (string, string) {
-	if session := normalizeCorrelationValue(attributes["acct_session_id"]); session != "" {
-		return "acct_session_id", session
-	}
 	if confID := normalizeCorrelationValue(attributes["h323_conf_id"]); confID != "" {
 		return "h323_conf_id", confID
+	}
+	if session := normalizeCorrelationValue(attributes["acct_session_id"]); session != "" {
+		return "acct_session_id", session
 	}
 	if contextValue := normalizeCorrelationValue(attributes["call_context"]); contextValue != "" {
 		return "call_context", contextValue
@@ -155,9 +215,9 @@ func antiFraudCallID(deviceID uuid.UUID, kind, value string) uuid.UUID {
 	)))
 }
 
-func antiFraudPacketID(event SyslogEvent, revision uint64, anchor uuid.UUID) uuid.UUID {
+func antiFraudPacketID(event SyslogEvent, revision uint64, identity string) uuid.UUID {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf(
-		"%s|%d|%s|%s|packet", event.DeviceID, revision, SyslogParserVersion, anchor,
+		"%s|%d|%s|%s|packet", event.DeviceID, revision, SyslogParserVersion, identity,
 	)))
 }
 
@@ -174,6 +234,12 @@ func projectionOperationType(packet AntiFraudPacket) string {
 }
 
 func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperation) antiFraudProjection {
+	return buildAntiFraudProjectionWithPackets(events, existing, nil)
+}
+
+func buildAntiFraudProjectionWithPackets(
+	events []SyslogEvent, existing []AntiFraudOperation, persisted []AntiFraudPacket,
+) antiFraudProjection {
 	type packetKey struct {
 		device   uuid.UUID
 		revision uint64
@@ -192,31 +258,89 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 	})
 	grouped := make(map[packetKey][]SyslogEvent)
 	order := make([]packetKey, 0)
+	basePackets := make(map[packetKey]AntiFraudPacket)
+	candidates := make([]AntiFraudPacket, 0, len(persisted)+len(events))
+	for _, packet := range persisted {
+		key := packetKey{packet.DeviceID, packet.Revision, packet.AnchorID}
+		basePackets[key] = packet
+		candidates = append(candidates, packet)
+	}
 	for _, event := range sortedEvents {
-		if event.Category != "radius" {
+		if event.Category != "radius" || event.Attributes["intrinsic_kind"] == "cdr_dump_field" {
 			continue
 		}
 		revision := event.TimezoneRevision
 		if revision == 0 {
 			revision = 1
 		}
-		key := packetKey{event.DeviceID, revision, antiFraudAnchor(event)}
+		direction := strings.ToLower(event.Attributes["packet_direction"])
+		code := strings.ToLower(event.Attributes["packet_code"])
+		if direction == "" {
+			if strings.HasSuffix(code, "request") {
+				direction = "request"
+			} else if code != "" {
+				direction = "response"
+			}
+		}
+		identifier := event.Attributes["packet_identifier"]
+		anchor := antiFraudAnchor(event)
+		key := packetKey{event.DeviceID, revision, anchor}
+		if event.Attributes["packet_status_event"] == "true" {
+			if matched, ok := closestProjectionPacket(
+				event, direction, identifier, candidates,
+			); ok {
+				key = packetKey{matched.DeviceID, matched.Revision, matched.AnchorID}
+			} else {
+				// A status trace is evidence for a packet, never a packet itself.
+				continue
+			}
+		}
+		if code == "" && direction == "" {
+			if _, inBatch := grouped[key]; !inBatch {
+				if _, persisted := basePackets[key]; !persisted {
+					// Control/status rows may enrich a known anchored packet, but
+					// cannot create standalone packets.
+					continue
+				}
+			}
+		}
 		if _, ok := grouped[key]; !ok {
 			order = append(order, key)
 		}
 		grouped[key] = append(grouped[key], event)
+		if code != "" && event.Attributes["packet_status_event"] != "true" {
+			_, occurredAt := canonicalizeRadiusEvent(event)
+			candidates = append(candidates, AntiFraudPacket{
+				DeviceID: event.DeviceID, Revision: revision, AnchorID: key.anchor,
+				OccurredAt: occurredAt, Direction: direction,
+				Identifier: parseUint8Attribute(identifier),
+				Attributes: map[string]string{"call_context": event.Attributes["call_context"]},
+			})
+		}
 	}
 
 	result := antiFraudProjection{}
 	for _, key := range order {
 		members := grouped[key]
-		packet := AntiFraudPacket{
-			DeviceID: key.device, Revision: key.revision, AnchorID: key.anchor,
-			PacketID:  antiFraudPacketID(members[0], key.revision, key.anchor),
-			UpdatedAt: time.Now().UTC(), Attributes: make(map[string]string),
-			Completeness: "packet", ParserVersion: SyslogParserVersion,
+		packet, exists := basePackets[key]
+		if !exists {
+			packet = AntiFraudPacket{
+				DeviceID: key.device, Revision: key.revision, AnchorID: key.anchor,
+				PacketID:   antiFraudPacketID(members[0], key.revision, key.anchor.String()),
+				Attributes: make(map[string]string), Completeness: "packet",
+				ParserVersion: SyslogParserVersion,
+			}
+		} else {
+			packet.AttributeKeys = append([]string(nil), packet.AttributeKeys...)
+			packet.AttributeValues = append([]string(nil), packet.AttributeValues...)
+			packet.RawEventIDs = append([]uuid.UUID(nil), packet.RawEventIDs...)
+			packet.Attributes = cloneStringMap(packet.Attributes)
 		}
+		packet.UpdatedAt = time.Now().UTC()
 		for _, member := range members {
+			if containsUUID(packet.RawEventIDs, member.EventID) {
+				continue
+			}
 			canonical, occurredAt := canonicalizeRadiusEvent(member)
 			if packet.OccurredAt.IsZero() || occurredAt.Before(packet.OccurredAt) {
 				packet.OccurredAt = occurredAt
@@ -251,6 +375,7 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 	occurrences := make(map[string]uint32)
 	outstanding := make([]*AntiFraudOperation, 0)
 	existingIDs := make(map[uuid.UUID]bool)
+	existingByID := make(map[uuid.UUID]*AntiFraudOperation)
 	existingRequests := make(map[uuid.UUID]*AntiFraudOperation)
 	existingResponses := make(map[uuid.UUID]*AntiFraudOperation)
 	for index := range existing {
@@ -261,14 +386,15 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 			occurrences[key] = item.Occurrence
 		}
 		copy := item
+		existingByID[item.OperationID] = &copy
 		if item.RequestPacketID != nil {
-			existingRequests[*item.RequestPacketID] = &copy
+			existingRequests[*item.RequestPacketID] = existingByID[item.OperationID]
 		}
 		if item.ResponsePacketID != nil {
-			existingResponses[*item.ResponsePacketID] = &copy
+			existingResponses[*item.ResponsePacketID] = existingByID[item.OperationID]
 		}
 		if item.TerminalState == "outstanding" {
-			outstanding = append(outstanding, &copy)
+			outstanding = append(outstanding, existingByID[item.OperationID])
 		}
 	}
 	updatedExisting := make(map[uuid.UUID]*AntiFraudOperation)
@@ -277,9 +403,17 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 		operationType := projectionOperationType(*packet)
 		if packet.Direction != "response" && operationType != "" {
 			operationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(packet.PacketID.String()+"|operation"))
+			if packet.OperationID != nil {
+				if operation := existingByID[*packet.OperationID]; operation != nil {
+					updateOperationFromRequestPacket(operation, packet, operationType)
+					updatedExisting[operation.OperationID] = operation
+					continue
+				}
+			}
 			if operation := existingRequests[packet.PacketID]; operation != nil {
 				packet.OperationID = &operation.OperationID
-				packet.CallID = operation.CallID
+				updateOperationFromRequestPacket(operation, packet, operationType)
+				updatedExisting[operation.OperationID] = operation
 				continue
 			}
 			if packet.Retry > 0 {
@@ -307,6 +441,7 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 				FirstEventAt: packet.OccurredAt, LastEventAt: packet.OccurredAt,
 				OperationType: operationType, Occurrence: occurrences[key],
 				CallContext:     packet.Attributes["call_context"],
+				SessionRaw:      packet.Attributes["acct_session_id"],
 				Session:         normalizeCorrelationValue(packet.Attributes["acct_session_id"]),
 				RequestPacketID: &packet.PacketID, TerminalState: "outstanding",
 				RequestIdentifier: packet.Identifier,
@@ -330,6 +465,11 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 		if packet.Direction != "response" {
 			continue
 		}
+		if packet.Code == "access-response" && packet.Attributes["result"] == "" {
+			// Eltex reply headers identify a packet but do not contain its
+			// terminal result. A later Proc Reply event updates this same packet.
+			continue
+		}
 		if operation := existingResponses[packet.PacketID]; operation != nil {
 			packet.OperationID = &operation.OperationID
 			packet.CallID = operation.CallID
@@ -345,7 +485,7 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 		}
 		reason := "incomplete_response"
 		if len(candidates) > 1 {
-			reason = "ambiguous"
+			reason = "ambiguous_response"
 		}
 		operationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(packet.PacketID.String()+"|response-only"))
 		packet.OperationID = &operationID
@@ -354,6 +494,7 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 			CallID: packet.CallID, UpdatedAt: packet.UpdatedAt, FirstEventAt: packet.OccurredAt,
 			LastEventAt: packet.OccurredAt, OperationType: projectionOperationType(*packet),
 			CallContext:      packet.Attributes["call_context"],
+			SessionRaw:       packet.Attributes["acct_session_id"],
 			Session:          normalizeCorrelationValue(packet.Attributes["acct_session_id"]),
 			ResponsePacketID: &packet.PacketID, TerminalState: reason, TerminalReason: reason,
 			RawEventIDs:   append([]uuid.UUID(nil), packet.RawEventIDs...),
@@ -368,12 +509,78 @@ func buildAntiFraudProjection(events []SyslogEvent, existing []AntiFraudOperatio
 	return result
 }
 
+func updateOperationFromRequestPacket(
+	operation *AntiFraudOperation, packet *AntiFraudPacket, operationType string,
+) {
+	packet.OperationID = &operation.OperationID
+	operation.UpdatedAt = time.Now().UTC()
+	if packet.OccurredAt.After(operation.LastEventAt) {
+		operation.LastEventAt = packet.OccurredAt
+	}
+	operation.CallID = packet.CallID
+	operation.OperationType = prefer(operation.OperationType, operationType)
+	operation.CallContext = prefer(
+		operation.CallContext, packet.Attributes["call_context"],
+	)
+	operation.SessionRaw = prefer(
+		operation.SessionRaw, packet.Attributes["acct_session_id"],
+	)
+	operation.Session = normalizeCorrelationValue(operation.SessionRaw)
+	for _, eventID := range packet.RawEventIDs {
+		operation.RawEventIDs = appendUniqueUUID(operation.RawEventIDs, eventID)
+	}
+}
+
+func closestProjectionPacket(
+	event SyslogEvent, direction, identifier string, candidates []AntiFraudPacket,
+) (AntiFraudPacket, bool) {
+	_, occurredAt := canonicalizeRadiusEvent(event)
+	contextValue := event.Attributes["call_context"]
+	eventIdentifier := parseUint8Attribute(identifier)
+	var selected AntiFraudPacket
+	found := false
+	for _, candidate := range candidates {
+		if candidate.DeviceID != event.DeviceID ||
+			candidate.Revision != max(event.TimezoneRevision, uint64(1)) ||
+			candidate.Direction != direction ||
+			eventIdentifier == nil || candidate.Identifier == nil ||
+			*candidate.Identifier != *eventIdentifier ||
+			(contextValue != "" && candidate.Attributes["call_context"] != contextValue) ||
+			candidate.OccurredAt.After(occurredAt) ||
+			occurredAt.Sub(candidate.OccurredAt) > antifraudResponseWindow {
+			continue
+		}
+		if !found || candidate.OccurredAt.After(selected.OccurredAt) ||
+			(candidate.OccurredAt.Equal(selected.OccurredAt) &&
+				candidate.AnchorID.String() < selected.AnchorID.String()) {
+			selected, found = candidate, true
+		}
+	}
+	return selected, found
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func containsUUID(values []uuid.UUID, candidate uuid.UUID) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 func compatibleRetryOperations(
 	packet AntiFraudPacket, operationType string, operations []*AntiFraudOperation,
 ) []*AntiFraudOperation {
 	contextValue := packet.Attributes["call_context"]
 	result := make([]*AntiFraudOperation, 0)
-	bestDelta := antifraudResponseWindow + time.Nanosecond
 	for _, operation := range operations {
 		if operation.DeviceID != packet.DeviceID || operation.Revision != packet.Revision ||
 			operation.TerminalState != "outstanding" || operation.OperationType != operationType ||
@@ -387,11 +594,7 @@ func compatibleRetryOperations(
 				*packet.Identifier != *operation.RequestIdentifier) {
 			continue
 		}
-		if delta < bestDelta {
-			bestDelta, result = delta, []*AntiFraudOperation{operation}
-		} else if delta == bestDelta {
-			result = append(result, operation)
-		}
+		result = append(result, operation)
 	}
 	return result
 }
@@ -401,7 +604,6 @@ func compatibleOutstandingOperations(
 ) []*AntiFraudOperation {
 	contextValue := packet.Attributes["call_context"]
 	result := make([]*AntiFraudOperation, 0)
-	bestDelta := antifraudResponseWindow + time.Nanosecond
 	for _, operation := range operations {
 		if operation.DeviceID != packet.DeviceID || operation.Revision != packet.Revision ||
 			operation.TerminalState != "outstanding" || operation.LastEventAt.After(packet.OccurredAt) {
@@ -416,11 +618,7 @@ func compatibleOutstandingOperations(
 			*packet.Identifier != *operation.RequestIdentifier {
 			continue
 		}
-		if delta < bestDelta {
-			bestDelta, result = delta, []*AntiFraudOperation{operation}
-		} else if delta == bestDelta {
-			result = append(result, operation)
-		}
+		result = append(result, operation)
 	}
 	return result
 }
@@ -433,16 +631,19 @@ func applyOperationResponse(operation *AntiFraudOperation, packet *AntiFraudPack
 	packet.OperationID = &operation.OperationID
 	packet.CallID = operation.CallID
 	if packet.Attributes["acct_session_id"] == "" && operation.Session != "" {
-		packet.Attributes["acct_session_id"] = operation.Session
+		packet.Attributes["acct_session_id"] = operation.SessionRaw
+		if packet.Attributes["acct_session_id"] == "" {
+			packet.Attributes["acct_session_id"] = operation.Session
+		}
 	}
 	if packet.Attributes["call_context"] == "" {
 		packet.Attributes["call_context"] = operation.CallContext
 	}
 	switch operation.OperationType {
 	case "number", "save_call":
-		operation.TerminalState = "informational"
-		operation.TerminalReason = "indication_response"
-		operation.Decision = "informational"
+		operation.TerminalState = "response_received"
+		operation.TerminalReason = "no_block_evidence"
+		operation.Decision = "neutral"
 	case "check_call":
 		switch packet.Code {
 		case "access-accept":
@@ -470,6 +671,9 @@ func applyOperationResponse(operation *AntiFraudOperation, packet *AntiFraudPack
 func projectionCalls(packets []AntiFraudPacket) []antiFraudCall {
 	result := make(map[uuid.UUID]*antiFraudCall)
 	for _, packet := range packets {
+		if packet.OperationID == nil {
+			continue
+		}
 		item := result[packet.CallID]
 		kind, identity := antiFraudCallIdentity(packet.Attributes, packet.AnchorID)
 		if item == nil {
@@ -491,6 +695,12 @@ func projectionCalls(packets []AntiFraudPacket) []antiFraudCall {
 		}
 		if contextValue := packet.Attributes["call_context"]; contextValue != "" {
 			item.CallContexts = appendUniqueString(item.CallContexts, contextValue)
+		}
+		if session := packet.Attributes["acct_session_id"]; session != "" {
+			item.LegSessions = appendUniqueString(item.LegSessions, session)
+			item.LegSessionsNormalized = appendUniqueString(
+				item.LegSessionsNormalized, normalizeCorrelationValue(session),
+			)
 		}
 		for _, eventID := range packet.RawEventIDs {
 			item.RawEventIDs = appendUniqueUUID(item.RawEventIDs, eventID)
@@ -517,7 +727,11 @@ func (c *Client) processAntiFraudProjection(ctx context.Context, events []Syslog
 	if err != nil {
 		return err
 	}
-	projection := buildAntiFraudProjection(events, existing)
+	persistedPackets, err := c.loadProjectionPackets(ctx, events)
+	if err != nil {
+		return err
+	}
+	projection := buildAntiFraudProjectionWithPackets(events, existing, persistedPackets)
 	if len(projection.Packets) == 0 {
 		return nil
 	}
@@ -528,6 +742,61 @@ func (c *Client) processAntiFraudProjection(ctx context.Context, events []Syslog
 		return err
 	}
 	return c.insertProjectionOperations(ctx, projection.Operations)
+}
+
+func (c *Client) loadProjectionPackets(
+	ctx context.Context, events []SyslogEvent,
+) ([]AntiFraudPacket, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	deviceID := events[0].DeviceID
+	revision := events[0].TimezoneRevision
+	if revision == 0 {
+		revision = 1
+	}
+	_, firstAt := canonicalizeRadiusEvent(events[0])
+	from, to := firstAt.Add(-antifraudResponseWindow), firstAt.Add(antifraudResponseWindow)
+	for _, event := range events[1:] {
+		if event.DeviceID != deviceID {
+			return nil, nil
+		}
+		_, occurredAt := canonicalizeRadiusEvent(event)
+		if occurredAt.Add(-antifraudResponseWindow).Before(from) {
+			from = occurredAt.Add(-antifraudResponseWindow)
+		}
+		if occurredAt.Add(antifraudResponseWindow).After(to) {
+			to = occurredAt.Add(antifraudResponseWindow)
+		}
+	}
+	rows, err := c.Conn.Query(ctx, `SELECT packet_id,updated_at,occurred_at,call_id,
+			operation_id,construct_anchor_event_id,direction,packet_code,
+			packet_identifier,retry,completeness,terminal_reason,attribute_keys,
+			attribute_values,attributes,raw_event_ids
+		FROM collector.current_antifraud_packets
+		WHERE device_id=? AND timezone_revision=? AND parser_version=?
+		  AND occurred_at>=? AND occurred_at<=?`,
+		deviceID, revision, SyslogParserVersion, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]AntiFraudPacket, 0)
+	for rows.Next() {
+		item := AntiFraudPacket{
+			DeviceID: deviceID, Revision: revision, ParserVersion: SyslogParserVersion,
+		}
+		if err := rows.Scan(
+			&item.PacketID, &item.UpdatedAt, &item.OccurredAt, &item.CallID,
+			&item.OperationID, &item.AnchorID, &item.Direction, &item.Code,
+			&item.Identifier, &item.Retry, &item.Completeness, &item.TerminalReason,
+			&item.AttributeKeys, &item.AttributeValues, &item.Attributes, &item.RawEventIDs,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (c *Client) loadProjectionOperations(
@@ -555,7 +824,7 @@ func (c *Client) loadProjectionOperations(
 	}
 	rows, err := c.Conn.Query(ctx, `SELECT o.operation_id,o.updated_at,o.first_event_at,
 		o.last_event_at,o.call_id,o.operation_type,o.occurrence,o.call_context,
-		o.acct_session_id_normalized,o.request_packet_id,p.packet_identifier,
+		o.acct_session_id,o.acct_session_id_normalized,o.request_packet_id,p.packet_identifier,
 		o.response_packet_id,o.terminal_state,o.terminal_reason,o.decision,
 		o.q850_cause,o.raw_event_ids
 		FROM collector.current_antifraud_operations AS o
@@ -577,7 +846,8 @@ func (c *Client) loadProjectionOperations(
 		if err := rows.Scan(
 			&item.OperationID, &item.UpdatedAt, &item.FirstEventAt, &item.LastEventAt,
 			&item.CallID, &item.OperationType, &item.Occurrence, &item.CallContext,
-			&item.Session, &item.RequestPacketID, &item.RequestIdentifier, &item.ResponsePacketID,
+			&item.SessionRaw, &item.Session, &item.RequestPacketID, &item.RequestIdentifier,
+			&item.ResponsePacketID,
 			&item.TerminalState, &item.TerminalReason, &item.Decision,
 			&item.Q850Cause, &item.RawEventIDs,
 		); err != nil {
@@ -592,7 +862,8 @@ func (c *Client) insertProjectionCalls(ctx context.Context, calls []antiFraudCal
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.antifraud_calls
 		(device_id,timezone_revision,parser_version,call_id,updated_at,first_event_at,
 		 last_event_at,identity_kind,identity_value,acct_session_id,
-		 acct_session_id_normalized,h323_conf_id,call_contexts,raw_event_ids)`)
+		 acct_session_id_normalized,h323_conf_id,call_contexts,raw_event_ids,
+		 leg_session_ids,leg_session_ids_normalized)`)
 	if err != nil {
 		return err
 	}
@@ -601,6 +872,7 @@ func (c *Client) insertProjectionCalls(ctx context.Context, calls []antiFraudCal
 			item.DeviceID, item.Revision, item.ParserVersion, item.CallID, item.UpdatedAt,
 			item.FirstEventAt, item.LastEventAt, item.IdentityKind, item.IdentityValue,
 			item.SessionRaw, item.Session, item.H323ConfID, item.CallContexts, item.RawEventIDs,
+			item.LegSessions, item.LegSessionsNormalized,
 		); err != nil {
 			return err
 		}
@@ -639,7 +911,7 @@ func (c *Client) insertProjectionOperations(
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.antifraud_operations
 		(device_id,timezone_revision,parser_version,operation_id,updated_at,first_event_at,
 		 last_event_at,call_id,operation_type,occurrence,call_context,
-		 acct_session_id_normalized,request_packet_id,response_packet_id,terminal_state,
+		 acct_session_id,acct_session_id_normalized,request_packet_id,response_packet_id,terminal_state,
 		 terminal_reason,decision,q850_cause,raw_event_ids)`)
 	if err != nil {
 		return err
@@ -648,7 +920,7 @@ func (c *Client) insertProjectionOperations(
 		if err := batch.Append(
 			item.DeviceID, item.Revision, item.ParserVersion, item.OperationID, item.UpdatedAt,
 			item.FirstEventAt, item.LastEventAt, item.CallID, item.OperationType,
-			item.Occurrence, item.CallContext, item.Session, item.RequestPacketID,
+			item.Occurrence, item.CallContext, item.SessionRaw, item.Session, item.RequestPacketID,
 			item.ResponsePacketID, item.TerminalState, item.TerminalReason, item.Decision,
 			item.Q850Cause, item.RawEventIDs,
 		); err != nil {
@@ -663,10 +935,14 @@ func (c *Client) reconcileOperationCDRs(
 ) error {
 	from := bucket.Bucket.UTC().Add(-10 * time.Minute)
 	to := bucket.Bucket.UTC().Add(24*time.Hour + 10*time.Minute)
-	rows, err := c.Conn.Query(ctx, `SELECT operation_id,first_event_at,acct_session_id_normalized
-		FROM collector.current_antifraud_operations
-		WHERE device_id=? AND timezone_revision=? AND parser_version=?
-		  AND first_event_at>=? AND first_event_at<?`,
+	rows, err := c.Conn.Query(ctx, `SELECT o.operation_id,o.first_event_at,
+			o.acct_session_id_normalized,ifNull(c.h323_conf_id_normalized,'')
+		FROM collector.current_antifraud_operations AS o
+		LEFT JOIN collector.current_antifraud_calls AS c
+		  ON c.device_id=o.device_id AND c.timezone_revision=o.timezone_revision
+		 AND c.parser_version=o.parser_version AND c.call_id=o.call_id
+		WHERE o.device_id=? AND o.timezone_revision=? AND o.parser_version=?
+		  AND o.first_event_at>=? AND o.first_event_at<?`,
 		bucket.DeviceID, bucket.Revision, SyslogParserVersion, from, to)
 	if err != nil {
 		return err
@@ -675,11 +951,12 @@ func (c *Client) reconcileOperationCDRs(
 		id      uuid.UUID
 		at      time.Time
 		session string
+		h323    string
 	}
 	operations := make([]operation, 0)
 	for rows.Next() {
 		var item operation
-		if err := rows.Scan(&item.id, &item.at, &item.session); err != nil {
+		if err := rows.Scan(&item.id, &item.at, &item.session, &item.h323); err != nil {
 			rows.Close()
 			return err
 		}
@@ -732,9 +1009,20 @@ func (c *Client) reconcileOperationCDRs(
 	now := time.Now().UTC()
 	for _, operation := range operations {
 		candidates := make([]cdr, 0)
+		method := "exact_acct_session"
 		for _, candidate := range cdrs {
-			if operation.session != "" && operation.session == candidate.session {
+			if operationCDRMatchMethod(operation.session, operation.h323, candidate.session) ==
+				"exact_acct_session" {
 				candidates = append(candidates, candidate)
+			}
+		}
+		if len(candidates) == 0 && operation.h323 != "" {
+			method = "exact_h323_conf_id"
+			for _, candidate := range cdrs {
+				if operationCDRMatchMethod(operation.session, operation.h323, candidate.session) ==
+					"exact_h323_conf_id" {
+					candidates = append(candidates, candidate)
+				}
 			}
 		}
 		sort.Slice(candidates, func(i, j int) bool {
@@ -746,29 +1034,41 @@ func (c *Client) reconcileOperationCDRs(
 			return candidates[i].id.String() < candidates[j].id.String()
 		})
 		var recordID *uuid.UUID
-		state, method, reason := "unlinked", "", "no_session_match"
+		state, selectedMethod, reason := "unlinked", "", "no_session_match"
 		var delta int64
 		if len(candidates) > 0 {
-			bestDelta := absDuration(candidates[0].at.Sub(operation.at))
 			delta = candidates[0].at.Sub(operation.at).Milliseconds()
-			if len(candidates) == 1 ||
-				absDuration(candidates[1].at.Sub(operation.at))-bestDelta >= time.Second {
+			if len(candidates) == 1 {
 				id := candidates[0].id
 				recordID = &id
-				state, method, reason = "linked", "exact_acct_session", ""
+				state, selectedMethod, reason = "linked", method, ""
 			} else {
-				state, method, reason = "ambiguous", "acct_session_time",
-					"ambiguous_session_collision"
+				state, selectedMethod = "ambiguous", method
+				if method == "exact_h323_conf_id" {
+					reason = "ambiguous_h323_conf_id_collision"
+				} else {
+					reason = "ambiguous_session_collision"
+				}
 			}
 		}
 		if err := batch.Append(
 			bucket.DeviceID, bucket.Revision, SyslogParserVersion, operation.id, now,
-			recordID, state, method, delta, reason,
+			recordID, state, selectedMethod, delta, reason,
 		); err != nil {
 			return err
 		}
 	}
 	return batch.Send()
+}
+
+func operationCDRMatchMethod(operationSession, callH323, cdrSession string) string {
+	if operationSession != "" && operationSession == cdrSession {
+		return "exact_acct_session"
+	}
+	if callH323 != "" && callH323 == cdrSession {
+		return "exact_h323_conf_id"
+	}
+	return ""
 }
 
 func absDuration(value time.Duration) time.Duration {

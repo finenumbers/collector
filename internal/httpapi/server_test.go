@@ -18,6 +18,7 @@ import (
 	"collector/internal/config"
 	"collector/internal/store"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/xuri/excelize/v2"
 )
@@ -64,6 +65,30 @@ func TestConstructAPIReportsDisabledFeature(t *testing.T) {
 			t.Fatalf("unexpected response: %s", response.Body.String())
 		}
 	}
+}
+
+func TestCallAntiFraudSummaryErrors(t *testing.T) {
+	t.Run("invalid record id", func(t *testing.T) {
+		route := chi.NewRouteContext()
+		route.URLParams.Add("deviceID", uuid.NewString())
+		route.URLParams.Add("recordID", "not-a-uuid")
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request = request.WithContext(context.WithValue(
+			request.Context(), chi.RouteCtxKey, route,
+		))
+		response := httptest.NewRecorder()
+		(&Server{}).callAntifraudSummary(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+	t.Run("missing CDR", func(t *testing.T) {
+		response := httptest.NewRecorder()
+		writeCallAntiFraudSummaryError(response, analytics.ErrCallCDRNotFound)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
 }
 
 func TestDashboardWindowValidation(t *testing.T) {

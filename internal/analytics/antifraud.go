@@ -116,6 +116,9 @@ func (c *Client) ProcessSyslogDerived(ctx context.Context, event SyslogEvent) er
 		if err := c.processRadiusEvent(ctx, event); err != nil {
 			return err
 		}
+		if err := c.processAntiFraudProjection(ctx, []SyslogEvent{event}); err != nil {
+			return err
+		}
 	}
 	return c.correlateExactProtocolEvent(ctx, event)
 }

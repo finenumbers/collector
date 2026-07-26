@@ -712,7 +712,7 @@ func TestClassifySIPTSeizeWithSS7CategoryStaysSIP(t *testing.T) {
 	}
 }
 
-func TestRadiusServerRejectedComponentNormalized(t *testing.T) {
+func TestBareCDRRejectedFieldIsNotRadius(t *testing.T) {
 	event := ParseSyslog(RawSyslog{
 		EventID: uuid.New(), DeviceID: uuid.New(),
 		ReceivedAt: time.Date(2026, 7, 24, 13, 2, 40, 0, time.UTC),
@@ -721,8 +721,10 @@ func TestRadiusServerRejectedComponentNormalized(t *testing.T) {
 			`<14> <smg1016m>  20:02:40.960163  [INFO] [C027A1E] 		 RADIUS server rejected: :0 (replied 0)`,
 		),
 	})
-	if event.Category != "radius" || event.Component != "RADIUS" {
-		t.Fatalf("rejected line not normalized: %#v", event)
+	if event.Category != "call_trace" || event.Component != "CDR" ||
+		event.Attributes["intrinsic_kind"] != "cdr_dump_field" ||
+		event.Attributes["packet_code"] != "" {
+		t.Fatalf("bare CDR field became a reject packet: %#v", event)
 	}
 	if !strings.Contains(event.Message, "server rejected") {
 		t.Fatalf("message lost rejected wording: %q", event.Message)
@@ -1126,6 +1128,9 @@ func TestEltexAntifraudV15GoldenCorpus(t *testing.T) {
 					}
 				}
 				wantSource := sourceFamilyForCategory(golden.Categories[index])
+				if events[index].Attributes["intrinsic_kind"] == "cdr_dump_field" {
+					wantSource = "cdr"
+				}
 				if events[index].Attributes["source_family"] != wantSource ||
 					events[index].Attributes["transport_family"] != "syslog" ||
 					events[index].Attributes["header_family"] == "" {
@@ -1134,6 +1139,88 @@ func TestEltexAntifraudV15GoldenCorpus(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCallAntiFraudV16GoldenSummary(t *testing.T) {
+	var fixture struct {
+		Template   string    `json:"template"`
+		ReceivedAt time.Time `json:"receivedAt"`
+		Payloads   []string  `json:"payloads"`
+		CDR        struct {
+			SetupTime       time.Time `json:"setupTime"`
+			DurationSeconds uint64    `json:"durationSeconds"`
+			Q850Cause       uint16    `json:"q850Cause"`
+			RadiusSessionID string    `json:"radiusSessionId"`
+			IncomingRoute   string    `json:"incomingRoute"`
+			OutgoingRoute   string    `json:"outgoingRoute"`
+		} `json:"cdr"`
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "call_antifraud_v16.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	deviceID := uuid.MustParse("10000000-0000-0000-0000-000000000016")
+	events := make([]analytics.SyslogEvent, 0, len(fixture.Payloads))
+	for index, payload := range fixture.Payloads {
+		events = append(events, ParseSyslog(RawSyslog{
+			EventID:  uuid.NewSHA1(uuid.NameSpaceOID, []byte(payload)),
+			DeviceID: deviceID, ReceivedAt: fixture.ReceivedAt.Add(time.Duration(index) * time.Millisecond),
+			SourceIP: "192.0.2.16", SourcePort: 514, TemplateKey: fixture.Template,
+			Payload: []byte(payload),
+		}))
+	}
+	NewContinuationAssembler().Assemble(events)
+	if fixture.CDR.SetupTime.IsZero() || fixture.CDR.DurationSeconds != 28 ||
+		fixture.CDR.Q850Cause != 16 || fixture.CDR.IncomingRoute == "" ||
+		fixture.CDR.OutgoingRoute == "" {
+		t.Fatalf("golden CDR fact is incomplete: %#v", fixture.CDR)
+	}
+	if strings.ToLower(strings.Join(strings.Fields(fixture.CDR.RadiusSessionID), "")) !=
+		events[1].Attributes["acct_session_id_normalized"] &&
+		strings.ToLower(strings.Join(strings.Fields(fixture.CDR.RadiusSessionID), "")) !=
+			strings.ToLower(strings.Join(strings.Fields(events[1].Attributes["acct_session_id"]), "")) {
+		t.Fatalf("golden CDR does not retain inbound leg relationship")
+	}
+	last := events[len(events)-1]
+	if last.Category != "call_trace" ||
+		last.Attributes["intrinsic_kind"] != "cdr_dump_field" ||
+		last.Attributes["packet_code"] != "" {
+		t.Fatalf("bare CDR field became RADIUS reject: %#v", last)
+	}
+	got, err := json.MarshalIndent(analytics.CompactAntiFraudSummary(events), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "call_antifraud_v16_expected.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotValue, wantValue any
+	if json.Unmarshal(got, &gotValue) != nil || json.Unmarshal(want, &wantValue) != nil {
+		t.Fatal("invalid compact summary JSON")
+	}
+	gotCanonical, _ := json.Marshal(gotValue)
+	wantCanonical, _ := json.Marshal(wantValue)
+	if string(gotCanonical) != string(wantCanonical) {
+		t.Fatalf("compact summary mismatch:\ngot  %s\nwant %s", got, want)
+	}
+}
+
+func TestTrueRadiusRejectStillParses(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "192.0.2.16",
+		Payload: []byte(`<14> <smg1016m> 22:30:31.000000 [INFO] [CREJ] ` +
+			`RADIUS server rejected: server=192.0.2.44 Request ID [070]`),
+	})
+	if event.Category != "radius" || event.Attributes["packet_code"] != "access-reject" ||
+		event.Attributes["packet_identifier"] != "070" ||
+		event.Attributes["server_address"] != "192.0.2.44" {
+		t.Fatalf("true reject evidence was lost: %#v", event)
 	}
 }
 
@@ -1181,7 +1268,8 @@ func TestEltexAntifraudV15CorpusAudit(t *testing.T) {
 			if reason := event.Attributes["unclassified_reason"]; reason != "" {
 				report.UnknownReasons[reason]++
 			}
-			if event.Attributes["source_family"] != sourceFamilyForCategory(event.Category) {
+			if event.Attributes["source_family"] != sourceFamilyForCategory(event.Category) &&
+				event.Attributes["intrinsic_kind"] != "cdr_dump_field" {
 				report.SourceConfusions++
 			}
 			if event.Attributes["source_family"] != "" {

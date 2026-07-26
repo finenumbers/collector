@@ -462,18 +462,21 @@ func (c *Client) listCurrentAntifraudPage(
 		),
 		assignments AS
 		(
-			SELECT transaction_id,
-				argMax(cdr_record_id,updated_at) AS cdr_record_id,
-				argMax(state,updated_at) AS state,
-				argMax(method,updated_at) AS method,
-				argMax(confidence,updated_at) AS confidence,
-				argMax(time_delta_ms,updated_at) AS time_delta_ms,
-				argMax(matched_fields,updated_at) AS matched_fields,
-				argMax(reason,updated_at) AS reason
-			FROM collector.call_assignments
-			WHERE device_id=? AND timezone_revision=?
-			  AND transaction_id IN (SELECT transaction_id FROM page)
-			GROUP BY transaction_id
+			SELECT transaction_id,latest.1 AS cdr_record_id,latest.2 AS state,
+				latest.3 AS method,latest.4 AS confidence,latest.5 AS time_delta_ms,
+				latest.6 AS matched_fields,latest.7 AS reason
+			FROM
+			(
+				SELECT transaction_id,argMax(
+					tuple(cdr_record_id,state,method,confidence,time_delta_ms,
+						matched_fields,reason),
+					tuple(updated_at,state,method,reason)
+				) AS latest
+				FROM collector.call_assignments
+				WHERE device_id=? AND timezone_revision=?
+				  AND transaction_id IN (SELECT transaction_id FROM page)
+				GROUP BY transaction_id
+			)
 		),
 		cdr_times AS
 		(
@@ -815,7 +818,9 @@ func (c *Client) currentDiagnostics(
 		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
 		(SELECT count() FROM collector.current_antifraud_operations
 		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
-		(SELECT countIf(terminal_state='outstanding') FROM collector.current_antifraud_operations
+		(SELECT countIf(terminal_state IN (
+			'outstanding','incomplete_response','ambiguous','ambiguous_response'
+		)) FROM collector.current_antifraud_operations
 		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
 		(SELECT countIf(terminal_state='verification_accept') FROM collector.current_antifraud_operations
 		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
@@ -823,13 +828,15 @@ func (c *Client) currentDiagnostics(
 		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
 		(SELECT countIf(terminal_state='verification_fail_open') FROM collector.current_antifraud_operations
 		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
-		(SELECT countIf(terminal_state='informational') FROM collector.current_antifraud_operations
+		(SELECT countIf(terminal_state IN ('informational','response_received'))
+		 FROM collector.current_antifraud_operations
 		 WHERE device_id=? AND timezone_revision=? AND parser_version=?),
 		(SELECT countDistinct(event_id) FROM collector.radius_fragments
 		 WHERE device_id=? AND timezone_revision=? AND event_id NOT IN
 		  (SELECT arrayJoin(raw_event_ids) FROM collector.current_antifraud_packets
 		   WHERE device_id=? AND timezone_revision=? AND parser_version=?)),
-		(SELECT countIf(reason='ambiguous_session_collision') FROM
+		(SELECT countIf(reason IN ('ambiguous_session_collision',
+			'ambiguous_h323_conf_id_collision')) FROM
 		 (SELECT operation_id,argMax(reason,updated_at) AS reason
 		  FROM collector.antifraud_operation_cdr_links
 		  WHERE device_id=? AND timezone_revision=? AND parser_version=?

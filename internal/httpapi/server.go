@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 			private.Get("/devices/{deviceID}/ingest-files/{fileID}/download", s.downloadIngestFile)
 			private.With(s.requireAdmin).Get("/devices/{deviceID}/syslog-diagnostics", s.syslogDiagnostics)
 			private.Get("/devices/{deviceID}/calls/{recordID}/timeline", s.callTimeline)
+			private.Get("/devices/{deviceID}/calls/{recordID}/antifraud-summary", s.callAntifraudSummary)
 			private.Get("/devices/{deviceID}/antifraud/{transactionID}/timeline", s.antifraudTimeline)
 			private.Post("/devices/{deviceID}/export-jobs", s.createExportJob)
 			private.Get("/devices/{deviceID}/export-jobs", s.listExportJobs)
@@ -1425,6 +1426,38 @@ func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
+}
+
+func (s *Server) callAntifraudSummary(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	recordID, err := uuid.Parse(chi.URLParam(request, "recordID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid record id")
+		return
+	}
+	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.TypedCDR && device.Capabilities.Antifraud &&
+			device.Capabilities.Radius
+	}, "typed CDR and AntiFraud/RADIUS") {
+		return
+	}
+	summary, err := s.Analytics.CallAntiFraudSummary(request.Context(), deviceID, recordID)
+	if err != nil {
+		writeCallAntiFraudSummaryError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, summary)
+}
+
+func writeCallAntiFraudSummaryError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, analytics.ErrCallCDRNotFound) {
+		writeError(writer, http.StatusNotFound, "call CDR not found")
+		return
+	}
+	writeError(writer, http.StatusInternalServerError, "unable to query call AntiFraud summary")
 }
 
 func (s *Server) antifraudTimeline(writer http.ResponseWriter, request *http.Request) {

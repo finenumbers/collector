@@ -178,7 +178,7 @@ func TestProjectionKeepsOperationTypesDistinctAndVSAOrder(t *testing.T) {
 	for _, operation := range projection.Operations {
 		types[operation.OperationType] = operation.TerminalState
 	}
-	if types["number"] != "informational" || types["save_call"] != "informational" ||
+	if types["number"] != "response_received" || types["save_call"] != "response_received" ||
 		types["check_call"] != "verification_accept" {
 		t.Fatalf("operation semantics were conflated: %#v", types)
 	}
@@ -225,7 +225,8 @@ func TestProjectionRejectAndTimeoutSemantics(t *testing.T) {
 	number := buildAntiFraudProjection(makePair("number", "access-reject", false), nil)
 	check := buildAntiFraudProjection(makePair("check_call", "access-reject", false), nil)
 	timeout := buildAntiFraudProjection(makePair("check_call", "", true), nil)
-	if number.Operations[0].TerminalState != "informational" {
+	if number.Operations[0].TerminalState != "response_received" ||
+		number.Operations[0].TerminalReason != "no_block_evidence" {
 		t.Fatalf("number reject controls passage: %#v", number.Operations[0])
 	}
 	if check.Operations[0].TerminalState != "verification_reject" ||
@@ -294,6 +295,135 @@ func TestProjectionRetryUsesOutstandingOperation(t *testing.T) {
 	}
 }
 
+func TestProjectionReusedIdentifierKeepsDistinctAnchors(t *testing.T) {
+	deviceID := uuid.New()
+	now := time.Now().UTC()
+	events := make([]SyslogEvent, 0, 2)
+	for index := range 2 {
+		anchor := uuid.New()
+		events = append(events, SyslogEvent{
+			EventID: anchor, DeviceID: deviceID,
+			ReceivedAt: now.Add(time.Duration(index) * time.Second), Category: "radius",
+			Attributes: map[string]string{
+				"construct_anchor_event_id": anchor.String(), "call_context": "C-REUSE",
+				"packet_direction": "request", "packet_code": "access-request",
+				"packet_identifier": "7", "xpgk_request_type": "number",
+			},
+		})
+	}
+	projection := buildAntiFraudProjection(events, nil)
+	if len(projection.Packets) != 2 ||
+		projection.Packets[0].PacketID == projection.Packets[1].PacketID ||
+		len(projection.Operations) != 2 {
+		t.Fatalf("reused RADIUS identifier collided: %#v", projection)
+	}
+}
+
+func TestProjectionPersistedHeaderAcceptsLaterAVP(t *testing.T) {
+	deviceID := uuid.New()
+	now := time.Now().UTC()
+	anchor := uuid.New()
+	header := SyslogEvent{
+		EventID: anchor, DeviceID: deviceID, ReceivedAt: now, Category: "radius",
+		Attributes: map[string]string{
+			"construct_anchor_event_id": anchor.String(), "call_context": "C-SPLIT",
+			"packet_direction": "request", "packet_code": "access-request",
+			"packet_identifier": "12",
+		},
+	}
+	first := buildAntiFraudProjection([]SyslogEvent{header}, nil)
+	if len(first.Packets) != 1 || len(first.Operations) != 0 {
+		t.Fatalf("header projection=%#v", first)
+	}
+	avp := SyslogEvent{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.Add(time.Millisecond),
+		Category: "radius", Payload: []byte(
+			`Acct-Session-Id="leg session" Eltex-AVPair="h323-conf-id=shared conf" ` +
+				`Eltex-AVPair="xpgk-request-type=number"`),
+		Attributes: map[string]string{
+			"construct_anchor_event_id": anchor.String(), "call_context": "C-SPLIT",
+			"acct_session_id": "leg session", "h323_conf_id": "shared conf",
+			"xpgk_request_type": "number",
+		},
+	}
+	second := buildAntiFraudProjectionWithPackets([]SyslogEvent{avp}, nil, first.Packets)
+	if len(second.Packets) != 1 || second.Packets[0].PacketID != first.Packets[0].PacketID ||
+		len(second.Operations) != 1 || second.Operations[0].Session != "legsession" ||
+		second.Calls[0].IdentityKind != "h323_conf_id" {
+		t.Fatalf("split packet was not enriched: %#v", second)
+	}
+}
+
+func TestProjectionAmbiguousIDLessResponse(t *testing.T) {
+	deviceID := uuid.New()
+	now := time.Now().UTC()
+	requests := make([]SyslogEvent, 0, 3)
+	for index := range 2 {
+		requests = append(requests, SyslogEvent{
+			EventID: uuid.New(), DeviceID: deviceID,
+			ReceivedAt: now.Add(time.Duration(index) * time.Millisecond), Category: "radius",
+			Attributes: map[string]string{
+				"call_context": "C-AMBIGUOUS", "packet_direction": "request",
+				"packet_code": "access-request", "packet_identifier": strconv.Itoa(80 + index),
+				"xpgk_request_type": "number",
+			},
+		})
+	}
+	requests = append(requests, SyslogEvent{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.Add(10 * time.Millisecond),
+		Category: "radius", Attributes: map[string]string{
+			"call_context": "C-AMBIGUOUS", "packet_direction": "response",
+			"packet_code": "access-accept",
+		},
+	})
+	projection := buildAntiFraudProjection(requests, nil)
+	ambiguous := 0
+	for _, operation := range projection.Operations {
+		if operation.TerminalState == "ambiguous_response" {
+			ambiguous++
+		}
+	}
+	if ambiguous != 1 {
+		t.Fatalf("id-less response was paired arbitrarily: %#v", projection.Operations)
+	}
+}
+
+func TestProjectionH323IdentityUnifiesLegSessions(t *testing.T) {
+	deviceID := uuid.New()
+	now := time.Now().UTC()
+	events := make([]SyslogEvent, 0, 2)
+	for index, session := range []string{"leg one", "leg two"} {
+		events = append(events, SyslogEvent{
+			EventID: uuid.New(), DeviceID: deviceID,
+			ReceivedAt: now.Add(time.Duration(index) * time.Second), Category: "radius",
+			Attributes: map[string]string{
+				"call_context": "C-DUAL", "packet_direction": "request",
+				"packet_code": "access-request", "packet_identifier": strconv.Itoa(90 + index),
+				"xpgk_request_type": "number", "acct_session_id": session,
+				"h323_conf_id": "shared conf",
+			},
+		})
+	}
+	projection := buildAntiFraudProjection(events, nil)
+	if len(projection.Calls) != 1 ||
+		len(projection.Calls[0].LegSessionsNormalized) != 2 ||
+		projection.Calls[0].IdentityKind != "h323_conf_id" {
+		t.Fatalf("dual legs did not converge on h323-conf-id: %#v", projection.Calls)
+	}
+}
+
+func TestOperationCDRCorrelationPrefersLegThenH323(t *testing.T) {
+	if got := operationCDRMatchMethod("cdr-session", "shared-conf", "cdr-session"); got != "exact_acct_session" {
+		t.Fatalf("leg exact method=%q", got)
+	}
+	if got := operationCDRMatchMethod("outbound-leg", "cdr-session", "cdr-session"); got != "exact_h323_conf_id" {
+		t.Fatalf("dual-leg method=%q", got)
+	}
+	if got := operationCDRMatchMethod("other-leg", "other-conf", "cdr-session"); got != "" {
+		t.Fatalf("unrelated CDR matched by %q", got)
+	}
+}
+
 func TestPublicRadiusRedaction(t *testing.T) {
 	attributes := map[string]string{
 		"user_password": "secret", "Password": "also-secret", "user_name": "alice",
@@ -306,6 +436,41 @@ func TestPublicRadiusRedaction(t *testing.T) {
 	payload := redactPublicPayload(`User-Password = "secret" Calling-Station-Id=100`)
 	if strings.Contains(payload, "secret") || !strings.Contains(payload, "[REDACTED]") {
 		t.Fatalf("payload redaction failed: %s", payload)
+	}
+}
+
+func TestCallAntiFraudOverallStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		operations []CallAntiFraudSummaryOperation
+		want       string
+		warning    bool
+	}{
+		{name: "neutral number", operations: []CallAntiFraudSummaryOperation{{
+			Type: "number", TerminalState: "response_received",
+			TerminalReason: "no_block_evidence",
+		}}, want: "neutral"},
+		{name: "verification accepted", operations: []CallAntiFraudSummaryOperation{{
+			Type: "check_call", TerminalState: "verification_accept",
+		}}, want: "neutral"},
+		{name: "fail open", operations: []CallAntiFraudSummaryOperation{{
+			Type: "check_call", TerminalState: "verification_fail_open",
+		}}, want: "fail_open", warning: true},
+		{name: "ambiguous response", operations: []CallAntiFraudSummaryOperation{{
+			Type: "number", TerminalState: "ambiguous_response",
+		}}, want: "neutral", warning: true},
+		{name: "reject wins", operations: []CallAntiFraudSummaryOperation{
+			{TerminalState: "verification_fail_open"},
+			{TerminalState: "verification_reject"},
+		}, want: "blocked"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, warnings := callAntiFraudOverallStatus(test.operations, nil)
+			if got != test.want || (len(warnings) > 0) != test.warning {
+				t.Fatalf("status=%q warnings=%v", got, warnings)
+			}
+		})
 	}
 }
 

@@ -21,8 +21,10 @@ type DashboardDevice struct {
 	LatestSyslogAt      *time.Time `json:"latestSyslogAt"`
 	LatestCDRAt         *time.Time `json:"latestCdrAt"`
 	ActiveRevision      uint64     `json:"activeRevision"`
+	ActiveTimezone      string     `json:"activeTimezone"`
 	BuildingRevision    uint64     `json:"buildingRevision"`
 	RevisionStatus      string     `json:"revisionStatus"`
+	RevisionReason      string     `json:"revisionReason"`
 }
 
 type DashboardAnalytics struct {
@@ -99,7 +101,7 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 	}
 
 	rows, err = c.Conn.Query(ctx, `SELECT i.device_id,countIf(i.category='alarms'),
-		countIf(i.category='unknown'),max(r.received_at)
+		countIf(i.category='unknown')
 		FROM collector.syslog_interpretations AS i FINAL
 		INNER JOIN collector.raw_syslog AS r
 			ON r.device_id=i.device_id AND r.event_id=i.event_id
@@ -111,13 +113,33 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		for rows.Next() {
 			var id uuid.UUID
 			var alarms, unknown uint64
-			var latest time.Time
-			if scanErr := rows.Scan(&id, &alarms, &unknown, &latest); scanErr != nil {
+			if scanErr := rows.Scan(&id, &alarms, &unknown); scanErr != nil {
 				result.Diagnostics = append(result.Diagnostics, "syslog: "+scanErr.Error())
 				break
 			}
 			target := device(id)
-			target.Alarms, target.Unknown, target.LatestSyslogAt = alarms, unknown, &latest
+			target.Alarms, target.Unknown = alarms, unknown
+		}
+		_ = rows.Close()
+	}
+
+	rows, err = c.Conn.Query(ctx, `SELECT device_id,max(received_at)
+		FROM collector.raw_syslog
+		WHERE received_at>=now()-toIntervalSecond(?)
+		GROUP BY device_id`, seconds)
+	if err != nil {
+		result.Diagnostics = append(result.Diagnostics, "raw syslog freshness: "+err.Error())
+	} else {
+		for rows.Next() {
+			var id uuid.UUID
+			var latest time.Time
+			if scanErr := rows.Scan(&id, &latest); scanErr != nil {
+				result.Diagnostics = append(
+					result.Diagnostics, "raw syslog freshness: "+scanErr.Error(),
+				)
+				break
+			}
+			device(id).LatestSyslogAt = &latest
 		}
 		_ = rows.Close()
 	}
@@ -150,7 +172,9 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 
 	rows, err = c.Conn.Query(ctx, `SELECT device_id,
 		maxIf(revision,status='active'),maxIf(revision,status IN ('building','cutover','ready')),
-		argMax(status,updated_at)
+		argMax(status,updated_at),
+		argMaxIf(timezone,updated_at,status='active'),
+		argMaxIf(reason,updated_at,status IN ('building','cutover','ready'))
 		FROM collector.device_derived_revisions FINAL GROUP BY device_id`)
 	if err != nil {
 		result.Diagnostics = append(result.Diagnostics, "revisions: "+err.Error())
@@ -159,13 +183,17 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 			var id uuid.UUID
 			var active, building uint64
 			var status string
-			if scanErr := rows.Scan(&id, &active, &building, &status); scanErr != nil {
+			var activeTimezone, reason string
+			if scanErr := rows.Scan(
+				&id, &active, &building, &status, &activeTimezone, &reason,
+			); scanErr != nil {
 				result.Diagnostics = append(result.Diagnostics, "revisions: "+scanErr.Error())
 				break
 			}
 			target := device(id)
 			target.ActiveRevision, target.BuildingRevision, target.RevisionStatus =
 				active, building, status
+			target.ActiveTimezone, target.RevisionReason = activeTimezone, reason
 		}
 		_ = rows.Close()
 	}

@@ -58,6 +58,12 @@ func TestSoftswitchRetentionMigrationCopiesCDRAsImmediatelyDue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `INSERT INTO retention_policies
+		(policy_class,active_days,pending_days,effective_at)
+		VALUES('cdr',1095,1095,now())
+		ON CONFLICT (policy_class) DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := tx.Exec(ctx, `UPDATE retention_policies SET active_days=73
 		WHERE policy_class='cdr'`); err != nil {
 		t.Fatal(err)

@@ -357,32 +357,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			category.files += fileMetrics.Files
 			category.bytes += fileMetrics.Bytes
 		}
-		var latestSyslogAt, latestCDRAt any
-		if metrics != nil {
-			latestSyslogAt, latestCDRAt = metrics.LatestSyslogAt, metrics.LatestCDRAt
-		} else if fileMetrics != nil {
-			latestCDRAt = fileMetrics.LatestAt
-		}
-		revision := any(nil)
-		if metrics != nil {
-			revision = map[string]any{
-				"configured": configured.TimezoneRevision,
-				"active":     metrics.ActiveRevision, "building": metrics.BuildingRevision,
-				"status":  metrics.RevisionStatus,
-				"aligned": uint64(configured.ActiveTimezoneRevision) == metrics.ActiveRevision,
-			}
-		}
-		rows = append(rows, map[string]any{
-			"id": configured.ID, "name": configured.Name, "model": configured.Model,
-			"firmware": configured.Firmware, "timezone": configured.Timezone,
-			"sourceCategory": configured.SourceCategory, "templateKey": configured.TemplateKey,
-			"capabilities": configured.Capabilities,
-			"enabled":      configured.Enabled, "metrics": metrics, "fileMetrics": fileMetrics,
-			"freshness": map[string]any{
-				"latestSyslogAt": latestSyslogAt, "latestCdrAt": latestCDRAt,
-			},
-			"revision": revision,
-		})
+		rows = append(rows, dashboardDeviceRow(configured, metrics, fileMetrics))
 	}
 	averageTalk := float64(0)
 	if calls > 0 {
@@ -442,6 +417,44 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		},
 		"diagnostics": fleet.Diagnostics,
 	})
+}
+
+func dashboardDeviceRow(
+	configured store.Device,
+	metrics *analytics.DashboardDevice,
+	fileMetrics *store.IngestFileMetrics,
+) map[string]any {
+	var latestSyslogAt, latestCDRAt any
+	if metrics != nil {
+		latestSyslogAt, latestCDRAt = metrics.LatestSyslogAt, metrics.LatestCDRAt
+	} else if fileMetrics != nil {
+		latestCDRAt = fileMetrics.LatestAt
+	}
+	revision := any(nil)
+	if metrics != nil {
+		revision = map[string]any{
+			"configured": configured.TimezoneRevision,
+			"active":     metrics.ActiveRevision, "building": metrics.BuildingRevision,
+			"status": metrics.RevisionStatus, "reason": metrics.RevisionReason,
+			"aligned": uint64(configured.ActiveTimezoneRevision) == metrics.ActiveRevision,
+		}
+	}
+	activeTimezone := configured.ActiveTimezone
+	if metrics != nil && metrics.ActiveTimezone != "" {
+		activeTimezone = metrics.ActiveTimezone
+	}
+	return map[string]any{
+		"id": configured.ID, "name": configured.Name, "model": configured.Model,
+		"firmware": configured.Firmware, "timezone": configured.Timezone,
+		"activeTimezone": activeTimezone,
+		"sourceCategory": configured.SourceCategory, "templateKey": configured.TemplateKey,
+		"capabilities": configured.Capabilities,
+		"enabled":      configured.Enabled, "metrics": metrics, "fileMetrics": fileMetrics,
+		"freshness": map[string]any{
+			"latestSyslogAt": latestSyslogAt, "latestCdrAt": latestCDRAt,
+		},
+		"revision": revision,
+	}
 }
 
 func (s *Server) listRetention(writer http.ResponseWriter, request *http.Request) {
@@ -619,6 +632,7 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 		s.Analytics != nil {
 		if err := s.Analytics.ScheduleDeviceRebuild(
 			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
+			analytics.RevisionReasonInitialBuild,
 		); err != nil {
 			slog.Error("unable to initialize device derived revision",
 				"device", device.ID, "error", err)
@@ -692,6 +706,7 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 		if device.Capabilities.Syslog || device.Capabilities.TypedCDR {
 			if err := s.Analytics.ScheduleDeviceRebuild(
 				request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
+				analytics.RevisionReasonTimezoneChange,
 			); err != nil {
 				slog.Error("unable to schedule device timezone revision",
 					"device", device.ID, "revision", device.TimezoneRevision, "error", err)
@@ -1278,9 +1293,11 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 
 func addRevisionDiagnostics(response map[string]any, diagnostics analytics.SyslogDiagnostics) {
 	response["activeRevision"] = diagnostics.ActiveRevision
+	response["activeRevisionTimezone"] = diagnostics.ActiveTimezone
 	response["buildingRevision"] = diagnostics.BuildingRevision
 	response["revisionTimezone"] = diagnostics.RevisionTimezone
 	response["revisionStatus"] = diagnostics.RevisionStatus
+	response["revisionReason"] = diagnostics.RevisionReason
 	response["replayProcessed"] = diagnostics.ReplayProcessed
 	response["replayTotal"] = diagnostics.ReplayTotal
 	response["cdrReplayProcessed"] = diagnostics.CDRReplayProcessed

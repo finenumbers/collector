@@ -450,7 +450,9 @@ func TestChunkedRevisionReplayUsesDurableCursor(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.ScheduleDeviceRebuild(ctx, deviceID, 2, "Asia/Novosibirsk"); err != nil {
+	if err := client.ScheduleDeviceRebuild(
+		ctx, deviceID, 2, "Asia/Novosibirsk", RevisionReasonTimezoneChange,
+	); err != nil {
 		t.Fatal(err)
 	}
 	jobs, err := client.ListBuildingDeviceRevisions(ctx)
@@ -466,11 +468,19 @@ func TestChunkedRevisionReplayUsesDurableCursor(t *testing.T) {
 	if job.DeviceID == uuid.Nil {
 		t.Fatal("scheduled durable rebuild job was not found")
 	}
+	if job.Reason != RevisionReasonTimezoneChange {
+		t.Fatalf("revision reason = %q", job.Reason)
+	}
 	first, err := client.NextDeviceRevisionSyslogBatch(ctx, job, 2)
 	if err != nil || len(first) == 0 || len(first) > 2 {
 		t.Fatalf("first replay chunk: rows=%d err=%v", len(first), err)
 	}
 	if err := client.AdvanceDeviceRevisionSyslog(ctx, job, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ScheduleDeviceRebuild(
+		ctx, deviceID, 2, "Asia/Novosibirsk", RevisionReasonTimezoneChange,
+	); err != nil {
 		t.Fatal(err)
 	}
 	jobs, err = client.ListBuildingDeviceRevisions(ctx)
@@ -481,6 +491,9 @@ func TestChunkedRevisionReplayUsesDurableCursor(t *testing.T) {
 		if candidate.DeviceID == deviceID && candidate.Revision == 2 {
 			job = candidate
 		}
+	}
+	if job.Processed != uint64(len(first)) {
+		t.Fatalf("restart reset durable cursor: %#v", job)
 	}
 	seen := make(map[uuid.UUID]bool)
 	for _, row := range first {

@@ -177,8 +177,13 @@ func ensureDeviceRevisionJobs(
 			activeRevision == uint64(device.ActiveTimezoneRevision) {
 			continue
 		}
+		reason := analytics.RevisionReasonInitialBuild
+		if device.TimezoneRevision != device.ActiveTimezoneRevision ||
+			device.Timezone != device.ActiveTimezone {
+			reason = analytics.RevisionReasonTimezoneChange
+		}
 		if err := client.ScheduleDeviceRebuild(
-			ctx, device.ID, uint64(device.TimezoneRevision), device.Timezone,
+			ctx, device.ID, uint64(device.TimezoneRevision), device.Timezone, reason,
 		); err != nil {
 			return err
 		}

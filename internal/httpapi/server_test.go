@@ -24,13 +24,15 @@ func TestRevisionDiagnosticsAreIncludedInAPIResponse(t *testing.T) {
 	response := make(map[string]any)
 	addRevisionDiagnostics(response, analytics.SyslogDiagnostics{
 		ActiveRevision: 1, BuildingRevision: 2, RevisionTimezone: "Asia/Novosibirsk",
-		RevisionStatus: "building", ReplayProcessed: 10, ReplayTotal: 20,
+		ActiveTimezone: "UTC", RevisionStatus: "building",
+		RevisionReason: "timezone_change", ReplayProcessed: 10, ReplayTotal: 20,
 		CDRReplayProcessed: 3, CDRReplayTotal: 4, MissingCDRTimes: 1,
 		RadiusRawFragments: 30, LifecycleDerived: 12, CorrelationTotal: 12,
 		CorrelationOrphan: 2,
 	})
 	required := []string{
-		"activeRevision", "buildingRevision", "revisionTimezone", "revisionStatus",
+		"activeRevision", "activeRevisionTimezone", "buildingRevision", "revisionTimezone",
+		"revisionStatus", "revisionReason",
 		"replayProcessed", "replayTotal", "cdrReplayProcessed", "cdrReplayTotal",
 		"missingCdrInterpretations", "radiusRawFragments", "lifecycleDerived",
 		"correlationTotal", "correlationOrphan",
@@ -69,6 +71,34 @@ func TestDashboardWindowValidation(t *testing.T) {
 		if _, err := analytics.ValidateDashboardWindow(value); err == nil {
 			t.Fatalf("invalid window %q was accepted", value)
 		}
+	}
+}
+
+func TestDashboardDeviceRowExposesConfiguredAndActiveTimezones(t *testing.T) {
+	latest := time.Date(2026, 7, 26, 12, 30, 0, 0, time.UTC)
+	device := store.Device{
+		ID:                     uuid.New(),
+		Name:                   "SMG",
+		Timezone:               "Europe/Moscow",
+		ActiveTimezone:         "Asia/Novosibirsk",
+		TimezoneRevision:       3,
+		ActiveTimezoneRevision: 2,
+	}
+	row := dashboardDeviceRow(device, &analytics.DashboardDevice{
+		LatestSyslogAt: &latest,
+		ActiveRevision: 2,
+		ActiveTimezone: "UTC",
+	}, nil)
+
+	if row["timezone"] != "Europe/Moscow" {
+		t.Fatalf("configured timezone = %v", row["timezone"])
+	}
+	if row["activeTimezone"] != "UTC" {
+		t.Fatalf("active timezone = %v", row["activeTimezone"])
+	}
+	freshness := row["freshness"].(map[string]any)
+	if freshness["latestSyslogAt"] != &latest {
+		t.Fatalf("latest Syslog freshness = %v", freshness["latestSyslogAt"])
 	}
 }
 

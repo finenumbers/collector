@@ -28,8 +28,8 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 14 {
-		t.Fatalf("got %d applied migrations, want 14", applied)
+	if applied != 15 {
+		t.Fatalf("got %d applied migrations, want 15", applied)
 	}
 	var hourlyEngine, viewEngine string
 	if err := client.Conn.QueryRow(ctx, `SELECT engine FROM system.tables

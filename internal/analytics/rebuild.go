@@ -14,6 +14,7 @@ type DeviceRevisionJob struct {
 	DeviceID            uuid.UUID
 	Revision            uint64
 	Timezone            string
+	Reason              string
 	CDRSourceTimezone   string
 	Status              string
 	CutoverSealed       uint8
@@ -36,11 +37,19 @@ type DeviceRevisionJob struct {
 	UpdatedAt           time.Time
 }
 
+const (
+	RevisionReasonInitialBuild   = "initial_build"
+	RevisionReasonTimezoneChange = "timezone_change"
+)
+
 func (c *Client) ScheduleDeviceRebuild(
-	ctx context.Context, deviceID uuid.UUID, revision uint64, timezone string,
+	ctx context.Context, deviceID uuid.UUID, revision uint64, timezone, reason string,
 ) error {
 	if _, err := time.LoadLocation(timezone); err != nil {
 		return fmt.Errorf("invalid device timezone %q: %w", timezone, err)
+	}
+	if reason != RevisionReasonInitialBuild && reason != RevisionReasonTimezoneChange {
+		return fmt.Errorf("invalid device revision reason %q", reason)
 	}
 	var existingStatus string
 	err := c.Conn.QueryRow(ctx, `SELECT status
@@ -73,6 +82,7 @@ func (c *Client) ScheduleDeviceRebuild(
 	job.DeviceID = deviceID
 	job.Revision = revision
 	job.Timezone = timezone
+	job.Reason = reason
 	job.CDRSourceTimezone = timezone
 	job.Status = "building"
 	job.HighWatermark = syslogHigh
@@ -85,7 +95,7 @@ func (c *Client) ScheduleDeviceRebuild(
 
 func (c *Client) ListBuildingDeviceRevisions(ctx context.Context) ([]DeviceRevisionJob, error) {
 	rows, err := c.Conn.Query(ctx, `SELECT
-		device_id,revision,timezone,cdr_source_timezone,status,cutover_sealed,
+		device_id,revision,timezone,reason,cdr_source_timezone,status,cutover_sealed,
 		cursor_received_at,cursor_event_id,
 		cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
 		cdr_cursor_ingested_us,high_watermark,high_watermark_us,
@@ -101,8 +111,8 @@ func (c *Client) ListBuildingDeviceRevisions(ctx context.Context) ([]DeviceRevis
 	for rows.Next() {
 		var item DeviceRevisionJob
 		if err := rows.Scan(
-			&item.DeviceID, &item.Revision, &item.Timezone, &item.CDRSourceTimezone, &item.Status,
-			&item.CutoverSealed,
+			&item.DeviceID, &item.Revision, &item.Timezone, &item.Reason,
+			&item.CDRSourceTimezone, &item.Status, &item.CutoverSealed,
 			&item.CursorReceivedAt, &item.CursorEventID, &item.CursorReceivedUS,
 			&item.CDRCursorIngestedAt, &item.CDRCursorRecordID,
 			&item.CDRCursorIngestedUS, &item.HighWatermark, &item.HighWatermarkUS,
@@ -334,12 +344,12 @@ func (c *Client) ActivateDeviceRevision(ctx context.Context, job DeviceRevisionJ
 		return err
 	}
 	if err := c.Conn.Exec(ctx, `INSERT INTO collector.device_derived_revisions
-		(device_id,revision,timezone,status,cursor_received_at,cursor_event_id,
+		(device_id,revision,timezone,reason,status,cursor_received_at,cursor_event_id,
 		 cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
 		 cdr_cursor_ingested_us,high_watermark,high_watermark_us,
 		 cdr_high_watermark,cdr_high_watermark_us,raw_total,cdr_total,processed,
 		 cdr_processed,lifecycle_count,error,updated_at,cdr_source_timezone,cutover_sealed)
-		SELECT device_id,revision,timezone,'superseded',cursor_received_at,cursor_event_id,
+		SELECT device_id,revision,timezone,reason,'superseded',cursor_received_at,cursor_event_id,
 			cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
 			cdr_cursor_ingested_us,high_watermark,high_watermark_us,
 			cdr_high_watermark,cdr_high_watermark_us,raw_total,cdr_total,processed,
@@ -355,14 +365,14 @@ func (c *Client) ActivateDeviceRevision(ctx context.Context, job DeviceRevisionJ
 
 func (c *Client) writeDeviceRevisionJob(ctx context.Context, job DeviceRevisionJob) error {
 	return c.Conn.Exec(ctx, `INSERT INTO collector.device_derived_revisions
-		(device_id,revision,timezone,cdr_source_timezone,status,cutover_sealed,
+		(device_id,revision,timezone,reason,cdr_source_timezone,status,cutover_sealed,
 		 cursor_received_at,cursor_event_id,
 		 cursor_received_us,cdr_cursor_ingested_at,cdr_cursor_record_id,
 		 cdr_cursor_ingested_us,high_watermark,high_watermark_us,
 		 cdr_high_watermark,cdr_high_watermark_us,
 		 raw_total,cdr_total,processed,cdr_processed,lifecycle_count,error,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		job.DeviceID, job.Revision, job.Timezone, job.CDRSourceTimezone, job.Status,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		job.DeviceID, job.Revision, job.Timezone, job.Reason, job.CDRSourceTimezone, job.Status,
 		job.CutoverSealed, job.CursorReceivedAt,
 		job.CursorEventID, job.CursorReceivedUS, job.CDRCursorIngestedAt,
 		job.CDRCursorRecordID, job.CDRCursorIngestedUS, job.HighWatermark,

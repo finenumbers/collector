@@ -1,5 +1,5 @@
 export type SourceCategory = 'equipment' | 'softswitch'
-export type SourceDataset = 'calls' | 'ingest_files'
+export type SourceDataset = 'calls'
 
 export type SourceCapabilities = {
   syslog: boolean
@@ -84,15 +84,12 @@ export function sourceDatasets(value: {
   templateKey?: string
 }): SourceDataset[] {
   const capabilities = sourceCapabilities(value)
-  return [
-    ...(capabilities.typedCdr ? ['calls' as const] : []),
-    ...(capabilities.rawCdr ? ['ingest_files' as const] : []),
-  ]
+  return capabilities.typedCdr ? ['calls'] : []
 }
 
 export function defaultSourceDataset(value: {
   capabilities?: SourceCapabilities
   templateKey?: string
 }): SourceDataset {
-  return sourceDatasets(value)[0] || 'ingest_files'
+  return sourceDatasets(value)[0] || 'calls'
 }

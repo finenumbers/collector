@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Activity, AlertTriangle, CirclePlus, Database, FileClock,
-  LayoutDashboard, LogOut, Network, PhoneCall, Radio, Search, Server, Settings, ShieldCheck,
+  LogOut, Network, PhoneCall, Radio, Search, Server, Settings, ShieldCheck,
 } from 'lucide-react'
 import './styles.css'
 import {
@@ -236,11 +236,6 @@ type CdrIngestFile = {
   receivedAt: string
   processedAt?: string
 }
-type CdrIngestResponse = {
-  items: CdrIngestFile[]
-  detection: CdrDetection
-  replay: ReplayProgress
-}
 type CallRow = {
   recordId: string
   setupTime?: string
@@ -384,8 +379,7 @@ type PageResponse<T> = {
 type DataRow = EventRow | CallRow | SatelCdrRow | AntifraudRow
 type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
   'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
-  'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown' |
-  'ingest_files'
+  'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown'
 
 let csrfToken = ''
 const PAGE_SIZE = 100
@@ -526,7 +520,6 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [editingDevice, setEditingDevice] = useState<Device | null>(null)
   const [credentials, setCredentials] = useState<Device | null>(null)
   const [error, setError] = useState('')
-  const autoOpenedSatel = useRef(new Set<string>())
 
   const loadDevices = useCallback(() => api<{ items: Device[] }>('/devices').then(({ items }) => {
     setDevices(items || [])
@@ -552,19 +545,6 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const selected = devices.find((device) => device.id === activeDevice)
   const equipment = devices.filter((device) => sourceCategory(device) === 'equipment')
   const softswitches = devices.filter((device) => sourceCategory(device) === 'softswitch')
-  useEffect(() => {
-    if (!selected || selected.templateKey !== 'satel-rtu-cdr-v1') return
-    if (dataset === 'calls') {
-      autoOpenedSatel.current.add(selected.id)
-      return
-    }
-    if (dataset === 'ingest_files' && (selected.replay?.complete || 0) > 0 &&
-      !autoOpenedSatel.current.has(selected.id)) {
-      autoOpenedSatel.current.add(selected.id)
-      const timer = window.setTimeout(() => setDataset('calls'), 0)
-      return () => window.clearTimeout(timer)
-    }
-  }, [dataset, selected])
   const selectSource = (device: Device) => {
     const category = sourceCategory(device)
     setActiveDevice(device.id)
@@ -594,12 +574,9 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   return <div className="workspace">
     <aside className="sidebar">
-      <button className="brand" onClick={() => setActiveView('dashboard')}>
-        <img src={fineNumbersLogoUrl} alt="Fine Numbers" />
-      </button>
-      <button className={`dashboard-nav ${activeView === 'dashboard' ? 'active' : ''}`}
+      <button className="brand" title="Открыть Dashboard" aria-label="Открыть Dashboard"
         onClick={() => setActiveView('dashboard')}>
-        <LayoutDashboard size={14} /> Dashboard
+        <img src={fineNumbersLogoUrl} alt="Fine Numbers" />
       </button>
       <div className="side-section-label">ОБОРУДОВАНИЕ</div>
       {sourceList(equipment, 'equipment')}
@@ -652,8 +629,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       {activeView === 'device' && (!selected
         ? <EmptyDevices category={activeCategory} canCreate={user.role === 'admin'}
           onCreate={() => setShowCreate(activeCategory)} />
-        : dataset === 'ingest_files'
-          ? <CdrFilesPage key={selected.id} device={selected} />
+        : sourceCategory(selected) === 'softswitch' && !sourceCapabilities(selected).typedCdr
+          ? <SoftswitchPendingView device={selected} />
           : <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
             admin={user.role === 'admin'} />)}
     </main>
@@ -704,8 +681,6 @@ const navigation: { id: Dataset; label: string; icon: typeof Activity }[] = [
   { id: 'system_journal', label: 'Системный журнал', icon: FileClock },
   { id: 'unknown', label: 'Нераспознанное', icon: AlertTriangle },
 ]
-const rawCdrNavigation = { id: 'ingest_files' as Dataset, label: 'CDR-файлы', icon: FileClock }
-
 function DashboardPage({ devices, onSelectDevice }: {
   devices: Device[]
   onSelectDevice: (deviceID: string) => void
@@ -920,8 +895,7 @@ function DeviceNavigation({ device, active, onChange }: {
 }) {
   const capabilities = sourceCapabilities(device)
   const items = sourceCategory(device) === 'softswitch'
-    ? sourceDatasets(device).map((dataset) =>
-      dataset === 'calls' ? navigation[0] : rawCdrNavigation)
+    ? sourceDatasets(device).map(() => navigation[0])
     : navigation.filter((item) =>
       (item.id !== 'calls' || capabilities.typedCdr) &&
       (item.id !== 'antifraud' || capabilities.antifraud) &&
@@ -962,79 +936,24 @@ function SatelPipelineNotice({ templateKey, detection, replay }: {
         {replay.quarantined ? `, архивов с ошибками ${replay.quarantined}` : ''}.</span>
     </div>
   }
-  return <div className="pipeline-notice pipeline-ready">
-    <strong>Satel RTU активирован</strong>
-    <span>{total ? `Обработано архивов: ${replay.complete}.` : 'Новые CDR будут разбираться автоматически.'}
-      {replay.quarantined ? ` Требуют проверки: ${replay.quarantined}.` : ''}</span>
-  </div>
+  return null
 }
 
-function CdrFilesPage({ device }: { device: Device }) {
-  const [files, setFiles] = useState<CdrIngestFile[]>([])
-  const [detection, setDetection] = useState<CdrDetection>({
+function SoftswitchPendingView({ device }: { device: Device }) {
+  const detection: CdrDetection = {
     status: device.detectionStatus || 'not_checked',
     template: device.detectionTemplate,
     fingerprint: device.detectionFingerprint,
     error: device.detectionError,
     checkedAt: device.detectionCheckedAt,
     lastFileAt: device.detectionLastFileAt,
-  })
-  const [replay, setReplay] = useState<ReplayProgress>(
-    device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 },
-  )
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(true)
-  const load = useCallback(() => {
-    return api<CdrIngestResponse>(`/devices/${device.id}/ingest-files`)
-      .then((response) => {
-        setFiles(response.items || [])
-        setDetection(response.detection || { status: 'not_checked' })
-        setReplay(response.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 })
-        setError('')
-      })
-      .catch((reason) => setError(
-        reason instanceof Error ? reason.message : 'Не удалось загрузить список CDR',
-      ))
-      .finally(() => setLoading(false))
-  }, [device.id])
-  useEffect(() => {
-    void load()
-    const timer = window.setInterval(load, 10000)
-    return () => window.clearInterval(timer)
-  }, [load])
+  }
   return <section className="data-view">
-    <div className="toolbar">
-      <div><h3>CDR-файлы</h3><span>Неизменённые оригиналы, принятые через FTP</span></div>
-      <div className="toolbar-actions">
-        <button className="secondary" disabled={loading} onClick={() => {
-          setLoading(true)
-          void load()
-        }}>Обновить</button>
-      </div>
-    </div>
-    <SatelPipelineNotice templateKey={device.templateKey} detection={detection} replay={replay} />
-    {error && <div className="form-error">{error}</div>}
-    <div className="table-shell">
-      {loading && <div className="table-loading" />}
-      <table className="ingest-files-table">
-        <thead><tr><th>Файл</th><th>Статус</th><th>Размер</th><th>SHA-256</th>
-          <th>Получен</th><th>Ошибка</th><th /></tr></thead>
-        <tbody>{files.map((file) => <tr key={file.id}>
-          <td title={file.originalName}>{file.originalName}</td>
-          <td><span className={`parse-status ${file.status}`}>
-            {file.status === 'archived' ? 'Архивирован' : file.status}</span></td>
-          <td>{formatBytes(file.sizeBytes)}</td>
-          <td className="mono">{file.sha256 || '—'}</td>
-          <td className="mono">{formatTime(file.receivedAt, activeDeviceTimezone(device))}</td>
-          <td title={file.error}>{file.error || '—'}</td>
-          <td><a className="secondary download-link"
-            href={`/api/devices/${device.id}/ingest-files/${file.id}/download`}>Скачать</a></td>
-        </tr>)}</tbody>
-      </table>
-      {!loading && files.length === 0 && <div className="table-empty">
-        <strong>CDR-файлы ещё не получены</strong>
-        <p>Загрузите исходный файл в корень выданного FTP-каталога.</p>
-      </div>}
+    <SatelPipelineNotice templateKey={device.templateKey} detection={detection}
+      replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />
+    <div className="table-empty">
+      <strong>Ожидается определение формата CDR</strong>
+      <p>После автоматического выбора parser здесь появится таблица вызовов.</p>
     </div>
   </section>
 }

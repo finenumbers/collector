@@ -38,14 +38,14 @@ describe('equipment templates', () => {
       antifraud: false,
       radius: false,
     })
-    expect(sourceDatasets(template)).toEqual(['calls', 'ingest_files'])
+    expect(sourceDatasets(template)).toEqual(['calls'])
     expect(defaultSourceDataset(template)).toBe('calls')
   })
 
-  it('keeps raw-only softswitch navigation file-only', () => {
+  it('keeps raw-only softswitch without a data-section tab', () => {
     const template = fallbackTemplates.find((item) => item.key === 'softswitch-cdr-raw-v1')!
-    expect(sourceDatasets(template)).toEqual(['ingest_files'])
-    expect(defaultSourceDataset(template)).toBe('ingest_files')
+    expect(sourceDatasets(template)).toEqual([])
+    expect(defaultSourceDataset(template)).toBe('calls')
   })
 
   it('normalizes template API aliases', () => {
@@ -73,8 +73,22 @@ describe('equipment templates', () => {
     expect(main).toContain('Определяется формат CDR')
     expect(main).toContain('Satel RTU: обработано')
     expect(main).toContain('Формат CDR не определён автоматически')
-    expect(main).toContain("setDataset('calls')")
+    expect(main).toContain('SoftswitchPendingView')
     expect(main).toContain('device.replay?.pending')
     expect(main).toContain('device.replay?.processing')
+    expect(main).not.toContain('Satel RTU активирован')
+  })
+
+  it('removes the softswitch file page but keeps the backend pipeline implicit', () => {
+    expect(main).not.toContain('function CdrFilesPage')
+    expect(main).not.toContain('rawCdrNavigation')
+    expect(main).not.toContain('/ingest-files')
+  })
+
+  it('opens Dashboard from the logo without a separate sidebar item', () => {
+    expect(main).toContain('title="Открыть Dashboard" aria-label="Открыть Dashboard"')
+    expect(main).toContain("onClick={() => setActiveView('dashboard')}")
+    expect(main).not.toContain('dashboard-nav')
+    expect(main).not.toContain('LayoutDashboard')
   })
 })

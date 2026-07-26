@@ -15,7 +15,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/collector ./cmd/collector
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata libcap && \
     addgroup -g 1000 collector && adduser -D -u 1000 -G collector collector
 WORKDIR /app

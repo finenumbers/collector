@@ -163,6 +163,116 @@ func TestExportRejectsInvalidRequestBeforeDependencies(t *testing.T) {
 	}
 }
 
+func TestAsyncExportCreationDoesNotRegressViewerAccess(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost,
+		"/api/devices/7845e6d4-b8f1-4d0f-a8d4-c527f6868d02/export-jobs",
+		strings.NewReader(`{"dataset":"calls"}`))
+	request = request.WithContext(context.WithValue(request.Context(), sessionKey, store.Session{
+		User: store.User{ID: uuid.New(), Role: "viewer"},
+	}))
+	(&Server{}).createExportJob(response, request)
+	if response.Code == http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestExportJobPresentationMatchesFrontendContract(t *testing.T) {
+	estimate := int64(100)
+	response := presentExportJob(store.ExportJob{
+		ID: uuid.New(), Status: "running", Format: "auto", OutputFormat: "xlsx",
+		RowsProcessed: 25, RowsEstimated: &estimate, BytesSpooled: 2048,
+	})
+	if response.Format != "xlsx" || response.RowsWritten != 25 ||
+		response.EstimatedRows == nil || *response.EstimatedRows != 100 ||
+		response.BytesWritten != 2048 {
+		t.Fatalf("unexpected public export response: %#v", response)
+	}
+}
+
+func TestParseExportDateUsesDeviceTimezoneAndExclusiveEnd(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Novosibirsk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, err := parseExportDate("2026-07-01", location, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to, err := parseExportDate("2026-07-01", location, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !to.Equal(from.AddDate(0, 0, 1)) || from.Location() != location || to.Location() != location {
+		t.Fatalf("range = %v..%v in %v", from, to, location)
+	}
+}
+
+func TestSyncAllSyslogRequiresAsyncExport(t *testing.T) {
+	response := httptest.NewRecorder()
+	(&Server{}).exportXLSX(response, httptest.NewRequest(
+		http.MethodGet, "/export.xlsx?dataset=events&category=all", nil,
+	))
+	if response.Code != http.StatusRequestEntityTooLarge ||
+		!strings.Contains(response.Body.String(), "export-jobs") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSnapshotTupleExcludesRowsAfterEnqueue(t *testing.T) {
+	highTime := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	highID := uuid.MustParse("80000000-0000-0000-0000-000000000000")
+	if exportRowAfterSnapshot(highTime, highID, &highTime, &highID) {
+		t.Fatal("watermark row was excluded")
+	}
+	laterID := uuid.MustParse("90000000-0000-0000-0000-000000000000")
+	if !exportRowAfterSnapshot(highTime, laterID, &highTime, &highID) {
+		t.Fatal("row after watermark tuple was included")
+	}
+	if !exportRowAfterSnapshot(highTime.Add(time.Nanosecond), uuid.Nil, &highTime, &highID) {
+		t.Fatal("row after watermark time was included")
+	}
+}
+
+func TestAsyncExportContextPublishesProgress(t *testing.T) {
+	var got int64
+	state := asyncExportState{
+		job: store.ExportJob{ID: uuid.New()},
+		progress: func(rows int64) error {
+			got = rows
+			return nil
+		},
+	}
+	ctx := context.WithValue(context.Background(), asyncExportContextKey{}, state)
+	job, progress, ok := asyncExportJob(ctx)
+	if !ok || job.ID != state.job.ID {
+		t.Fatal("async export state was not recovered")
+	}
+	if err := progress(123); err != nil || got != 123 {
+		t.Fatalf("progress = %d, err=%v", got, err)
+	}
+}
+
+func TestAutoExportUsesCSVForUnknownSyslogEstimate(t *testing.T) {
+	from := time.Now()
+	to := from.Add(time.Hour)
+	if !useCSVZip(store.ExportJob{
+		Dataset: "events", Format: "auto", RangeFrom: &from, RangeTo: &to,
+	}) {
+		t.Fatal("unknown Syslog estimate did not select CSV.zip")
+	}
+	estimate := int64(100)
+	if useCSVZip(store.ExportJob{
+		Dataset: "events", Format: "auto", RangeFrom: &from, RangeTo: &to,
+		RowsEstimated: &estimate,
+	}) {
+		t.Fatal("small bounded Syslog export did not select XLSX")
+	}
+	if useCSVZip(store.ExportJob{Dataset: "events", Format: "xlsx"}) {
+		t.Fatal("explicit XLSX request was not honored")
+	}
+}
+
 func TestExportScalarDereferencesPointersAndFormatsUUID(t *testing.T) {
 	number := uint64(42)
 	timestamp := time.Date(2026, time.July, 26, 10, 0, 0, 0, time.UTC)

@@ -7,22 +7,17 @@ import (
 	"time"
 
 	"collector/internal/analytics"
+	"collector/internal/equipment"
+	"collector/internal/store"
 
 	"github.com/google/uuid"
 )
 
-type fixedTimezoneResolver string
-
-func (r fixedTimezoneResolver) DeviceTimezone(
-	_ context.Context, _ uuid.UUID,
-) (string, error) {
-	return string(r), nil
-}
-
 func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	address := os.Getenv("CLICKHOUSE_TEST_ADDR")
-	if address == "" {
-		t.Skip("CLICKHOUSE_TEST_ADDR is not set")
+	databaseURL := os.Getenv("POSTGRES_TEST_URL")
+	if address == "" || databaseURL == "" {
+		t.Skip("CLICKHOUSE_TEST_ADDR and POSTGRES_TEST_URL are required")
 	}
 	client, err := analytics.Open(
 		address, "collector", os.Getenv("CLICKHOUSE_TEST_USER"),
@@ -36,7 +31,34 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	if err := client.Migrate(ctx, "../../migrations/clickhouse"); err != nil {
 		t.Fatal(err)
 	}
-	deviceID, eventID := uuid.New(), uuid.New()
+	control, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.DB.Close()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := store.User{
+		ID: uuid.New(), Username: "syslog-reprocess-" + uuid.NewString(), Role: "admin",
+	}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, store.NewDevice{
+		Name: "syslog-reprocess-" + uuid.NewString(), SourceCategory: equipment.CategoryEquipment,
+		TemplateKey: equipment.TemplateEltex3410, Firmware: store.FirmwareScheme3410,
+		SyslogSourceIP: "198.51.100.45", Timezone: "Asia/Novosibirsk",
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = control.DB.Exec(context.Background(), `DELETE FROM devices WHERE id=$1`, device.ID)
+		_, _ = control.DB.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, actor.ID)
+	})
+	deviceID, eventID := device.ID, uuid.New()
 	event := ParseSyslog(RawSyslog{
 		EventID: eventID, DeviceID: deviceID, ReceivedAt: time.Now().UTC(),
 		SourceIP: "10.0.0.10", SourcePort: 10003,
@@ -50,11 +72,14 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	if err := client.InsertSyslog(ctx, event); err != nil {
 		t.Fatal(err)
 	}
-	resolver := fixedTimezoneResolver("Asia/Novosibirsk")
-	if err := RunHistoricalSyslogReprocessOnce(ctx, client, resolver); err != nil {
+	if err := RunHistoricalSyslogReprocessOnceWithOptions(
+		ctx, client, control, false, SyslogReplayOptions{Sleep: time.Nanosecond},
+	); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunHistoricalSyslogReprocessOnce(ctx, client, resolver); err != nil {
+	if err := RunHistoricalSyslogReprocessOnceWithOptions(
+		ctx, client, control, false, SyslogReplayOptions{Sleep: time.Nanosecond},
+	); err != nil {
 		t.Fatal(err)
 	}
 	var ledgerRows, transactions, constructs uint64
@@ -76,6 +101,14 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	}
 	if constructs != 0 {
 		t.Fatalf("disabled replay inserted %d Syslog constructs", constructs)
+	}
+	jobs, err := control.ListSyslogParserRebuildJobs(ctx, analytics.SyslogParserVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].DeviceID != deviceID || jobs[0].Status != "completed" ||
+		jobs[0].ProcessedEvents != jobs[0].TotalEvents || jobs[0].ProcessedEvents != 1 {
+		t.Fatalf("unexpected durable replay progress: %#v", jobs)
 	}
 	page, err := client.ListEventsPage(ctx, deviceID, "all", "", 10, nil)
 	if err != nil {

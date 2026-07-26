@@ -410,6 +410,13 @@ func (c *Client) ListSatelRTUCalls(
 func (c *Client) ListSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
 ) (SatelRTUCallPage, error) {
+	return c.listSatelRTUCallsPage(ctx, deviceID, nil, search, limit, cursor)
+}
+
+func (c *Client) listSatelRTUCallsPage(
+	ctx context.Context, deviceID uuid.UUID, revision *uint64, search string,
+	limit uint64, cursor *CallCursor,
+) (SatelRTUCallPage, error) {
 	if limit == 0 || limit > 50000 {
 		limit = 200
 	}
@@ -425,7 +432,13 @@ func (c *Client) ListSatelRTUCallsPage(
 				argMax(source_timezone,interpreted_at) AS source_timezone,
 				argMax(source_utc_offset_minutes,interpreted_at) AS source_offset
 			FROM collector.satel_rtu_cdr_time_facts
-			WHERE device_id=? GROUP BY record_id
+			WHERE device_id=?`
+	args := []any{deviceID}
+	if revision != nil {
+		query += ` AND timezone_revision=?`
+		args = append(args, *revision)
+	}
+	query += ` GROUP BY record_id
 		)
 		SELECT c.record_id,c.cdr_id,t.cdr_date,t.setup_time,t.connect_time,t.disconnect_time,
 			c.duration_ms,c.elapsed_time,c.outcome,c.in_ani,c.in_dnis,c.out_ani,c.out_dnis,c.bill_ani,c.bill_dnis,
@@ -461,7 +474,11 @@ func (c *Client) ListSatelRTUCallsPage(
 		FROM collector.satel_rtu_cdr AS c FINAL
 		LEFT JOIN times AS t ON t.record_id=c.record_id
 		WHERE c.device_id=?`
-	args := []any{deviceID, deviceID}
+	args = append(args, deviceID)
+	if revision != nil {
+		query += ` AND c.timezone_revision=?`
+		args = append(args, *revision)
+	}
 	if search != "" {
 		query += ` AND (positionCaseInsensitive(c.in_ani,?)>0
 			OR positionCaseInsensitive(c.in_dnis,?)>0

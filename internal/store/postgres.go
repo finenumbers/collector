@@ -681,11 +681,12 @@ func (s *Store) ActivateDeviceTimezoneRevision(ctx context.Context, id uuid.UUID
 // Retry=false means the file was already ingested successfully and the local
 // copy may be deleted. Retry=true means the watcher must (re)process it.
 type IngestFileClaim struct {
-	ID        uuid.UUID
-	ObjectKey string
-	Status    string
-	RowsValid uint64
-	Retry     bool
+	ID          uuid.UUID
+	ObjectKey   string
+	Status      string
+	RowsValid   uint64
+	Retry       bool
+	RemoveLocal bool
 }
 
 func IngestFileFullyIngested(status string, rowsValid uint64) bool {

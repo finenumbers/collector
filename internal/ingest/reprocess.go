@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"collector/internal/analytics"
+	"collector/internal/equipment"
 	"collector/internal/store"
 
 	"github.com/google/uuid"
@@ -205,8 +206,48 @@ func RunHistoricalSyslogReprocess(
 	ctx context.Context, client *analytics.Client, resolver DeviceTimezoneResolver,
 	syslogConstructsEnabled ...bool,
 ) error {
+	constructsEnabled := len(syslogConstructsEnabled) > 0 && syslogConstructsEnabled[0]
+	return RunHistoricalSyslogReprocessWithOptions(
+		ctx, client, resolver, constructsEnabled, SyslogReplayOptions{},
+	)
+}
+
+type SyslogReplayOptions struct {
+	Paused         bool
+	BatchSize      uint64
+	Sleep          time.Duration
+	MaxThreads     int
+	MaxMemoryUsage uint64
+}
+
+func (options SyslogReplayOptions) withDefaults() SyslogReplayOptions {
+	if options.BatchSize == 0 {
+		options.BatchSize = 500
+	}
+	if options.Sleep == 0 {
+		options.Sleep = 250 * time.Millisecond
+	}
+	if options.MaxThreads <= 0 {
+		options.MaxThreads = 2
+	}
+	if options.MaxMemoryUsage == 0 {
+		options.MaxMemoryUsage = 512 << 20
+	}
+	return options
+}
+
+func RunHistoricalSyslogReprocessWithOptions(
+	ctx context.Context,
+	client *analytics.Client,
+	resolver DeviceTimezoneResolver,
+	syslogConstructsEnabled bool,
+	options SyslogReplayOptions,
+) error {
+	options = options.withDefaults()
 	for ctx.Err() == nil {
-		if err := RunHistoricalSyslogReprocessOnce(ctx, client, resolver, syslogConstructsEnabled...); err != nil {
+		if err := RunHistoricalSyslogReprocessOnceWithOptions(
+			ctx, client, resolver, syslogConstructsEnabled, options,
+		); err != nil {
 			return err
 		}
 		select {
@@ -222,84 +263,224 @@ func RunHistoricalSyslogReprocessOnce(
 	ctx context.Context, client *analytics.Client, resolver DeviceTimezoneResolver,
 	syslogConstructsEnabled ...bool,
 ) error {
-	var processed uint64
-	configs := make(map[uuid.UUID]deviceReprocessConfig)
-	continuations := NewContinuationAssembler()
 	constructsEnabled := len(syslogConstructsEnabled) > 0 && syslogConstructsEnabled[0]
-	var constructs *SyslogConstructAssembler
-	if constructsEnabled {
-		constructs = NewSyslogConstructAssembler()
+	return RunHistoricalSyslogReprocessOnceWithOptions(
+		ctx, client, resolver, constructsEnabled, SyslogReplayOptions{},
+	)
+}
+
+func RunHistoricalSyslogReprocessOnceWithOptions(
+	ctx context.Context,
+	client *analytics.Client,
+	resolver DeviceTimezoneResolver,
+	constructsEnabled bool,
+	options SyslogReplayOptions,
+) error {
+	control, ok := resolver.(*store.Store)
+	if !ok {
+		return errors.New("durable Syslog replay requires a PostgreSQL store")
 	}
+	options = options.withDefaults()
+	if err := ensureSyslogParserRebuildJobs(ctx, client, control, options); err != nil {
+		return err
+	}
+	if err := control.SetSyslogParserRebuildPaused(
+		ctx, analytics.SyslogParserVersion, options.Paused,
+	); err != nil {
+		return err
+	}
+	if options.Paused {
+		slog.Warn("historical Syslog replay is paused",
+			"parser_version", analytics.SyslogParserVersion)
+		return nil
+	}
+
+	configs := make(map[uuid.UUID]deviceReprocessConfig)
+	continuations := make(map[uuid.UUID]*ContinuationAssembler)
+	constructs := make(map[uuid.UUID]*SyslogConstructAssembler)
 	for ctx.Err() == nil {
-		rows, err := client.NextSyslogReplayBatch(ctx, analytics.SyslogParserVersion, 500)
+		job, err := control.ClaimSyslogParserRebuildJob(
+			ctx, analytics.SyslogParserVersion, 5*time.Minute,
+		)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		if len(rows) == 0 {
-			slog.Info("historical Syslog reprocess completed",
-				"parser_version", analytics.SyslogParserVersion, "events", processed)
-			return nil
+		if continuations[job.DeviceID] == nil {
+			continuations[job.DeviceID] = NewContinuationAssembler()
 		}
-		events := make([]analytics.SyslogEvent, 0, len(rows))
-		skipped := make([]analytics.SyslogEvent, 0)
-		for _, row := range rows {
-			config, resolveErr := resolveDeviceReprocessConfig(ctx, resolver, configs, row)
-			if resolveErr != nil {
-				return resolveErr
+		if constructsEnabled && constructs[job.DeviceID] == nil {
+			constructs[job.DeviceID] = NewSyslogConstructAssembler()
+		}
+		release := control.LockDeviceWrites(job.DeviceID)
+		batchEvents, processErr := processSyslogParserRebuildBatch(
+			ctx, client, control, resolver, configs, continuations[job.DeviceID],
+			constructs[job.DeviceID], constructsEnabled, job, options,
+		)
+		release()
+		if processErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-			if config.skip {
-				skipped = append(skipped, analytics.SyslogEvent{
-					EventID: row.EventID, DeviceID: row.DeviceID,
-				})
-				continue
+			if retryErr := control.RetrySyslogParserRebuildJob(
+				ctx, job, processErr, 30*time.Second,
+			); retryErr != nil {
+				return errors.Join(processErr, retryErr)
 			}
-			location, locationErr := time.LoadLocation(config.timezone)
-			if locationErr != nil {
-				return locationErr
+			slog.Error("historical Syslog replay batch failed",
+				"device", job.DeviceID, "parser_version", job.ParserVersion,
+				"attempt", job.Attempts, "error", processErr)
+			continue
+		}
+		if batchEvents == 0 {
+			slog.Info("historical Syslog replay device completed",
+				"device", job.DeviceID, "parser_version", job.ParserVersion,
+				"events", job.TotalEvents, "batches", job.ProcessedBatches)
+		}
+		if options.Sleep > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(options.Sleep):
 			}
-			event := ParseSyslogInLocation(RawSyslog{
-				EventID: row.EventID, DeviceID: row.DeviceID, ReceivedAt: row.ReceivedAt,
-				SourceIP: row.SourceIP.String(), SourcePort: row.SourcePort, Payload: row.Payload,
-				Timezone: config.timezone, TimezoneRevision: config.revision,
-				TemplateKey: config.template, Firmware: config.firmware,
-			}, location)
-			events = append(events, event)
-		}
-		continuations.Assemble(events)
-		if err := client.InsertSyslogInterpretationsBatch(ctx, events); err != nil {
-			return err
-		}
-		if err := client.ProcessSyslogShadowDerivedBatch(ctx, events); err != nil {
-			return err
-		}
-		if err := client.EnqueueDirtySyslogBuckets(ctx, events); err != nil {
-			return err
-		}
-		if constructsEnabled {
-			constructRows, memberRows, fragmentLinks := constructs.Assemble(events)
-			if err := client.InsertSyslogFragmentLinksBatch(ctx, fragmentLinks); err != nil {
-				return err
-			}
-			if err := client.InsertSyslogConstructsBatch(ctx, constructRows); err != nil {
-				return err
-			}
-			if err := client.InsertSyslogConstructMembersBatch(ctx, memberRows); err != nil {
-				return err
-			}
-		}
-		ledger := append(events, skipped...)
-		if err := client.MarkSyslogReprocessedBatch(
-			ctx, ledger, analytics.SyslogParserVersion,
-		); err != nil {
-			return err
-		}
-		processed += uint64(len(ledger))
-		if processed%5000 == 0 {
-			slog.Info("historical Syslog reprocess progress",
-				"parser_version", analytics.SyslogParserVersion, "events", processed)
 		}
 	}
 	return ctx.Err()
+}
+
+func ensureSyslogParserRebuildJobs(
+	ctx context.Context,
+	client *analytics.Client,
+	control *store.Store,
+	options SyslogReplayOptions,
+) error {
+	devices, err := control.ListDevicesByCategory(ctx, equipment.CategoryEquipment)
+	if err != nil {
+		return err
+	}
+	queryOptions := analytics.SyslogReplayQueryOptions{
+		MaxThreads: options.MaxThreads, MaxMemoryUsage: options.MaxMemoryUsage,
+		QueryLabel: "syslog-replay-watermark",
+	}
+	for _, device := range devices {
+		if !device.Enabled || device.PurgeState != "active" || !device.Capabilities.Syslog {
+			continue
+		}
+		exists, err := control.HasSyslogParserRebuildJob(
+			ctx, device.ID, analytics.SyslogParserVersion,
+		)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		watermark, err := client.DeviceSyslogReplayWatermark(ctx, device.ID, queryOptions)
+		if err != nil {
+			return err
+		}
+		if err := control.EnsureSyslogParserRebuildJob(
+			ctx, device.ID, analytics.SyslogParserVersion, watermark.ReceivedAtUS,
+			watermark.EventID, watermark.TotalEvents,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func processSyslogParserRebuildBatch(
+	ctx context.Context,
+	client *analytics.Client,
+	control *store.Store,
+	resolver DeviceTimezoneResolver,
+	configs map[uuid.UUID]deviceReprocessConfig,
+	continuations *ContinuationAssembler,
+	constructs *SyslogConstructAssembler,
+	constructsEnabled bool,
+	job store.SyslogParserRebuildJob,
+	options SyslogReplayOptions,
+) (uint64, error) {
+	queryOptions := analytics.SyslogReplayQueryOptions{
+		MaxThreads: options.MaxThreads, MaxMemoryUsage: options.MaxMemoryUsage,
+		QueryLabel: "syslog-parser-rebuild",
+	}
+	rows, err := client.NextDeviceSyslogReplayBatch(
+		ctx, job.DeviceID, job.CursorReceivedUS, job.CursorEventID,
+		job.WatermarkReceivedUS, job.WatermarkEventID, options.BatchSize, queryOptions,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, control.CompleteSyslogParserRebuildJob(ctx, job)
+	}
+	events := make([]analytics.SyslogEvent, 0, len(rows))
+	skipped := make([]analytics.SyslogEvent, 0)
+	for _, row := range rows {
+		config, resolveErr := resolveDeviceReprocessConfig(ctx, resolver, configs, row)
+		if resolveErr != nil {
+			return 0, resolveErr
+		}
+		if config.skip {
+			skipped = append(skipped, analytics.SyslogEvent{
+				EventID: row.EventID, DeviceID: row.DeviceID,
+			})
+			continue
+		}
+		location, locationErr := time.LoadLocation(config.timezone)
+		if locationErr != nil {
+			return 0, locationErr
+		}
+		events = append(events, ParseSyslogInLocation(RawSyslog{
+			EventID: row.EventID, DeviceID: row.DeviceID, ReceivedAt: row.ReceivedAt,
+			SourceIP: row.SourceIP.String(), SourcePort: row.SourcePort, Payload: row.Payload,
+			Timezone: config.timezone, TimezoneRevision: config.revision,
+			TemplateKey: config.template, Firmware: config.firmware,
+		}, location))
+	}
+	continuations.Assemble(events)
+	if err := client.InsertSyslogInterpretationsBatch(ctx, events); err != nil {
+		return 0, err
+	}
+	if err := client.ProcessSyslogShadowDerivedBatch(ctx, events); err != nil {
+		return 0, err
+	}
+	if err := client.EnqueueDirtySyslogBuckets(ctx, events); err != nil {
+		return 0, err
+	}
+	if constructsEnabled {
+		constructRows, memberRows, fragmentLinks := constructs.Assemble(events)
+		if err := client.InsertSyslogFragmentLinksBatch(ctx, fragmentLinks); err != nil {
+			return 0, err
+		}
+		if err := client.InsertSyslogConstructsBatch(ctx, constructRows); err != nil {
+			return 0, err
+		}
+		if err := client.InsertSyslogConstructMembersBatch(ctx, memberRows); err != nil {
+			return 0, err
+		}
+	}
+	if err := control.HeartbeatSyslogParserRebuildJob(ctx, job); err != nil {
+		return 0, err
+	}
+	ledger := append(events, skipped...)
+	if err := client.MarkSyslogReprocessedBatch(ctx, ledger, job.ParserVersion); err != nil {
+		return 0, err
+	}
+	last := rows[len(rows)-1]
+	if err := control.AdvanceSyslogParserRebuildJob(
+		ctx, job, last.ReceivedAtUS, last.EventID, uint64(len(rows)),
+	); err != nil {
+		return 0, err
+	}
+	slog.Info("historical Syslog replay progress",
+		"device", job.DeviceID, "parser_version", job.ParserVersion,
+		"processed", job.ProcessedEvents+uint64(len(rows)), "total", job.TotalEvents,
+		"batch", len(rows))
+	return uint64(len(rows)), nil
 }
 
 func resolveDeviceReprocessConfig(

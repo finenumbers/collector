@@ -34,3 +34,25 @@ func TestCDRRetentionLifecyclePreservesUnrelatedRules(t *testing.T) {
 		t.Fatalf("raw CDR lifecycle rule is incorrect: %#v", rule)
 	}
 }
+
+func TestExportRetentionLifecycleIsSevenDays(t *testing.T) {
+	config := lifecycle.NewConfiguration()
+	config.Rules = []lifecycle.Rule{{
+		ID: "other", Status: "Enabled",
+		RuleFilter: lifecycle.Filter{Prefix: "cdr/"},
+		Expiration: lifecycle.Expiration{Days: 30},
+	}, {
+		ID: "collector-export-retention", Status: "Enabled",
+		RuleFilter: lifecycle.Filter{Prefix: "wrong/"},
+		Expiration: lifecycle.Expiration{Days: 99},
+	}}
+	got := exportRetentionLifecycle(config)
+	if len(got.Rules) != 2 || got.Rules[0].ID != "other" {
+		t.Fatalf("unrelated lifecycle rules changed: %#v", got.Rules)
+	}
+	rule := got.Rules[1]
+	if rule.ID != "collector-export-retention" ||
+		rule.RuleFilter.Prefix != "exports/" || rule.Expiration.Days != 7 {
+		t.Fatalf("export lifecycle rule is incorrect: %#v", rule)
+	}
+}

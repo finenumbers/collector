@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,10 +15,19 @@ import (
 	"github.com/google/uuid"
 )
 
+var errSyncExportTooLarge = errors.New("synchronous export exceeds row limit")
+
+const syncExportRowLimit = 50_000
+
 func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 	export, err := parseExportRequest(request.URL.Query())
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if export.Dataset == "events" && export.Category == "all" {
+		writeError(writer, http.StatusRequestEntityTooLarge,
+			"All Syslog exports must be queued through /export-jobs")
 		return
 	}
 	deviceID, ok := parseDeviceID(writer, request)
@@ -56,6 +66,11 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 	if err != nil {
 		if workbook != nil {
 			_ = workbook.Close()
+		}
+		if errors.Is(err, errSyncExportTooLarge) {
+			writeError(writer, http.StatusRequestEntityTooLarge,
+				"export is too large; queue it through /export-jobs")
+			return
 		}
 		if request.Context().Err() != nil {
 			return
@@ -109,17 +124,44 @@ func (s *Server) exportEltexCalls(
 		return nil, err
 	}
 	var cursor *analytics.CallCursor
+	asyncJob, progress, asynchronous := asyncExportJob(request.Context())
+	if asynchronous && asyncJob.RawHighWatermark != nil {
+		cursor = &analytics.CallCursor{
+			SortTime: asyncJob.RawHighWatermark.Add(time.Microsecond), RecordID: maxUUID(),
+		}
+	}
 	for {
 		if err := request.Context().Err(); err != nil {
 			return workbook, err
 		}
-		page, err := s.Analytics.ListCallsPage(
-			request.Context(), deviceID, search, exportPageSize, cursor,
-		)
+		var page analytics.CallPage
+		if asynchronous {
+			page, err = s.Analytics.ListExportCallsPage(
+				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
+				search, exportPageSize, cursor,
+			)
+		} else {
+			page, err = s.Analytics.ListCallsPage(
+				request.Context(), deviceID, search, exportPageSize, cursor,
+			)
+		}
 		if err != nil {
 			return workbook, fmt.Errorf("query Eltex calls: %w", err)
 		}
+		stop := false
 		for _, row := range page.Items {
+			if asynchronous && exportRowAfterSnapshot(
+				row.SortTime, row.RecordID, asyncJob.RawHighWatermark, asyncJob.RawHighWatermarkID,
+			) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeTo != nil && !row.SortTime.Before(*asyncJob.RangeTo) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeFrom != nil && row.SortTime.Before(*asyncJob.RangeFrom) {
+				stop = true
+				break
+			}
 			err = workbook.AddRow(request.Context(), []any{
 				formatTimeInLocation(row.SetupTime, location),
 				row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
@@ -130,7 +172,14 @@ func (s *Server) exportEltexCalls(
 				return workbook, err
 			}
 		}
-		if !page.HasMore || len(page.Items) == 0 {
+		if asynchronous {
+			if err = progress(int64(workbook.totalRows)); err != nil {
+				return workbook, err
+			}
+		} else if workbook.totalRows > syncExportRowLimit {
+			return workbook, errSyncExportTooLarge
+		}
+		if stop || !page.HasMore || len(page.Items) == 0 {
 			return workbook, nil
 		}
 		last := page.Items[len(page.Items)-1]
@@ -165,17 +214,44 @@ func (s *Server) exportSatelCalls(
 		return nil, err
 	}
 	var cursor *analytics.CallCursor
+	asyncJob, progress, asynchronous := asyncExportJob(request.Context())
+	if asynchronous && asyncJob.RawHighWatermark != nil {
+		cursor = &analytics.CallCursor{
+			SortTime: asyncJob.RawHighWatermark.Add(time.Microsecond), RecordID: maxUUID(),
+		}
+	}
 	for {
 		if err := request.Context().Err(); err != nil {
 			return workbook, err
 		}
-		page, err := s.Analytics.ListSatelRTUCallsPage(
-			request.Context(), deviceID, search, exportPageSize, cursor,
-		)
+		var page analytics.SatelRTUCallPage
+		if asynchronous {
+			page, err = s.Analytics.ListExportSatelRTUCallsPage(
+				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
+				search, exportPageSize, cursor,
+			)
+		} else {
+			page, err = s.Analytics.ListSatelRTUCallsPage(
+				request.Context(), deviceID, search, exportPageSize, cursor,
+			)
+		}
 		if err != nil {
 			return workbook, fmt.Errorf("query Satel calls: %w", err)
 		}
+		stop := false
 		for _, row := range page.Items {
+			if asynchronous && exportRowAfterSnapshot(
+				row.SortTime, row.RecordID, asyncJob.RawHighWatermark, asyncJob.RawHighWatermarkID,
+			) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeTo != nil && !row.SortTime.Before(*asyncJob.RangeTo) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeFrom != nil && row.SortTime.Before(*asyncJob.RangeFrom) {
+				stop = true
+				break
+			}
 			raw, err := json.Marshal(row.RawFields)
 			if err != nil {
 				return workbook, fmt.Errorf("encode Satel fields: %w", err)
@@ -210,7 +286,14 @@ func (s *Server) exportSatelCalls(
 				return workbook, err
 			}
 		}
-		if !page.HasMore || len(page.Items) == 0 {
+		if asynchronous {
+			if err = progress(int64(workbook.totalRows)); err != nil {
+				return workbook, err
+			}
+		} else if workbook.totalRows > syncExportRowLimit {
+			return workbook, errSyncExportTooLarge
+		}
+		if stop || !page.HasMore || len(page.Items) == 0 {
 			return workbook, nil
 		}
 		last := page.Items[len(page.Items)-1]
@@ -235,17 +318,46 @@ func (s *Server) exportAntifraud(
 		return nil, err
 	}
 	var cursor *analytics.AntifraudCursor
+	asyncJob, progress, asynchronous := asyncExportJob(request.Context())
+	if asynchronous && asyncJob.RawHighWatermark != nil {
+		cursor = &analytics.AntifraudCursor{
+			LastEventAt:   asyncJob.RawHighWatermark.Add(time.Microsecond),
+			TransactionID: maxUUID(),
+		}
+	}
 	for {
 		if err := request.Context().Err(); err != nil {
 			return workbook, err
 		}
-		page, err := s.Analytics.ListAntifraudPage(
-			request.Context(), deviceID, search, exportPageSize, cursor,
-		)
+		var page analytics.AntifraudPage
+		if asynchronous {
+			page, err = s.Analytics.ListExportAntifraudPage(
+				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
+				search, exportPageSize, cursor,
+			)
+		} else {
+			page, err = s.Analytics.ListAntifraudPage(
+				request.Context(), deviceID, search, exportPageSize, cursor,
+			)
+		}
 		if err != nil {
 			return workbook, fmt.Errorf("query AntiFraud: %w", err)
 		}
+		stop := false
 		for _, row := range page.Items {
+			if asynchronous && exportRowAfterSnapshot(
+				row.LastEventAt, row.TransactionID,
+				asyncJob.RawHighWatermark, asyncJob.RawHighWatermarkID,
+			) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeTo != nil && !row.LastEventAt.Before(*asyncJob.RangeTo) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeFrom != nil && row.LastEventAt.Before(*asyncJob.RangeFrom) {
+				stop = true
+				break
+			}
 			attributes, err := json.Marshal(row.Attributes)
 			if err != nil {
 				return workbook, fmt.Errorf("encode AntiFraud attributes: %w", err)
@@ -267,7 +379,14 @@ func (s *Server) exportAntifraud(
 				return workbook, err
 			}
 		}
-		if !page.HasMore || len(page.Items) == 0 {
+		if asynchronous {
+			if err = progress(int64(workbook.totalRows)); err != nil {
+				return workbook, err
+			}
+		} else if workbook.totalRows > syncExportRowLimit {
+			return workbook, errSyncExportTooLarge
+		}
+		if stop || !page.HasMore || len(page.Items) == 0 {
 			return workbook, nil
 		}
 		last := page.Items[len(page.Items)-1]
@@ -289,17 +408,44 @@ func (s *Server) exportEvents(
 		return nil, err
 	}
 	var cursor *analytics.EventCursor
+	asyncJob, progress, asynchronous := asyncExportJob(request.Context())
+	if asynchronous && asyncJob.RawHighWatermark != nil {
+		cursor = &analytics.EventCursor{
+			ReceivedAt: asyncJob.RawHighWatermark.Add(time.Microsecond), EventID: maxUUID(),
+		}
+	}
 	for {
 		if err := request.Context().Err(); err != nil {
 			return workbook, err
 		}
-		page, err := s.Analytics.ListEventsPage(
-			request.Context(), deviceID, category, search, exportPageSize, cursor,
-		)
+		var page analytics.EventPage
+		if asynchronous {
+			page, err = s.Analytics.ListExportEventsPage(
+				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
+				category, search, exportPageSize, cursor,
+			)
+		} else {
+			page, err = s.Analytics.ListEventsPage(
+				request.Context(), deviceID, category, search, exportPageSize, cursor,
+			)
+		}
 		if err != nil {
 			return workbook, fmt.Errorf("query events: %w", err)
 		}
+		stop := false
 		for _, row := range page.Items {
+			if asynchronous && exportRowAfterSnapshot(
+				row.ReceivedAt, row.EventID, asyncJob.RawHighWatermark, asyncJob.RawHighWatermarkID,
+			) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeTo != nil && !row.ReceivedAt.Before(*asyncJob.RangeTo) {
+				continue
+			}
+			if asynchronous && asyncJob.RangeFrom != nil && row.ReceivedAt.Before(*asyncJob.RangeFrom) {
+				stop = true
+				break
+			}
 			attributes, err := json.Marshal(row.Attributes)
 			if err != nil {
 				return workbook, fmt.Errorf("encode event attributes: %w", err)
@@ -316,7 +462,14 @@ func (s *Server) exportEvents(
 				return workbook, err
 			}
 		}
-		if !page.HasMore || len(page.Items) == 0 {
+		if asynchronous {
+			if err = progress(int64(workbook.totalRows)); err != nil {
+				return workbook, err
+			}
+		} else if workbook.totalRows > syncExportRowLimit {
+			return workbook, errSyncExportTooLarge
+		}
+		if stop || !page.HasMore || len(page.Items) == 0 {
 			return workbook, nil
 		}
 		last := page.Items[len(page.Items)-1]

@@ -92,6 +92,11 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Get("/devices/{deviceID}/syslog-diagnostics", s.syslogDiagnostics)
 			private.Get("/devices/{deviceID}/calls/{recordID}/timeline", s.callTimeline)
 			private.Get("/devices/{deviceID}/antifraud/{transactionID}/timeline", s.antifraudTimeline)
+			private.Post("/devices/{deviceID}/export-jobs", s.createExportJob)
+			private.Get("/devices/{deviceID}/export-jobs", s.listExportJobs)
+			private.Get("/devices/{deviceID}/export-jobs/{jobID}", s.getExportJob)
+			private.Post("/devices/{deviceID}/export-jobs/{jobID}/cancel", s.cancelExportJob)
+			private.Get("/devices/{deviceID}/export-jobs/{jobID}/download", s.downloadExportJob)
 			private.Get("/devices/{deviceID}/export.xlsx", s.exportXLSX)
 		})
 	})
@@ -773,6 +778,10 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 			fail("minio", fmt.Errorf("unable to purge CDR archive: %w", err))
 			return
 		}
+		if err := s.Archive.DeletePrefix(ctx, "exports/"+id.String()+"/"); err != nil {
+			fail("minio", fmt.Errorf("unable to purge export artifacts: %w", err))
+			return
+		}
 	}
 	if err := os.RemoveAll(filepath.Join("/data/cdr", id.String())); err != nil {
 		fail("cdr-volume", fmt.Errorf("unable to purge CDR files: %w", err))
@@ -789,6 +798,14 @@ func (s *Server) deleteDevice(writer http.ResponseWriter, request *http.Request)
 	if err := s.Store.FinalizeDevicePurge(ctx, id); err != nil {
 		fail("postgres", fmt.Errorf("unable to purge PostgreSQL device data: %w", err))
 		return
+	}
+	if s.Archive != nil {
+		if err := s.Archive.DeletePrefix(ctx, "exports/"+id.String()+"/"); err != nil {
+			// PostgreSQL is already finalized, so the lifecycle rule is the
+			// fallback for a transient MinIO failure during the race-closing sweep.
+			slog.Error("unable to resweep export artifacts after device purge",
+				"device", id, "error", err)
+		}
 	}
 	writer.WriteHeader(http.StatusNoContent)
 }
@@ -1190,6 +1207,42 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 	ingressStatus, ingressStatusErr := ingest.ReadIngressStatus(s.IngressStatusPath)
 	ingressAvailable := ingressStatusErr == nil &&
 		time.Since(ingressStatus.UpdatedAt) < 5*time.Second
+	replay := map[string]any{"status": "not_started"}
+	replayJobs, replayErr := s.Store.ListSyslogParserRebuildJobs(
+		request.Context(), analytics.SyslogParserVersion,
+	)
+	if replayErr != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to query Syslog replay progress")
+		return
+	}
+	for _, job := range replayJobs {
+		if job.DeviceID != deviceID {
+			continue
+		}
+		progress := float64(0)
+		if job.TotalEvents > 0 {
+			progress = float64(job.ProcessedEvents) / float64(job.TotalEvents)
+			if progress > 1 {
+				progress = 1
+			}
+		}
+		replay = map[string]any{
+			"status": job.Status, "processedEvents": job.ProcessedEvents,
+			"totalEvents": job.TotalEvents, "processedBatches": job.ProcessedBatches,
+			"progress": progress, "attempts": job.Attempts, "error": job.Error,
+			"heartbeatAt": job.HeartbeatAt, "updatedAt": job.UpdatedAt,
+		}
+		if job.StartedAt != nil && job.ProcessedEvents > 0 &&
+			job.ProcessedEvents < job.TotalEvents {
+			elapsed := time.Since(*job.StartedAt).Seconds()
+			if elapsed > 0 {
+				rate := float64(job.ProcessedEvents) / elapsed
+				replay["eventsPerSecond"] = rate
+				replay["etaSeconds"] = float64(job.TotalEvents-job.ProcessedEvents) / rate
+			}
+		}
+		break
+	}
 	response := map[string]any{
 		"version": s.Version, "parserVersion": analytics.SyslogParserVersion,
 		"runtime": s.Metrics.Snapshot(), "spoolDepth": spoolDepth,
@@ -1206,6 +1259,7 @@ func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Req
 		"correlationComposite": diagnostics.CorrelationComposite,
 		"correlationAmbiguous": diagnostics.CorrelationAmbiguous,
 		"ingress":              ingressStatus, "ingressAvailable": ingressAvailable,
+		"historicalReplay": replay,
 	}
 	addRevisionDiagnostics(response, diagnostics)
 	response["ingestRevision"] = device.ActiveTimezoneRevision

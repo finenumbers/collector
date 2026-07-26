@@ -100,6 +100,88 @@ func TestSatelTemplateCallsDedicatedAnalytics(t *testing.T) {
 	}
 }
 
+func TestWatcherTerminalQuarantineDoesNotHotLoop(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	watcher := &CDRWatcher{now: func() time.Time { return now }}
+	const key = "immutable-file"
+
+	watcher.recordRetry(key, true)
+	for range 100 {
+		now = now.Add(time.Hour)
+		if watcher.retryReady(key) {
+			t.Fatal("unchanged terminal file became retryable")
+		}
+	}
+	if watcher.retries[key].failures != 1 {
+		t.Fatalf("terminal file accumulated retries: %#v", watcher.retries[key])
+	}
+}
+
+func TestWatcherTransientRetryUsesExponentialBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	watcher := &CDRWatcher{now: func() time.Time { return now }}
+	const key = "transient-file"
+
+	watcher.recordRetry(key, false)
+	now = now.Add(initialIngestBackoff - time.Millisecond)
+	if watcher.retryReady(key) {
+		t.Fatal("first transient retry became ready too early")
+	}
+	now = now.Add(time.Millisecond)
+	if !watcher.retryReady(key) {
+		t.Fatal("first transient retry did not become ready")
+	}
+	watcher.recordRetry(key, false)
+	now = now.Add(2*initialIngestBackoff - time.Millisecond)
+	if watcher.retryReady(key) {
+		t.Fatal("second transient retry did not back off exponentially")
+	}
+	now = now.Add(time.Millisecond)
+	if !watcher.retryReady(key) {
+		t.Fatal("second transient retry did not become ready")
+	}
+}
+
+func TestIngestParserIdentityChangesWithRelevantDeviceConfig(t *testing.T) {
+	template, err := equipment.Resolve(equipment.TemplateEltex3232)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := store.Device{
+		TemplateKey:    equipment.TemplateEltex3232,
+		Firmware:       store.FirmwareScheme3232,
+		DeviceSign:     "smg-a",
+		ActiveTimezone: "UTC",
+	}
+	_, initial := ingestParserIdentity(device, template)
+	device.DeviceSign = "smg-b"
+	_, changedSign := ingestParserIdentity(device, template)
+	if initial == changedSign {
+		t.Fatal("device_sign change did not reopen parser identity")
+	}
+	device.DeviceSign = "smg-a"
+	device.Firmware = store.FirmwareScheme3410
+	_, changedFirmware := ingestParserIdentity(device, template)
+	if initial == changedFirmware {
+		t.Fatal("firmware profile change did not reopen parser identity")
+	}
+	satel, err := equipment.Resolve(equipment.TemplateSatelRTUCDRV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device = store.Device{
+		TemplateKey: equipment.TemplateSatelRTUCDRV1, ActiveTimezone: "UTC",
+		ActiveTimezoneRevision: 1,
+	}
+	_, satelInitial := ingestParserIdentity(device, satel)
+	device.ActiveTimezone = "Europe/Moscow"
+	device.ActiveTimezoneRevision = 2
+	_, satelChanged := ingestParserIdentity(device, satel)
+	if satelInitial == satelChanged {
+		t.Fatal("Satel timezone change did not reopen parser identity")
+	}
+}
+
 func TestSatelArchiveReplayRestartAndPartialQuarantine(t *testing.T) {
 	databaseURL := os.Getenv("POSTGRES_TEST_URL")
 	if databaseURL == "" {

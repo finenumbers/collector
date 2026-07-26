@@ -82,6 +82,12 @@ type Device struct {
 	Enabled                bool                   `json:"enabled"`
 	PurgeState             string                 `json:"purgeState"`
 	PurgeError             string                 `json:"purgeError,omitempty"`
+	DetectionStatus        string                 `json:"detectionStatus"`
+	DetectionTemplate      string                 `json:"detectionTemplate,omitempty"`
+	DetectionFingerprint   string                 `json:"detectionFingerprint,omitempty"`
+	DetectionError         string                 `json:"detectionError,omitempty"`
+	DetectionCheckedAt     *time.Time             `json:"detectionCheckedAt,omitempty"`
+	DetectionLastFileAt    *time.Time             `json:"detectionLastFileAt,omitempty"`
 	CreatedAt              time.Time              `json:"createdAt"`
 	GeneratedPassword      string                 `json:"generatedPassword,omitempty"`
 }
@@ -533,7 +539,8 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 	rows, err := s.DB.Query(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
-		ftp_username,ftp_home,enabled,purge_state,purge_error,created_at
+		ftp_username,ftp_home,enabled,purge_state,purge_error,detection_status,detection_template,
+		detection_fingerprint,detection_error,detection_checked_at,detection_last_file_at,created_at
 		FROM devices WHERE ($1='' OR source_category=$1) ORDER BY name`, category)
 	if err != nil {
 		return nil, err
@@ -548,7 +555,9 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 			&device.FTPHome, &device.Enabled, &device.PurgeState,
-			&device.PurgeError, &device.CreatedAt); err != nil {
+			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
+			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
+			&device.DetectionLastFileAt, &device.CreatedAt); err != nil {
 			return nil, err
 		}
 		normalizeDeviceFirmware(&device)
@@ -589,8 +598,8 @@ func (s *Store) DeviceCacheRevision() uint64 {
 func (s *Store) LockDeviceWrites(id uuid.UUID) func() {
 	value, _ := s.deviceLocks.LoadOrStore(id, &sync.RWMutex{})
 	lock := value.(*sync.RWMutex)
-	lock.RLock()
-	return lock.RUnlock
+	lock.Lock()
+	return lock.Unlock
 }
 
 func (s *Store) LockDevicePurge(id uuid.UUID) func() {
@@ -605,7 +614,8 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	err := s.DB.QueryRow(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
-		ftp_username,ftp_home,enabled,purge_state,purge_error,created_at
+		ftp_username,ftp_home,enabled,purge_state,purge_error,detection_status,detection_template,
+		detection_fingerprint,detection_error,detection_checked_at,detection_last_file_at,created_at
 		FROM devices WHERE id=$1`, id).
 		Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
 			&device.Model, &device.Firmware, &device.Timezone,
@@ -613,7 +623,9 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 			&device.FTPHome, &device.Enabled, &device.PurgeState,
-			&device.PurgeError, &device.CreatedAt)
+			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
+			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
+			&device.DetectionLastFileAt, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}
@@ -821,6 +833,164 @@ type IngestFileMetrics struct {
 	LatestAt *time.Time `json:"latestAt,omitempty"`
 }
 
+type ImmutableIngestObject struct {
+	ID         uuid.UUID
+	ObjectKey  string
+	SHA256     string
+	Status     string
+	ReceivedAt time.Time
+}
+
+func (s *Store) RecentImmutableIngestObjects(
+	ctx context.Context, deviceID uuid.UUID, limit int,
+) ([]ImmutableIngestObject, error) {
+	if limit <= 0 || limit > 10 {
+		limit = 3
+	}
+	rows, err := s.DB.Query(ctx, `SELECT id,object_key,sha256,status,received_at
+		FROM ingest_files
+		WHERE device_id=$1 AND object_key<>''
+		  AND status IN ('archived','processed','quarantined')
+		ORDER BY received_at DESC,id DESC LIMIT $2`, deviceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []ImmutableIngestObject
+	for rows.Next() {
+		var item ImmutableIngestObject
+		if err := rows.Scan(&item.ID, &item.ObjectKey, &item.SHA256, &item.Status, &item.ReceivedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RawDevicesNeedingDetection(ctx context.Context) ([]Device, error) {
+	devices, err := s.ListDevicesByCategory(ctx, equipment.CategorySoftswitch)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Device, 0)
+	for _, device := range devices {
+		if device.TemplateKey != equipment.TemplateSoftswitchRawV1 || device.PurgeState != "active" {
+			continue
+		}
+		var latest *time.Time
+		if err := s.DB.QueryRow(ctx, `SELECT max(received_at) FROM ingest_files
+			WHERE device_id=$1 AND object_key<>''
+			  AND status IN ('archived','processed','quarantined')`, device.ID).Scan(&latest); err != nil {
+			return nil, err
+		}
+		newEvidence := latest != nil && (device.DetectionLastFileAt == nil ||
+			latest.After(*device.DetectionLastFileAt))
+		retryError := device.DetectionStatus == "error" &&
+			(device.DetectionCheckedAt == nil || time.Since(*device.DetectionCheckedAt) >= time.Minute)
+		if device.DetectionStatus == "not_checked" || newEvidence || retryError {
+			result = append(result, device)
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) RecordTemplateDetection(
+	ctx context.Context, id uuid.UUID, status, template, fingerprint, message string, latest *time.Time,
+) error {
+	tag, err := s.DB.Exec(ctx, `UPDATE devices SET detection_status=$2,detection_template=$3,
+		detection_fingerprint=$4,detection_error=$5,detection_checked_at=now(),
+		detection_last_file_at=$6
+		WHERE id=$1 AND template_key=$7 AND purge_state='active'`,
+		id, status, template, fingerprint, message, latest, equipment.TemplateSoftswitchRawV1)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ActivateDetectedSatel(
+	ctx context.Context, id uuid.UUID, fingerprint string, expectedLatest time.Time,
+) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var template, purgeState string
+	var latest *time.Time
+	if err := tx.QueryRow(ctx, `SELECT d.template_key,d.purge_state,
+		(SELECT max(received_at) FROM ingest_files f WHERE f.device_id=d.id
+		 AND f.object_key<>'' AND f.status IN ('archived','processed','quarantined'))
+		FROM devices d WHERE d.id=$1 FOR UPDATE`, id).Scan(&template, &purgeState, &latest); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if template != equipment.TemplateSoftswitchRawV1 || purgeState != "active" {
+		return ErrNotFound
+	}
+	if latest == nil || !latest.Equal(expectedLatest) {
+		return errors.New("ingest evidence changed during template detection")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE devices SET
+		template_key=$2,firmware=$2,active_timezone=timezone,
+		active_timezone_revision=timezone_revision,detection_status='activated',
+		detection_template=$2,detection_fingerprint=$3,detection_error='',
+		detection_checked_at=now(),detection_last_file_at=$4
+		WHERE id=$1`, id, equipment.TemplateSatelRTUCDRV1, fingerprint, latest); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ingest_files SET
+		replay_state='pending',replay_template=$2,replay_version=$3,
+		replay_requested_at=now(),replay_started_at=NULL,replay_completed_at=NULL,
+		replay_attempts=0,replay_error=NULL
+		WHERE device_id=$1 AND object_key<>''
+		  AND status IN ('archived','processed','quarantined')`,
+		id, equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion); err != nil {
+		return err
+	}
+	details, _ := json.Marshal(map[string]any{
+		"reason":      "automatic exact archived CDR header detection",
+		"fingerprint": fingerprint,
+		"templateKey": equipment.TemplateSatelRTUCDRV1,
+	})
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_log(action,resource_type,resource_id,details)
+		VALUES('device_template_auto_detect','device',$1,$2)`, id.String(), details); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.deviceCacheRevision.Add(1)
+	return nil
+}
+
+type IngestReplayProgress struct {
+	Pending     uint64 `json:"pending"`
+	Processing  uint64 `json:"processing"`
+	Complete    uint64 `json:"complete"`
+	Quarantined uint64 `json:"quarantined"`
+}
+
+func (s *Store) DeviceIngestReplayProgress(
+	ctx context.Context, deviceID uuid.UUID,
+) (IngestReplayProgress, error) {
+	var progress IngestReplayProgress
+	err := s.DB.QueryRow(ctx, `SELECT
+		count(*) FILTER (WHERE replay_state='pending'),
+		count(*) FILTER (WHERE replay_state='processing'),
+		count(*) FILTER (WHERE replay_state='complete'),
+		count(*) FILTER (WHERE replay_state='complete' AND status='quarantined')
+		FROM ingest_files WHERE device_id=$1`, deviceID).Scan(
+		&progress.Pending, &progress.Processing, &progress.Complete, &progress.Quarantined,
+	)
+	return progress, err
+}
+
 func (s *Store) DeviceIngestFileMetrics(ctx context.Context, deviceID uuid.UUID) (IngestFileMetrics, error) {
 	var metrics IngestFileMetrics
 	err := s.DB.QueryRow(ctx, `SELECT count(*),COALESCE(sum(size_bytes),0),max(received_at)
@@ -874,12 +1044,13 @@ func (s *Store) ClaimNextIngestReplay(ctx context.Context) (IngestReplayClaim, e
 	var claim IngestReplayClaim
 	err := s.DB.QueryRow(ctx, `WITH candidate AS
 		(
-			SELECT id FROM ingest_files
-			WHERE replay_state='pending'
-			   OR (replay_state='processing'
-			       AND replay_started_at < now()-interval '5 minutes')
-			ORDER BY replay_requested_at,id
-			FOR UPDATE SKIP LOCKED
+			SELECT f.id FROM ingest_files f JOIN devices d ON d.id=f.device_id
+			WHERE d.enabled AND d.purge_state='active' AND
+			  (f.replay_state='pending'
+			   OR (f.replay_state='processing'
+			       AND f.replay_started_at < now()-interval '5 minutes'))
+			ORDER BY f.replay_requested_at,f.id
+			FOR UPDATE OF f SKIP LOCKED
 			LIMIT 1
 		)
 		UPDATE ingest_files AS f
@@ -1018,7 +1189,8 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
 		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
-		 enabled,purge_state,purge_error,created_at`,
+		 enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
+		 detection_error,detection_checked_at,detection_last_file_at,created_at`,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Model, input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign, input.AntifraudEnabled,
@@ -1029,7 +1201,9 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 		&device.FTPHome, &device.Enabled, &device.PurgeState,
-		&device.PurgeError, &device.CreatedAt)
+		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
+		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
+		&device.DetectionLastFileAt, &device.CreatedAt)
 	if err != nil {
 		return Device{}, err
 	}
@@ -1143,7 +1317,8 @@ func (s *Store) UpdateDevice(
 		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 			active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
 			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
-			enabled,purge_state,purge_error,created_at`,
+			enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
+			detection_error,detection_checked_at,detection_last_file_at,created_at`,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
@@ -1154,7 +1329,9 @@ func (s *Store) UpdateDevice(
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
 		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
 		&device.FTPHome, &device.Enabled, &device.PurgeState,
-		&device.PurgeError, &device.CreatedAt)
+		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
+		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
+		&device.DetectionLastFileAt, &device.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}

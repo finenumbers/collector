@@ -168,6 +168,50 @@ func TestSatelRTUParserValidatesRequiredHeaders(t *testing.T) {
 	}
 }
 
+func TestSatelRTUHeaderFingerprintIsStrictAndOrderIndependent(t *testing.T) {
+	content, err := os.ReadFile("testdata/satel_rtu_cdr.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := csv.NewReader(bytes.NewReader(content))
+	reader.Comma = ';'
+	records, err := reader.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := SatelRTUHeaderFingerprint(bytes.NewReader(content))
+	if !exact.Match || exact.Columns != 120 || exact.Fingerprint == "" {
+		t.Fatalf("exact header detection = %#v", exact)
+	}
+
+	reordered := append([]string(nil), records[0]...)
+	reordered[0], reordered[119] = reordered[119], reordered[0]
+	detection := SatelRTUHeaderFingerprint(strings.NewReader(strings.Join(reordered, ";") + "\n"))
+	if !detection.Match || detection.Fingerprint != exact.Fingerprint {
+		t.Fatalf("reordered header detection = %#v, exact = %#v", detection, exact)
+	}
+
+	cases := map[string][]string{
+		"duplicate": append(append([]string(nil), records[0][:119]...), records[0][0]),
+		"missing":   append([]string(nil), records[0][:119]...),
+		"extra":     append(append([]string(nil), records[0]...), "vendor_extension"),
+		"false positive": {
+			"cdr_id", "cdr_date", "setup_time", "connect_time", "disconnect_time",
+			"in_ani", "in_dnis", "out_ani", "out_dnis", "bill_ani", "bill_dnis",
+			"src_name", "dst_name", "dp_name", "disconnect_code",
+			"disconnect_code_string", "disconnect_code_success", "disconnect_initiator",
+		},
+	}
+	for name, header := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := SatelRTUHeaderFingerprint(strings.NewReader(strings.Join(header, ";") + "\n"))
+			if got.Match || got.Reason == "" {
+				t.Fatalf("non-canonical header detection = %#v", got)
+			}
+		})
+	}
+}
+
 func TestSatelRTUParserQuarantinesBadRowsButReturnsValidRows(t *testing.T) {
 	content, err := os.ReadFile("testdata/satel_rtu_cdr.csv")
 	if err != nil {

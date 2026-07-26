@@ -61,6 +61,11 @@ func (w *CDRWatcher) Run(ctx context.Context) error {
 }
 
 func (w *CDRWatcher) scan(ctx context.Context) error {
+	// Disabled raw sources are still classified from immutable archives, but
+	// ClaimNextIngestReplay leaves their replay pending until they are enabled.
+	if err := reconcileRawSatelTemplates(ctx, w.Store, w.Archive); err != nil {
+		slog.Error("raw CDR template reconciliation failed", "error", err)
+	}
 	if err := w.drainIngestReplays(ctx, 100); err != nil {
 		slog.Error("CDR archive replay failed", "error", err)
 	}

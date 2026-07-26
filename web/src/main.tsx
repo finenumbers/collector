@@ -13,7 +13,7 @@ import {
   defaultSourceDataset, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
   sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
 } from './equipment'
-import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v2.png'
+import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
 type ManagedUser = User & {
@@ -94,6 +94,20 @@ type DashboardCategoryTotals = {
   files?: number
   bytes?: number
 }
+type ReplayProgress = {
+  pending: number
+  processing: number
+  complete: number
+  quarantined: number
+}
+type CdrDetection = {
+  status: 'not_checked' | 'no_samples' | 'matched' | 'mixed' | 'error' | 'activated'
+  template?: string
+  fingerprint?: string
+  error?: string
+  checkedAt?: string
+  lastFileAt?: string
+}
 type Device = {
   id: string
   name: string
@@ -118,6 +132,13 @@ type Device = {
   sourceCategory?: SourceCategory
   templateKey?: string
   capabilities?: SourceCapabilities
+  detectionStatus?: CdrDetection['status']
+  detectionTemplate?: string
+  detectionFingerprint?: string
+  detectionError?: string
+  detectionCheckedAt?: string
+  detectionLastFileAt?: string
+  replay?: ReplayProgress
 }
 type EventRow = {
   eventId: string
@@ -213,6 +234,11 @@ type CdrIngestFile = {
   error?: string
   receivedAt: string
   processedAt?: string
+}
+type CdrIngestResponse = {
+  items: CdrIngestFile[]
+  detection: CdrDetection
+  replay: ReplayProgress
 }
 type CallRow = {
   recordId: string
@@ -499,6 +525,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [editingDevice, setEditingDevice] = useState<Device | null>(null)
   const [credentials, setCredentials] = useState<Device | null>(null)
   const [error, setError] = useState('')
+  const autoOpenedSatel = useRef(new Set<string>())
 
   const loadDevices = useCallback(() => api<{ items: Device[] }>('/devices').then(({ items }) => {
     setDevices(items || [])
@@ -512,14 +539,31 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   }, [loadDevices])
   const hasTimezoneRebuild = devices.some((device) =>
     device.timezoneRevision !== device.activeTimezoneRevision)
+  const hasDetectionOrReplay = devices.some((device) =>
+    (device.templateKey === 'softswitch-cdr-raw-v1' &&
+      !['mixed'].includes(device.detectionStatus || 'not_checked')) ||
+    Boolean(device.replay?.pending || device.replay?.processing))
   useEffect(() => {
-    if (!hasTimezoneRebuild) return
+    if (!hasTimezoneRebuild && !hasDetectionOrReplay) return
     const timer = window.setInterval(() => void loadDevices(), 5000)
     return () => window.clearInterval(timer)
-  }, [hasTimezoneRebuild, loadDevices])
+  }, [hasDetectionOrReplay, hasTimezoneRebuild, loadDevices])
   const selected = devices.find((device) => device.id === activeDevice)
   const equipment = devices.filter((device) => sourceCategory(device) === 'equipment')
   const softswitches = devices.filter((device) => sourceCategory(device) === 'softswitch')
+  useEffect(() => {
+    if (!selected || selected.templateKey !== 'satel-rtu-cdr-v1') return
+    if (dataset === 'calls') {
+      autoOpenedSatel.current.add(selected.id)
+      return
+    }
+    if (dataset === 'ingest_files' && (selected.replay?.complete || 0) > 0 &&
+      !autoOpenedSatel.current.has(selected.id)) {
+      autoOpenedSatel.current.add(selected.id)
+      const timer = window.setTimeout(() => setDataset('calls'), 0)
+      return () => window.clearTimeout(timer)
+    }
+  }, [dataset, selected])
   const selectSource = (device: Device) => {
     const category = sourceCategory(device)
     setActiveDevice(device.id)
@@ -888,14 +932,63 @@ function DeviceNavigation({ device, active, onChange }: {
   </nav>
 }
 
+function SatelPipelineNotice({ templateKey, detection, replay }: {
+  templateKey?: string
+  detection: CdrDetection
+  replay: ReplayProgress
+}) {
+  const remaining = replay.pending + replay.processing
+  const total = remaining + replay.complete
+  if (templateKey === 'softswitch-cdr-raw-v1') {
+    if (detection.status === 'mixed' || detection.status === 'error') {
+      return <div className="pipeline-notice pipeline-error">
+        <strong>Формат CDR не определён автоматически</strong>
+        <span>{detection.error || 'Архивы содержат несовместимые заголовки; источник оставлен без разбора.'}</span>
+      </div>
+    }
+    return <div className="pipeline-notice pipeline-pending">
+      <strong>Определяется формат CDR</strong>
+      <span>{detection.status === 'no_samples'
+        ? 'Ожидается первый неизменяемый CDR-файл.'
+        : 'Collector проверяет заголовки архивов и безопасно активирует подходящий parser.'}</span>
+    </div>
+  }
+  if (templateKey !== 'satel-rtu-cdr-v1') return null
+  if (remaining > 0) {
+    return <div className="pipeline-notice pipeline-pending">
+      <strong>Satel RTU: обработано {replay.complete} из {total}</strong>
+      <span>В очереди {replay.pending}, обрабатывается {replay.processing}
+        {replay.quarantined ? `, архивов с ошибками ${replay.quarantined}` : ''}.</span>
+    </div>
+  }
+  return <div className="pipeline-notice pipeline-ready">
+    <strong>Satel RTU активирован</strong>
+    <span>{total ? `Обработано архивов: ${replay.complete}.` : 'Новые CDR будут разбираться автоматически.'}
+      {replay.quarantined ? ` Требуют проверки: ${replay.quarantined}.` : ''}</span>
+  </div>
+}
+
 function CdrFilesPage({ device }: { device: Device }) {
   const [files, setFiles] = useState<CdrIngestFile[]>([])
+  const [detection, setDetection] = useState<CdrDetection>({
+    status: device.detectionStatus || 'not_checked',
+    template: device.detectionTemplate,
+    fingerprint: device.detectionFingerprint,
+    error: device.detectionError,
+    checkedAt: device.detectionCheckedAt,
+    lastFileAt: device.detectionLastFileAt,
+  })
+  const [replay, setReplay] = useState<ReplayProgress>(
+    device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 },
+  )
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const load = useCallback(() => {
-    return api<{ items: CdrIngestFile[] }>(`/devices/${device.id}/ingest-files`)
-      .then(({ items }) => {
-        setFiles(items || [])
+    return api<CdrIngestResponse>(`/devices/${device.id}/ingest-files`)
+      .then((response) => {
+        setFiles(response.items || [])
+        setDetection(response.detection || { status: 'not_checked' })
+        setReplay(response.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 })
         setError('')
       })
       .catch((reason) => setError(
@@ -918,6 +1011,7 @@ function CdrFilesPage({ device }: { device: Device }) {
         }}>Обновить</button>
       </div>
     </div>
+    <SatelPipelineNotice templateKey={device.templateKey} detection={detection} replay={replay} />
     {error && <div className="form-error">{error}</div>}
     <div className="table-shell">
       {loading && <div className="table-loading" />}
@@ -1049,6 +1143,17 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       Часовой пояс {device.timezone} пересобирается в фоне. До атомарного переключения
       показана активная ревизия {device.activeTimezoneRevision} ({activeDeviceTimezone(device)}).
     </div>}
+    {isSatel && dataset === 'calls' && <SatelPipelineNotice
+      templateKey={device.templateKey}
+      detection={{
+        status: device.detectionStatus || 'activated',
+        template: device.detectionTemplate,
+        fingerprint: device.detectionFingerprint,
+        error: device.detectionError,
+        checkedAt: device.detectionCheckedAt,
+        lastFileAt: device.detectionLastFileAt,
+      }}
+      replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />}
     {admin && dataset === 'calls' && diagnostics && <CdrIngestBanner files={diagnostics.cdrIngestFiles || []} />}
     {stats && <div className="stat-strip">
       <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>

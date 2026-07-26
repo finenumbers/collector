@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
 import html from '../index.html?raw'
 import main from './main.tsx?raw'
 
-function pngAlphaValues(path: URL) {
+type DecodedPng = {
+  width: number
+  height: number
+  rgba: Buffer
+}
+
+function decodePng(path: URL): DecodedPng {
   const png = readFileSync(path)
   const width = png.readUInt32BE(16)
   const height = png.readUInt32BE(20)
@@ -20,7 +26,7 @@ function pngAlphaValues(path: URL) {
   const packed = inflateSync(Buffer.concat(idat))
   const stride = width * 4
   const previous = Buffer.alloc(stride)
-  const alpha: number[] = []
+  const rgba = Buffer.alloc(stride * height)
   let sourceOffset = 0
   for (let y = 0; y < height; y++) {
     const filter = packed[sourceOffset++]
@@ -40,10 +46,15 @@ function pngAlphaValues(path: URL) {
         row[x] = raw + (pa <= pb && pa <= pc ? left : pb <= pc ? up : upperLeft)
       } else throw new Error(`unsupported PNG filter ${filter}`)
     }
-    for (let x = 3; x < stride; x += 4) alpha.push(row[x])
+    row.copy(rgba, y * stride)
     row.copy(previous)
   }
-  return alpha
+  return { width, height, rgba }
+}
+
+function pixel(png: DecodedPng, x: number, y: number) {
+  const offset = (y * png.width + x) * 4
+  return [...png.rgba.subarray(offset, offset + 4)]
 }
 
 describe('product shell', () => {
@@ -51,16 +62,33 @@ describe('product shell', () => {
     expect(html).toContain('<title>Logs Collector</title>')
     expect(html.match(/<title>[^<]*<\/title>/g)).toEqual(['<title>Logs Collector</title>'])
     expect(html).toContain('href="/favicon.png"')
-    expect(main).toContain("import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v2.png'")
+    expect(main).toContain("import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'")
     expect(main.match(/src=\{fineNumbersLogoUrl\}/g)).toHaveLength(2)
+    expect(main).not.toContain('fine-numbers-logo-transparent-v2.png')
     expect(main).not.toContain('src="/fine-numbers-logo.png"')
     expect(main).not.toContain('/fine-numbers-logo.png')
+    expect(existsSync(new URL('./assets/fine-numbers-logo-transparent-v2.png', import.meta.url))).toBe(false)
+    expect(existsSync(new URL('../public/fine-numbers-logo.png', import.meta.url))).toBe(false)
   })
 
-  it('ships a genuinely transparent RGBA logo', () => {
-    const alpha = pngAlphaValues(new URL('./assets/fine-numbers-logo-transparent-v2.png', import.meta.url))
+  it('ships a clean transparent RGBA logo without enclosed black matte', () => {
+    const png = decodePng(new URL('./assets/fine-numbers-logo-transparent-v3.png', import.meta.url))
+    expect([png.width, png.height]).toEqual([1024, 273])
+
+    // Corners, open canvas, and enclosed counters that flood-fill missed.
+    for (const [x, y] of [[0, 0], [1023, 0], [300, 100], [590, 80], [740, 200]]) {
+      expect(pixel(png, x, y), `expected transparent pixel at ${x},${y}`).toEqual([0, 0, 0, 0])
+    }
+
+    expect(pixel(png, 20, 20)).toEqual([35, 31, 32, 255])
+    expect(pixel(png, 360, 80)).toEqual([35, 31, 32, 255])
+    expect(pixel(png, 100, 100)).toEqual([255, 255, 255, 255])
+    expect(pixel(png, 130, 75)).toEqual([255, 235, 0, 255])
+
+    const alpha = [...png.rgba].filter((_, index) => index % 4 === 3)
     expect(alpha).toContain(0)
     expect(alpha).toContain(255)
+    expect(alpha.some((value) => value > 0 && value < 255)).toBe(true)
   })
 
   it('has no manual CDR profile UI', () => {

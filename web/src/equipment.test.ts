@@ -68,4 +68,13 @@ describe('equipment templates', () => {
     expect(main).toContain('<SatelCallsTable')
     expect(main).toContain('<SatelCallDrawer')
   })
+
+  it('surfaces automatic Satel detection and durable replay progress', () => {
+    expect(main).toContain('Определяется формат CDR')
+    expect(main).toContain('Satel RTU: обработано')
+    expect(main).toContain('Формат CDR не определён автоматически')
+    expect(main).toContain("setDataset('calls')")
+    expect(main).toContain('device.replay?.pending')
+    expect(main).toContain('device.replay?.processing')
+  })
 })

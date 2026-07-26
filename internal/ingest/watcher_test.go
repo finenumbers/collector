@@ -181,13 +181,29 @@ func TestSatelArchiveReplayRestartAndPartialQuarantine(t *testing.T) {
 		}
 		fileIDs = append(fileIDs, claim.ID)
 	}
-	device, err = control.UpdateDevice(ctx, device.ID, store.DeviceUpdate{
-		Name: device.Name, SourceCategory: equipment.CategorySoftswitch,
-		TemplateKey: equipment.TemplateSatelRTUCDRV1, Timezone: "UTC", Enabled: true,
-	}, actor, "127.0.0.1")
+	if err := reconcileRawSatelTemplates(ctx, control, memoryArchive); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileRawSatelTemplates(ctx, control, memoryArchive); err != nil {
+		t.Fatal(err)
+	}
+	device, err = control.Device(ctx, device.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 ||
+		device.DetectionStatus != "activated" || device.DetectionFingerprint == "" {
+		t.Fatalf("raw source was not auto-detected: %#v", device)
+	}
+	progress, err := control.DeviceIngestReplayProgress(ctx, device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Pending != 2 || progress.Processing != 0 || progress.Complete != 0 {
+		t.Fatalf("unexpected initial replay progress: %#v", progress)
+	}
+	memoryArchive.openSignal = make(chan struct{})
+	memoryArchive.openOnce = sync.Once{}
 	warehouse := &countingCDRAnalytics{}
 	watcher := &CDRWatcher{
 		Store: control, Analytics: warehouse, Archive: memoryArchive,

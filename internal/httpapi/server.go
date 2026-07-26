@@ -223,7 +223,20 @@ func (s *Server) listDevices(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusInternalServerError, "unable to list devices")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": devices})
+	type deviceWithReplay struct {
+		store.Device
+		Replay store.IngestReplayProgress `json:"replay"`
+	}
+	items := make([]deviceWithReplay, 0, len(devices))
+	for _, device := range devices {
+		replay, replayErr := s.Store.DeviceIngestReplayProgress(request.Context(), device.ID)
+		if replayErr != nil {
+			writeError(writer, http.StatusInternalServerError, "unable to load device replay progress")
+			return
+		}
+		items = append(items, deviceWithReplay{Device: device, Replay: replay})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) listEquipmentTemplates(writer http.ResponseWriter, _ *http.Request) {
@@ -782,7 +795,8 @@ func (s *Server) listIngestFiles(writer http.ResponseWriter, request *http.Reque
 	if !ok {
 		return
 	}
-	if _, err := s.Store.Device(request.Context(), deviceID); errors.Is(err, store.ErrNotFound) {
+	device, err := s.Store.Device(request.Context(), deviceID)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(writer, http.StatusNotFound, "device not found")
 		return
 	} else if err != nil {
@@ -798,7 +812,20 @@ func (s *Server) listIngestFiles(writer http.ResponseWriter, request *http.Reque
 	if items == nil {
 		items = []store.IngestFileSummary{}
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+	replay, err := s.Store.DeviceIngestReplayProgress(request.Context(), deviceID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load ingest replay progress")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"items": items,
+		"detection": map[string]any{
+			"status": device.DetectionStatus, "template": device.DetectionTemplate,
+			"fingerprint": device.DetectionFingerprint, "error": device.DetectionError,
+			"checkedAt": device.DetectionCheckedAt, "lastFileAt": device.DetectionLastFileAt,
+		},
+		"replay": replay,
+	})
 }
 
 func (s *Server) downloadIngestFile(writer http.ResponseWriter, request *http.Request) {

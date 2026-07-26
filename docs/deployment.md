@@ -74,11 +74,15 @@ Collector подключён к external network `${PROXY_NETWORK:-proxy}` по�
 `softswitch-cdr-raw-v1`. Collector выдаёт отдельный login с префиксом `ssw_`; Syslog
 IP и AntiFraud для него не настраиваются. Загрузите репрезентативный CDR в корень
 выданного FTP home. После стабильной записи watcher покажет файл со статусом
-`archived` на странице «CDR-файлы» и в `GET /api/devices/{id}/ingest-files`.
+`archived` на странице «CDR-файлы» и в `GET /api/devices/{id}/ingest-files`. Если до
+трёх последних архивов имеют одинаковый точный Satel 120-column header, Collector
+атомарно активирует `satel-rtu-cdr-v1`, поставит все архивы в replay и откроет таблицу
+«Вызовы и CDR» после первого обработанного файла. Mixed/unknown header не меняет source;
+причина и detection/replay progress отображаются на странице файлов.
 Кнопка «Скачать» использует потоковый
 `GET /api/devices/{id}/ingest-files/{fileID}/download`: сохраните исходник и передайте
-его для последующего проектирования typed parser. MinIO/ledger failure оставляет
-локальный файл для автоматического retry.
+его для проектирования нового typed parser, если формат не определён. MinIO/ledger
+failure оставляет локальный файл для автоматического retry.
 
 Для Satel RTU выберите шаблон `satel-rtu-cdr-v1` (`Satel RTU`) и timezone, в которой
 записаны timestamp файла. Загрузите CDR с 120-column header в корень того же FTP home:

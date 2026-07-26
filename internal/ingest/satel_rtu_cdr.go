@@ -1,11 +1,14 @@
 package ingest
 
 import (
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +25,90 @@ var satelRTURequiredHeaders = []string{
 	"src_name", "dst_name", "dp_name",
 	"disconnect_code", "disconnect_code_string", "disconnect_code_success",
 	"disconnect_initiator",
+}
+
+// satelRTUCanonicalHeaders is the immutable 120-column Satel RTU signature.
+// Parsing deliberately remains forward-compatible, while automatic template
+// selection requires this exact normalized set.
+var satelRTUCanonicalHeaders = []string{
+	"cdr_id", "cdr_date", "in_ani", "in_dnis", "out_ani", "out_dnis", "bill_ani", "bill_dnis",
+	"sig_node_name", "src_gatekeeper_address", "remote_src_sig_address", "remote_dst_sig_address",
+	"remote_src_media_address", "remote_dst_media_address", "local_src_sig_address",
+	"local_dst_sig_address", "local_src_media_address", "local_dst_media_address", "in_leg_proto",
+	"out_leg_proto", "conf_id", "in_leg_call_id", "out_leg_call_id", "src_user", "dst_user",
+	"radius_user", "src_name", "dst_name", "dp_name", "elapsed_time", "setup_time", "connect_time",
+	"disconnect_time", "in_leg_codecs", "out_leg_codecs", "src_faststart_present",
+	"dst_faststart_present", "src_tunneling_present", "dst_tunneling_present", "proxy_mode",
+	"lar_fault_reason", "route_retries", "scd", "pdd", "media_group", "src_media_bytes_in",
+	"src_media_bytes_out", "dst_media_bytes_in", "dst_media_bytes_out", "src_media_packets",
+	"dst_media_packets", "src_media_packets_late", "dst_media_packets_late", "src_media_packets_lost",
+	"dst_media_packets_lost", "src_min_jitter_size", "src_max_jitter_size", "dst_min_jitter_size",
+	"dst_max_jitter_size", "last_cdr", "in_cpc", "out_cpc", "in_zone", "out_zone",
+	"disconnect_initiator", "in_ani_type_of_number", "in_dnis_type_of_number",
+	"out_ani_type_of_number", "out_dnis_type_of_number", "src_in_leg_conf_id",
+	"src_in_leg_call_id", "src_out_leg_call_id", "in_orig_dnis", "out_orig_dnis", "record_type",
+	"extradata", "term_elapsed_time", "term_setup_time", "term_connect_time", "term_disconnect_time",
+	"term_scd", "term_pdd", "external_router", "radius_group", "in_ani_screening",
+	"in_ani_presentation", "out_ani_screening", "out_ani_presentation", "outgoing_pulses",
+	"incoming_pulses", "in_lrn", "retrieved_lrn", "lrn", "ext_lrn", "out_lrn", "lnp_server",
+	"in_leg_transport_proto", "out_leg_transport_proto", "sip_routing_group", "looping_cycles",
+	"auth_dnis", "ext_ani", "ext_dnis", "ext_sig_address", "in_partner_id", "out_partner_id",
+	"disconnect_code_string", "disconnect_code_success", "src_disconnect_codes_string",
+	"dst_disconnect_codes_string", "in_orig_dnis_type_of_number", "out_orig_dnis_type_of_number",
+	"in_encryption", "out_encryption", "ext_ani_type_of_number", "ext_dnis_type_of_number",
+	"ext_orig_dnis_type_of_number", "src_disconnect_codes", "dst_disconnect_codes",
+	"disconnect_code",
+}
+
+type SatelRTUDetection struct {
+	Match       bool
+	Fingerprint string
+	Reason      string
+	Columns     int
+}
+
+func SatelRTUHeaderFingerprint(reader io.Reader) SatelRTUDetection {
+	decoder := csv.NewReader(reader)
+	decoder.Comma = ';'
+	decoder.FieldsPerRecord = -1
+	header, err := decoder.Read()
+	if err != nil {
+		return SatelRTUDetection{Reason: fmt.Sprintf("header read failed: %v", err)}
+	}
+	result := SatelRTUDetection{Columns: len(header)}
+	names := make([]string, 0, len(header))
+	seen := make(map[string]struct{}, len(header))
+	for index, value := range header {
+		name := normalizeColumn(value)
+		if name == "" {
+			result.Reason = fmt.Sprintf("column %d is empty", index+1)
+			return result
+		}
+		if _, duplicate := seen[name]; duplicate {
+			result.Reason = fmt.Sprintf("column %q is duplicated", name)
+			return result
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, "\n")))
+	result.Fingerprint = hex.EncodeToString(sum[:])
+	if len(names) != len(satelRTUCanonicalHeaders) {
+		result.Reason = fmt.Sprintf("got %d columns, require exact Satel set of %d", len(names), len(satelRTUCanonicalHeaders))
+		return result
+	}
+	expected := append([]string(nil), satelRTUCanonicalHeaders...)
+	sort.Strings(expected)
+	for index := range expected {
+		if names[index] != expected[index] {
+			result.Reason = fmt.Sprintf("header set differs at %q (expected %q)", names[index], expected[index])
+			return result
+		}
+	}
+	result.Match = true
+	result.Reason = "exact normalized Satel RTU 120-column header"
+	return result
 }
 
 type SatelRTUCDRParser struct {

@@ -144,6 +144,14 @@ main { min-width: 0; display: flex; flex-direction: column; background: var(--bg
 .fleet-panel td small { display: block; margin-top: 2px; color: var(--muted); }
 .timezone-rebuild { margin: 0 0 8px; padding: 7px 10px; border: 1px solid #f3c969;
   border-radius: 6px; background: #fff8dc; color: #684c00; font-size: 12px; }
+.pipeline-notice { display: flex; align-items: baseline; gap: 9px; margin: 0 0 8px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; }
+.pipeline-notice strong { flex: none; }
+.pipeline-notice span { color: var(--muted); }
+.pipeline-pending { border-color: #f3c969; background: #fff8dc; color: #684c00; }
+.pipeline-ready { border-color: #a7d7ba; background: #edf9f2; color: #146c43; }
+.pipeline-error { border-color: #e8b4b4; background: #fff0f0; color: #8f2424; }
+.pipeline-error span { color: #8f2424; }
 .stat-strip { display: grid; grid-template-columns: repeat(6, minmax(100px, 1fr)); margin-bottom: 10px;
   border: 1px solid var(--line); background: var(--panel); }
 .stat-strip span { min-width: 0; padding: 7px 9px; border-right: 1px solid var(--line); }

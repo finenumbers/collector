@@ -66,6 +66,12 @@ answered outcome. При переводе raw-only источника на Satel
 архивированные объекты в durable versioned replay, который повторно читает immutable
 MinIO object без повторной загрузки пользователем.
 
+Для существующего raw-only источника watcher проверяет до трёх последних immutable
+объектов. Только точное совпадение нормализованного набора всех 120 Satel headers во
+всех samples атомарно меняет template и ставит архивы в replay. Имя устройства и файла
+не участвуют в определении; mixed/unknown форматы остаются raw. Detection provenance и
+replay counters хранятся в PostgreSQL и публикуются в API/UI.
+
 ## Границы надёжности
 
 UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в ingress process. После этого datagram удаляется из ingress spool только после ACK основного Collector, а из app spool — только после JetStream acknowledgement. Один `event_id` проходит через оба spool; повторная передача безопасно перезаписывает BoltDB key, а `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.

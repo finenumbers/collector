@@ -20,6 +20,12 @@ raw-only объект надёжно записан в MinIO и не перед�
 При выборе typed template архивированные объекты ставятся в durable replay; список и
 скачивание всегда проверяют одновременно `device_id` и `file_id`.
 
+`devices.detection_*` хранит состояние (`not_checked`, `no_samples`, `mixed`, `error`,
+`activated`), точный SHA-256 fingerprint нормализованного header set и timestamps
+автоматического определения. `ingest_files.replay_*` хранит durable очередь,
+parser/version, attempts и ошибку отдельного архива. Автоактивация Satel требует
+одинакового точного 120-column fingerprint в последних immutable samples.
+
 ## Время
 
 `received_at` — UTC instant приёма datagram Collector. Raw wall clock из Eltex/RFC3164

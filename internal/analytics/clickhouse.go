@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const SyslogParserVersion = "eltex-smg-syslog-v14"
+const SyslogParserVersion = "eltex-smg-syslog-v15"
 
 type Client struct {
 	Conn            clickhouse.Conn
@@ -155,6 +155,22 @@ type SyslogDiagnostics struct {
 	TimeFromTimestamp    uint64               `json:"correlationTimeFromTimestamp"`
 	TimeFromEnvelope     uint64               `json:"correlationTimeFromEnvelope"`
 	TimeFromReceive      uint64               `json:"correlationTimeFromReceive"`
+	AntifraudPackets     uint64               `json:"antifraudPackets"`
+	AntifraudCalls       uint64               `json:"antifraudCalls"`
+	AntifraudOperations  uint64               `json:"antifraudOperations"`
+	OperationOutstanding uint64               `json:"operationOutstanding"`
+	OperationAccept      uint64               `json:"operationVerificationAccept"`
+	OperationReject      uint64               `json:"operationVerificationReject"`
+	OperationFailOpen    uint64               `json:"operationVerificationFailOpen"`
+	OperationInformation uint64               `json:"operationInformational"`
+	UnlinkedFragments    uint64               `json:"unlinkedRadiusFragments"`
+	AmbiguousSessions    uint64               `json:"ambiguousSessionCollisions"`
+	UnknownEvents        uint64               `json:"unknownEvents"`
+	UnknownEnvelope      uint64               `json:"unknownEnvelopeAndBody"`
+	UnknownEvidence      uint64               `json:"unknownNoCategoryEvidence"`
+	UnknownEmpty         uint64               `json:"unknownEmptyMessage"`
+	FragmentAmbiguity    uint64               `json:"fragmentAmbiguity"`
+	ParserProjection     string               `json:"parserProjectionStatus"`
 }
 
 type CallRow struct {
@@ -683,6 +699,7 @@ func (c *Client) CallTimeline(ctx context.Context, deviceID, recordID uuid.UUID)
 			&row.Method, &row.Confidence); err != nil {
 			return nil, err
 		}
+		sanitizeEventPresentation(&row.EventRow)
 		result = append(result, row)
 	}
 	return result, rows.Err()
@@ -726,7 +743,8 @@ func (c *Client) StatsRange(
 	if err != nil {
 		return DeviceStats{}, err
 	}
-	err = c.Conn.QueryRow(ctx, `SELECT count(),countIf(decision='reject'),
+	err = c.Conn.QueryRow(ctx, `SELECT count(),
+		countIf(decision IN ('reject','verification_reject')),
 		countIf(completeness!='complete')
 		FROM collector.antifraud_transactions FINAL
 		WHERE device_id=? AND is_antifraud=1

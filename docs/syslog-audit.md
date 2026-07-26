@@ -37,7 +37,7 @@ Syslog-корпусами. После развёртывания исправл�
 ## Подтверждённая причина `b=AS:82`
 
 `b=` — стандартное поле bandwidth в SDP по RFC 4566, а `AS:82` задаёт
-application-specific bandwidth. До parser `eltex-smg-syslog-v14` bare SDP
+application-specific bandwidth. До parser `eltex-smg-syslog-v15` bare SDP
 allowlist включал `v/o/s/t/c/m/a`, но не включал `b`, поэтому envelope имел
 status `parsed`, а semantic category оставалась `unknown`.
 

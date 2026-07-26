@@ -134,7 +134,7 @@ read rows/CPU и correlation coverage
 - Ingress не стартует с `address already in use`: освободите `${SYSLOG_PORT:-514}/udp` на Docker-хосте; не возвращайте bridge port mapping.
 - ClickHouse недоступен: JetStream удерживает Syslog; CDR-файл остаётся в volume и raw archive/ledger.
 - Unknown растёт после firmware upgrade: не удаляйте raw, зафиксируйте firmware и добавьте golden fixtures/versioned parser.
-- После bump `SyslogParserVersion` (например `eltex-smg-syslog-v14`): дождитесь лога
+- После bump `SyslogParserVersion` (например `eltex-smg-syslog-v15`): дождитесь лога
   `historical Syslog reprocess completed` с новой `parser_version`; в UI diagnostics
   `parserVersion` должен совпасть; «Нераспознанное» по корпусам 3.410 (bare SDP и
   ISUP dotted-hex / `[No optional params]`) и 3.23.2 должно опустеть; `CONFIG:` без

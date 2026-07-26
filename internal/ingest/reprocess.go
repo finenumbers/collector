@@ -422,6 +422,36 @@ func processSyslogParserRebuildBatch(
 		return 0, err
 	}
 	if len(rows) == 0 {
+		revision := uint64(1)
+		skip := false
+		if config, ok := configs[job.DeviceID]; ok {
+			revision, skip = config.revision, config.skip
+		} else if configResolver, ok := resolver.(deviceTimeConfigResolver); ok {
+			deviceConfig, configErr := configResolver.DeviceTimeConfig(ctx, job.DeviceID)
+			if errors.Is(configErr, store.ErrNotFound) ||
+				errors.Is(configErr, store.ErrDeviceDeleting) {
+				skip = true
+			} else if configErr != nil {
+				return 0, configErr
+			} else if deviceConfig.ActiveTimezoneRevision > 0 {
+				revision = uint64(deviceConfig.ActiveTimezoneRevision)
+			} else if deviceConfig.TimezoneRevision > 0 {
+				revision = uint64(deviceConfig.TimezoneRevision)
+			}
+		} else if activeRevision, revisionErr := client.ActiveDeviceRevision(
+			ctx, job.DeviceID,
+		); revisionErr != nil {
+			return 0, revisionErr
+		} else if activeRevision > 0 {
+			revision = activeRevision
+		}
+		if !skip {
+			if activateErr := client.ActivateParserProjection(
+				ctx, job.DeviceID, revision, job.ParserVersion,
+			); activateErr != nil {
+				return 0, activateErr
+			}
+		}
 		return 0, control.CompleteSyslogParserRebuildJob(ctx, job)
 	}
 	events := make([]analytics.SyslogEvent, 0, len(rows))

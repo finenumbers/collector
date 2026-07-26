@@ -21,6 +21,11 @@ describe('call outcome semantics', () => {
     expect(antifraudOutcome({ decision: 'accept', completeness: 'complete' })).toBe('success')
     expect(antifraudOutcome({ decision: 'reject', completeness: 'complete' })).toBe('failure')
     expect(antifraudOutcome({ decision: 'timeout_fail_open' })).toBe('warning')
+    expect(antifraudOutcome({
+      decision: 'verification_accept', completeness: 'complete',
+    })).toBe('success')
+    expect(antifraudOutcome({ decision: 'verification_reject' })).toBe('failure')
+    expect(antifraudOutcome({ decision: 'verification_fail_open' })).toBe('warning')
     expect(outcomeLabel('neutral')).toBe('Нет результата')
   })
 })

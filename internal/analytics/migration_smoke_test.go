@@ -28,8 +28,8 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 17 {
-		t.Fatalf("got %d applied migrations, want 17", applied)
+	if applied != 20 {
+		t.Fatalf("got %d applied migrations, want 20", applied)
 	}
 	for table, column := range map[string]string{
 		"cdr_time_facts": "time_source", "call_assignments": "time_source",

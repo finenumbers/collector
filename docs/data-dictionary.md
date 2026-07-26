@@ -121,7 +121,7 @@ vendor metadata и не определяет успешность — напри
 - payload event time, component, message, parser version/status;
 - typed/extracted attributes и category.
 
-Parser `eltex-smg-syslog-v14` использует общий envelope/classification core и сохраняет
+Parser `eltex-smg-syslog-v15` использует общий envelope/classification core и сохраняет
 `firmware_scheme`, `template_key` и `classification_result` в provenance. Dialect profiles
 `3.23.2` и `3.410` ограничивают firmware-specific continuation. Core использует
 **component-first** классификацию: `SIP` / `SIPT[…]` /
@@ -237,6 +237,22 @@ request/reply, операция, решение, сервер, latency/retry, ac
 event IDs. Раздел «RADIUS» показывает полный технический поток; «АнтиФрод» показывает
 только structured lifecycle с `xpgk-request-type` либо доказанным AntiFraud flow.
 
+Additive projection `antifraud_calls` / `antifraud_operations` / `antifraud_packets`
+разделяет три identity. Call прежде всего определяется нормализованным
+`Acct-Session-Id`, затем `h323-conf-id` и bounded `call_context`; несколько операций
+могут принадлежать одному call. `number`, `save_call`, `check_call` и каждый accounting
+occurrence остаются отдельными operations. RADIUS Identifier, retry и ordered
+`attribute_keys` / `attribute_values` относятся только к packet. Packet стабилен от
+raw construct anchor, поэтому replay того же event/burst заменяет ту же строку.
+`current_antifraud_packets` и `current_antifraud_operations` используют `argMax` по
+revision/version key; старые `antifraud_lifecycles` и `call_assignments` остаются
+совместимым read model на время миграции.
+
+Public maps, export и UI удаляют `Password` / `User-Password`; immutable payload в
+`raw_syslog` не изменяется. Operation-to-CDR correlation допускает несколько operations
+к одному CDR. Несколько CDR с одним session без уникального временного преимущества
+получают `ambiguous_session_collision`.
+
 `call_assignments` содержит ровно одно текущее назначение lifecycle: linked
 `cdr_record_id` либо явное состояние `ambiguous`/`orphan`, method, confidence, delta,
 matched fields и reason. Повторная сверка той же dirty day bucket заменяет старое
@@ -244,11 +260,19 @@ matched fields и reason. Повторная сверка той же dirty day 
 
 Решения:
 
-- `check_call + Access-Accept` → `accept`, вызов продолжается;
-- `check_call + Access-Reject` → `reject`, вызов завершается с Q.850 cause 21;
-- timeout/недоступность всех серверов → `timeout_fail_open`, вызов продолжается;
+- `check_call + Access-Accept` → `verification_accept`, вызов продолжается;
+- `check_call + Access-Reject` → `verification_reject`; Q.850 сохраняется только при
+  явном packet/CDR evidence и не синтезируется;
+- timeout/недоступность всех серверов → `verification_fail_open`, вызов продолжается;
 - `number`/`save_call` — indication/registration; ответ не является решением о
   пропуске вызова и хранится как `informational`.
 
 `Accounting-Request` завершает lifecycle данными длительности/причины; ожидается
 `Accounting-Response`. Его отсутствие отмечается как неполный accounting.
+
+Parser `eltex-smg-syslog-v15` запускает durable historical replay через существующий
+rebuild job. Пока replay идёт, новые v15 rows записываются в shadow tables, а API
+продолжает читать legacy lifecycle. После достижения зафиксированного watermark worker
+вставляет `active` marker в `parser_projection_state`; только после этого API атомарно
+переключает конкретные device/timezone revision на v15 operations. Поэтому частично
+перестроенная история и дубликаты между v14/v15 в AntiFraud list не показываются.

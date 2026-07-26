@@ -30,13 +30,16 @@ func TestRevisionDiagnosticsAreIncludedInAPIResponse(t *testing.T) {
 		RevisionReason: "timezone_change", ReplayProcessed: 10, ReplayTotal: 20,
 		CDRReplayProcessed: 3, CDRReplayTotal: 4, MissingCDRTimes: 1,
 		RadiusRawFragments: 30, LifecycleDerived: 12, CorrelationTotal: 12,
-		CorrelationOrphan: 2,
+		CorrelationOrphan: 2, AntifraudPackets: 20, AntifraudCalls: 4,
+		AntifraudOperations: 12, UnlinkedFragments: 1, AmbiguousSessions: 2,
 	})
 	required := []string{
 		"activeRevision", "activeRevisionTimezone", "buildingRevision", "revisionTimezone",
 		"revisionStatus", "revisionReason",
 		"replayProcessed", "replayTotal", "cdrReplayProcessed", "cdrReplayTotal",
 		"missingCdrInterpretations", "radiusRawFragments", "lifecycleDerived",
+		"antifraudPackets", "antifraudCalls", "antifraudOperations",
+		"unlinkedRadiusFragments", "ambiguousSessionCollisions",
 		"correlationTotal", "correlationOrphan",
 	}
 	for _, key := range required {

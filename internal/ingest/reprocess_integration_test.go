@@ -82,7 +82,7 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	var ledgerRows, transactions, constructs uint64
+	var ledgerRows, transactions, constructs, packets, operations uint64
 	if err := client.Conn.QueryRow(ctx, `SELECT count() FROM collector.syslog_reprocess_ledger FINAL
 		WHERE event_id=? AND parser_version=?`, eventID, analytics.SyslogParserVersion).
 		Scan(&ledgerRows); err != nil {
@@ -96,8 +96,18 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 		WHERE device_id=?`, deviceID).Scan(&constructs); err != nil {
 		t.Fatal(err)
 	}
-	if ledgerRows != 1 || transactions != 1 {
-		t.Fatalf("ledger=%d transactions=%d, want 1/1", ledgerRows, transactions)
+	if err := client.Conn.QueryRow(ctx, `SELECT
+		(SELECT count() FROM collector.current_antifraud_packets
+		 WHERE device_id=? AND parser_version=?),
+		(SELECT count() FROM collector.current_antifraud_operations
+		 WHERE device_id=? AND parser_version=?)`,
+		deviceID, analytics.SyslogParserVersion,
+		deviceID, analytics.SyslogParserVersion).Scan(&packets, &operations); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 1 || transactions != 1 || packets != 1 || operations != 1 {
+		t.Fatalf("ledger=%d transactions=%d packets=%d operations=%d, want 1/1/1/1",
+			ledgerRows, transactions, packets, operations)
 	}
 	if constructs != 0 {
 		t.Fatalf("disabled replay inserted %d Syslog constructs", constructs)
@@ -109,6 +119,16 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].DeviceID != deviceID || jobs[0].Status != "completed" ||
 		jobs[0].ProcessedEvents != jobs[0].TotalEvents || jobs[0].ProcessedEvents != 1 {
 		t.Fatalf("unexpected durable replay progress: %#v", jobs)
+	}
+	var projectionStatus string
+	if err := client.Conn.QueryRow(ctx, `SELECT argMax(status,updated_at)
+		FROM collector.parser_projection_state
+		WHERE device_id=? AND parser_version=?`,
+		deviceID, analytics.SyslogParserVersion).Scan(&projectionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if projectionStatus != "active" {
+		t.Fatalf("parser projection status=%q, want active", projectionStatus)
 	}
 	page, err := client.ListEventsPage(ctx, deviceID, "all", "", 10, nil)
 	if err != nil {

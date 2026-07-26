@@ -10,7 +10,7 @@
 
 - изолированная регистрация нескольких SMG по IP-источнику Syslog и отдельной FTP-учётной записи;
 - host-network UDP ingress с сохранением реального source IP/port, отдельным durable handoff spool, JetStream без silent eviction, DLQ/quarantine и сохранением исходного payload;
-- parser `eltex-smg-syslog-v14`: Eltex trace/RFC3164/`CONFIG` envelope, firmware
+- parser `eltex-smg-syslog-v15`: Eltex trace/RFC3164/`CONFIG` envelope, firmware
   dialect profiles 3.23.2/3.410, контекстные `# requestID`/`trunkID`/`Keep alive`/`cause`
   continuations, RFC 4566 bare SDP (включая `b=`), ISUP dotted-hex / `[No optional params]`,
   `SIPT Proc`, HostIPlist IPv4, все документированные alarm/calls/SIPT/ISUP/Q.931/H.323/RTP/

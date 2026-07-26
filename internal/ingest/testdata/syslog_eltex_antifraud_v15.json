@@ -1,0 +1,93 @@
+[
+  {
+    "name": "3.23.2 bare HostIPlist IPv4",
+    "template": "eltex-smg-1016m-3.23.2",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] SIP. proc cmd 'HostIPlist' [6] [0]",
+      "<14> <smg1016m> 10:00:00.001000 [INFO] \t\t192.0.2.23"
+    ],
+    "categories": ["sip", "sip"],
+    "attributes": [{}, {"fragment_kind": "host_ip", "host_ip": "192.0.2.23"}]
+  },
+  {
+    "name": "3.410 bare HostIPlist IPv4",
+    "template": "eltex-smg-1016m-3.410",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] SIP. proc cmd 'HostIPlist' [6] [0]",
+      "<14> <smg1016m> 10:00:00.001000 [INFO] \t\t192.0.2.41"
+    ],
+    "categories": ["sip", "sip"],
+    "attributes": [{}, {"fragment_kind": "host_ip", "host_ip": "192.0.2.41"}]
+  },
+  {
+    "name": "3.23.2 no optional params under ISUP",
+    "template": "eltex-smg-1016m-3.23.2",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] [C232] SS7/ISUP. IAM CIC=7",
+      "<14> <smg1016m> 10:00:00.001000 [INFO] [C232] \t[No optional params]"
+    ],
+    "categories": ["isup", "isup"],
+    "attributes": [{}, {"fragment_kind": "isup_optional"}]
+  },
+  {
+    "name": "3.410 range follows ISUP",
+    "template": "eltex-smg-1016m-3.410",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] [C410] SS7/ISUP. IAM CIC=8",
+      "<14> <smg1016m> 10:00:00.001000 [INFO] [C410] \t# Range: 31"
+    ],
+    "categories": ["isup", "isup"],
+    "attributes": [{}, {"fragment_kind": "hash_detail"}]
+  },
+  {
+    "name": "3.410 range remains SIP in SIP-T context",
+    "template": "eltex-smg-1016m-3.410",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] [C411] SIPT Proc. TX INVITE",
+      "<14> <smg1016m> 10:00:00.001000 [INFO] [C411] \t# Numbering plan: 1"
+    ],
+    "categories": ["sip", "sip"],
+    "attributes": [{}, {"fragment_kind": "hash_detail"}]
+  },
+  {
+    "name": "antifraud profile control is not RADIUS",
+    "template": "eltex-smg-1016m-3.410",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] [CCTL] SIP. ANTIFRAUD RADIUS-profile build wait config"
+    ],
+    "categories": ["sip"],
+    "attributes": [{"intrinsic_kind": "antifraud_control"}]
+  },
+  {
+    "name": "SMG request aliases and identifiers",
+    "template": "eltex-smg-1016m-3.410",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] [CRAD] -- RADIUS. Accs-Request [196] --",
+      "<14> <smg1016m> 10:00:00.001000 [INFO] [CRAD] -- RADIUS. Antifraud-Auth-Request [203] --",
+      "<14> <smg1016m> 10:00:00.002000 [INFO] [CRAD] RADIUS server rejected: :0 (replied 0)"
+    ],
+    "categories": ["radius", "radius", "radius"],
+    "attributes": [
+      {"packet_code": "access-request", "packet_direction": "request", "packet_identifier": "196"},
+      {"packet_code": "access-request", "packet_direction": "request", "packet_identifier": "203"},
+      {"packet_code": "access-reject", "packet_direction": "response"}
+    ]
+  },
+  {
+    "name": "xpgk request types and xpkg typo",
+    "template": "eltex-smg-1016m-3.23.2",
+    "payloads": [
+      "<14> <smg1016m> 10:00:00.000000 [INFO] [CXPG] Cisco-AVPair = 'xpgk-request-type=number'",
+      "<14> <smg1016m> 10:00:00.001000 [INFO] [CXPG] Cisco-AVPair = 'xpgk-request-type=save_call'",
+      "<14> <smg1016m> 10:00:00.002000 [INFO] [CXPG] Cisco-AVPair = 'xpgk-request-type=check_call'",
+      "<14> <smg1016m> 10:00:00.003000 [INFO] [CXPG] Cisco-AVPair = 'xpkg-request-type=check_call'"
+    ],
+    "categories": ["radius", "radius", "radius", "radius"],
+    "attributes": [
+      {"xpgk_request_type": "number"},
+      {"xpgk_request_type": "save_call"},
+      {"xpgk_request_type": "check_call"},
+      {"xpgk_request_type": "check_call"}
+    ]
+  }
+]

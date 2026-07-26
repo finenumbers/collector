@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,11 +36,12 @@ func TestAntifraudAssemblerCombinesFragmentsAndRejectDecision(t *testing.T) {
 	}
 	latency := uint32(165)
 	mergeAntifraudEvent(transaction, response, response.ReceivedAt, &identifier, &latency, 0, nil)
-	if transaction.Decision != "reject" || transaction.DecisionReason != "Access-Reject" {
+	if transaction.Decision != "verification_reject" ||
+		transaction.DecisionReason != "Access-Reject" {
 		t.Fatalf("incorrect decision: %#v", transaction)
 	}
-	if transaction.Q850Cause == nil || *transaction.Q850Cause != 21 {
-		t.Fatalf("reject must map to Q.850 21: %#v", transaction.Q850Cause)
+	if transaction.Q850Cause != nil {
+		t.Fatalf("reject must not synthesize Q.850: %#v", transaction.Q850Cause)
 	}
 	if transaction.Completeness != "complete" || transaction.IsAntifraud != 1 {
 		t.Fatalf("lifecycle not completed: %#v", transaction)
@@ -131,9 +133,179 @@ func TestAntifraudTimeoutIsFailOpenOnlyForCheckCall(t *testing.T) {
 		Attributes: map[string]string{"decision": "timeout_fail_open"},
 	}
 	mergeAntifraudEvent(transaction, event, event.ReceivedAt, nil, nil, 0, nil)
-	if transaction.Decision != "timeout_fail_open" ||
+	if transaction.Decision != "verification_fail_open" ||
 		transaction.DecisionReason != "RADIUS timeout, documented fail-open" {
 		t.Fatalf("timeout semantics lost: %#v", transaction)
+	}
+}
+
+func TestProjectionKeepsOperationTypesDistinctAndVSAOrder(t *testing.T) {
+	deviceID := uuid.New()
+	now := time.Date(2026, 7, 27, 1, 0, 0, 0, time.UTC)
+	events := make([]SyslogEvent, 0)
+	for index, operationType := range []string{"number", "save_call", "check_call"} {
+		anchor := uuid.New()
+		request := SyslogEvent{
+			EventID: anchor, DeviceID: deviceID,
+			ReceivedAt: now.Add(time.Duration(index) * time.Second), Category: "radius",
+			Payload: []byte(`Eltex-AVPair="xpgk-request-type=` + operationType +
+				`" Eltex-AVPair="xpgk-src-number-in=100" Eltex-AVPair="xpgk-src-number-in=200"`),
+			Attributes: map[string]string{
+				"construct_anchor_event_id": anchor.String(), "call_context": "C-SHARED",
+				"acct_session_id": "shared session", "packet_code": "access-request",
+				"packet_direction": "request", "packet_identifier": strconv.Itoa(40 + index),
+				"xpgk_request_type": operationType,
+			},
+		}
+		response := request
+		response.EventID = uuid.New()
+		response.ReceivedAt = request.ReceivedAt.Add(100 * time.Millisecond)
+		response.Payload = []byte("Access-Accept")
+		response.Attributes = map[string]string{
+			"construct_anchor_event_id": response.EventID.String(),
+			"call_context":              "C-SHARED",
+			"packet_code":               "access-accept",
+			"packet_direction":          "response",
+			"packet_identifier":         strconv.Itoa(40 + index),
+		}
+		events = append(events, request, response)
+	}
+	projection := buildAntiFraudProjection(events, nil)
+	if len(projection.Operations) != 3 {
+		t.Fatalf("operations=%d want 3: %#v", len(projection.Operations), projection.Operations)
+	}
+	types := map[string]string{}
+	for _, operation := range projection.Operations {
+		types[operation.OperationType] = operation.TerminalState
+	}
+	if types["number"] != "informational" || types["save_call"] != "informational" ||
+		types["check_call"] != "verification_accept" {
+		t.Fatalf("operation semantics were conflated: %#v", types)
+	}
+	if len(projection.Calls) != 1 {
+		t.Fatalf("same session produced %d calls", len(projection.Calls))
+	}
+	requestPacket := projection.Packets[0]
+	var values []string
+	for index, key := range requestPacket.AttributeKeys {
+		if key == "xpgk_src_number_in" {
+			values = append(values, requestPacket.AttributeValues[index])
+		}
+	}
+	if strings.Join(values, ",") != "100,200" {
+		t.Fatalf("repeated VSA order lost: keys=%v values=%v",
+			requestPacket.AttributeKeys, requestPacket.AttributeValues)
+	}
+}
+
+func TestProjectionRejectAndTimeoutSemantics(t *testing.T) {
+	deviceID := uuid.New()
+	now := time.Now().UTC()
+	makePair := func(operationType, responseCode string, timeout bool) []SyslogEvent {
+		request := SyslogEvent{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now, Category: "radius",
+			Attributes: map[string]string{
+				"call_context": "C-" + operationType, "packet_direction": "request",
+				"packet_code": "access-request", "xpgk_request_type": operationType,
+			},
+		}
+		if timeout {
+			request.Attributes["decision"] = "timeout_fail_open"
+			return []SyslogEvent{request}
+		}
+		response := SyslogEvent{
+			EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now.Add(time.Millisecond),
+			Category: "radius", Attributes: map[string]string{
+				"call_context": "C-" + operationType, "packet_direction": "response",
+				"packet_code": responseCode,
+			},
+		}
+		return []SyslogEvent{request, response}
+	}
+	number := buildAntiFraudProjection(makePair("number", "access-reject", false), nil)
+	check := buildAntiFraudProjection(makePair("check_call", "access-reject", false), nil)
+	timeout := buildAntiFraudProjection(makePair("check_call", "", true), nil)
+	if number.Operations[0].TerminalState != "informational" {
+		t.Fatalf("number reject controls passage: %#v", number.Operations[0])
+	}
+	if check.Operations[0].TerminalState != "verification_reject" ||
+		check.Operations[0].Q850Cause != nil {
+		t.Fatalf("check reject semantics: %#v", check.Operations[0])
+	}
+	if timeout.Operations[0].TerminalState != "verification_fail_open" {
+		t.Fatalf("timeout semantics: %#v", timeout.Operations[0])
+	}
+}
+
+func TestProjectionResponseOnlyAndIdempotentRetry(t *testing.T) {
+	event := SyslogEvent{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		Category: "radius", Attributes: map[string]string{
+			"call_context": "C-ONLY", "packet_direction": "response",
+			"packet_code": "access-reject",
+		},
+	}
+	first := buildAntiFraudProjection([]SyslogEvent{event}, nil)
+	second := buildAntiFraudProjection([]SyslogEvent{event, event}, nil)
+	if first.Operations[0].TerminalState != "incomplete_response" {
+		t.Fatalf("response-only state: %#v", first.Operations)
+	}
+	if len(second.Packets) != 1 || second.Packets[0].PacketID != first.Packets[0].PacketID {
+		t.Fatalf("duplicate event was not idempotent: %#v", second.Packets)
+	}
+}
+
+func TestProjectionRetryUsesOutstandingOperation(t *testing.T) {
+	deviceID := uuid.New()
+	now := time.Now().UTC()
+	request := SyslogEvent{
+		EventID: uuid.New(), DeviceID: deviceID, ReceivedAt: now, Category: "radius",
+		Attributes: map[string]string{
+			"call_context": "C-RETRY", "packet_direction": "request",
+			"packet_code": "access-request", "packet_identifier": "17",
+			"xpgk_request_type": "check_call",
+		},
+	}
+	retry := request
+	retry.EventID = uuid.New()
+	retry.ReceivedAt = now.Add(time.Second)
+	retry.Attributes = map[string]string{
+		"call_context": "C-RETRY", "packet_direction": "request",
+		"packet_code": "access-request", "packet_identifier": "17",
+		"xpgk_request_type": "check_call", "retry": "1",
+	}
+	response := request
+	response.EventID = uuid.New()
+	response.ReceivedAt = now.Add(2 * time.Second)
+	response.Attributes = map[string]string{
+		"call_context": "C-RETRY", "packet_direction": "response",
+		"packet_code": "access-accept", "packet_identifier": "17",
+	}
+	projection := buildAntiFraudProjection([]SyslogEvent{request, retry, response}, nil)
+	if len(projection.Operations) != 1 || len(projection.Packets) != 3 {
+		t.Fatalf("retry split operation: packets=%d operations=%d",
+			len(projection.Packets), len(projection.Operations))
+	}
+	for _, packet := range projection.Packets {
+		if packet.OperationID == nil ||
+			*packet.OperationID != projection.Operations[0].OperationID {
+			t.Fatalf("packet is not linked to one operation: %#v", projection)
+		}
+	}
+}
+
+func TestPublicRadiusRedaction(t *testing.T) {
+	attributes := map[string]string{
+		"user_password": "secret", "Password": "also-secret", "user_name": "alice",
+	}
+	public := sanitizePublicAttributes(attributes)
+	if public["user_password"] != "" || public["Password"] != "" ||
+		public["user_name"] != "alice" {
+		t.Fatalf("attribute redaction failed: %#v", public)
+	}
+	payload := redactPublicPayload(`User-Password = "secret" Calling-Station-Id=100`)
+	if strings.Contains(payload, "secret") || !strings.Contains(payload, "[REDACTED]") {
+		t.Fatalf("payload redaction failed: %s", payload)
 	}
 }
 

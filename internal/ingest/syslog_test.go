@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1076,5 +1077,195 @@ func TestConstructHintsAndStableAnchor(t *testing.T) {
 	if events[1].Attributes["fragment_link_method"] != "sip_burst" ||
 		events[1].Attributes["fragment_link_confidence"] != "0.7" {
 		t.Fatalf("fragment provenance: %#v", events[1].Attributes)
+	}
+}
+
+func TestEltexAntifraudV15GoldenCorpus(t *testing.T) {
+	type goldenCase struct {
+		Name       string              `json:"name"`
+		Template   string              `json:"template"`
+		Payloads   []string            `json:"payloads"`
+		Categories []string            `json:"categories"`
+		Attributes []map[string]string `json:"attributes"`
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "syslog_eltex_antifraud_v15.json"))
+	if err != nil {
+		t.Fatalf("read golden corpus: %v", err)
+	}
+	var cases []goldenCase
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatalf("decode golden corpus: %v", err)
+	}
+	for _, golden := range cases {
+		t.Run(golden.Name, func(t *testing.T) {
+			if len(golden.Payloads) != len(golden.Categories) ||
+				len(golden.Payloads) != len(golden.Attributes) {
+				t.Fatalf("invalid golden lengths: %#v", golden)
+			}
+			deviceID := uuid.New()
+			start := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+			events := make([]analytics.SyslogEvent, 0, len(golden.Payloads))
+			for index, payload := range golden.Payloads {
+				events = append(events, ParseSyslog(RawSyslog{
+					EventID: uuid.New(), DeviceID: deviceID,
+					ReceivedAt: start.Add(time.Duration(index) * time.Millisecond),
+					SourceIP:   "192.0.2.10", SourcePort: 514,
+					TemplateKey: golden.Template, Payload: []byte(payload),
+				}))
+			}
+			NewContinuationAssembler().Assemble(events)
+			for index := range events {
+				if events[index].Category != golden.Categories[index] {
+					t.Errorf("event %d category=%q want %q: %#v",
+						index, events[index].Category, golden.Categories[index], events[index])
+				}
+				for key, want := range golden.Attributes[index] {
+					if got := events[index].Attributes[key]; got != want {
+						t.Errorf("event %d %s=%q want %q; attrs=%#v",
+							index, key, got, want, events[index].Attributes)
+					}
+				}
+				wantSource := sourceFamilyForCategory(golden.Categories[index])
+				if events[index].Attributes["source_family"] != wantSource ||
+					events[index].Attributes["transport_family"] != "syslog" ||
+					events[index].Attributes["header_family"] == "" {
+					t.Errorf("event %d provenance=%#v want source=%q",
+						index, events[index].Attributes, wantSource)
+				}
+			}
+		})
+	}
+}
+
+func TestEltexAntifraudV15CorpusAudit(t *testing.T) {
+	type goldenCase struct {
+		Template string   `json:"template"`
+		Payloads []string `json:"payloads"`
+	}
+	type auditReport struct {
+		Total            int            `json:"total"`
+		Categories       map[string]int `json:"categories"`
+		UnknownReasons   map[string]int `json:"unknown_reasons"`
+		SourceConfusions int            `json:"source_confusions"`
+		Coverage         map[string]int `json:"coverage"`
+	}
+	corpusData, err := os.ReadFile(filepath.Join(
+		"testdata", "syslog_eltex_antifraud_v15.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corpus []goldenCase
+	if err := json.Unmarshal(corpusData, &corpus); err != nil {
+		t.Fatal(err)
+	}
+	report := auditReport{
+		Categories: make(map[string]int), UnknownReasons: make(map[string]int),
+		Coverage: make(map[string]int),
+	}
+	for _, fixture := range corpus {
+		deviceID := uuid.New()
+		events := make([]analytics.SyslogEvent, 0, len(fixture.Payloads))
+		for index, payload := range fixture.Payloads {
+			events = append(events, ParseSyslog(RawSyslog{
+				EventID: uuid.New(), DeviceID: deviceID,
+				ReceivedAt: time.Date(2026, 7, 27, 10, 0, 0, index, time.UTC),
+				SourceIP:   "192.0.2.10", SourcePort: 514,
+				TemplateKey: fixture.Template, Payload: []byte(payload),
+			}))
+		}
+		NewContinuationAssembler().Assemble(events)
+		for _, event := range events {
+			report.Total++
+			report.Categories[event.Category]++
+			if reason := event.Attributes["unclassified_reason"]; reason != "" {
+				report.UnknownReasons[reason]++
+			}
+			if event.Attributes["source_family"] != sourceFamilyForCategory(event.Category) {
+				report.SourceConfusions++
+			}
+			if event.Attributes["source_family"] != "" {
+				report.Coverage["producer_provenance"]++
+			}
+			if event.Attributes["transport_family"] == "syslog" {
+				report.Coverage["transport_provenance"]++
+			}
+			switch event.Attributes["fragment_kind"] {
+			case "host_ip", "isup_optional", "hash_detail":
+				report.Coverage[event.Attributes["fragment_kind"]]++
+			}
+			if event.Attributes["intrinsic_kind"] == "antifraud_control" {
+				report.Coverage["antifraud_control"]++
+			}
+			if event.Attributes["packet_code"] == "access-request" {
+				report.Coverage["access_request_alias"]++
+			}
+			if event.Attributes["packet_code"] == "access-reject" {
+				report.Coverage["access_reject_response"]++
+			}
+			if operationType := event.Attributes["xpgk_request_type"]; operationType != "" {
+				report.Coverage["operation_"+operationType]++
+			}
+		}
+	}
+	expectedData, err := os.ReadFile(filepath.Join(
+		"testdata", "syslog_eltex_antifraud_v15_audit.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expected auditReport
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatal(err)
+	}
+	gotJSON, _ := json.Marshal(report)
+	wantJSON, _ := json.Marshal(expected)
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("corpus audit drifted:\ngot  %s\nwant %s", gotJSON, wantJSON)
+	}
+}
+
+func TestClassificationProvenanceAndConservativeBareIP(t *testing.T) {
+	event := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "192.0.2.10", TemplateKey: "eltex-smg-1016m-3.23.2",
+		Payload: []byte("192.0.2.23"),
+	})
+	if event.Category != "unknown" || event.Attributes["fragment_kind"] != "" {
+		t.Fatalf("unenveloped IPv4 must not become SIP: %#v", event)
+	}
+	for key, want := range map[string]string{
+		"source_family":             "unknown",
+		"transport_family":          "syslog",
+		"header_family":             "unknown",
+		"intrinsic_kind":            "unknown",
+		"classification_rule":       "no_matching_rule",
+		"classification_confidence": "0",
+		"unclassified_reason":       "unrecognized_envelope_and_body",
+	} {
+		if got := event.Attributes[key]; got != want {
+			t.Errorf("%s=%q want %q; attrs=%#v", key, got, want, event.Attributes)
+		}
+	}
+
+	known := ParseSyslog(RawSyslog{
+		EventID: uuid.New(), DeviceID: uuid.New(), ReceivedAt: time.Now().UTC(),
+		SourceIP: "192.0.2.10",
+		Payload:  []byte(`<14> <smg1016m> 10:00:00.000000 [INFO] SIP. INVITE sip:user@example.test`),
+	})
+	for _, key := range []string{
+		"source_family", "transport_family", "header_family", "intrinsic_kind",
+		"classification_rule", "classification_confidence",
+	} {
+		if known.Attributes[key] == "" {
+			t.Errorf("known event missing %s: %#v", key, known.Attributes)
+		}
+	}
+	if known.Attributes["unclassified_reason"] != "" {
+		t.Errorf("known event has unclassified reason: %#v", known.Attributes)
+	}
+	if known.Attributes["source_family"] != "sip" ||
+		known.Attributes["header_family"] != "eltex_trace" {
+		t.Errorf("producer/header provenance was conflated: %#v", known.Attributes)
 	}
 }

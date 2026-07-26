@@ -14,6 +14,7 @@ import {
   defaultSourceDataset, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
   sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
 } from './equipment'
+import { exportURL, ExportNavigationDataset } from './export'
 import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
@@ -101,14 +102,6 @@ type ReplayProgress = {
   complete: number
   quarantined: number
 }
-type CdrDetection = {
-  status: 'not_checked' | 'no_samples' | 'matched' | 'mixed' | 'error' | 'activated'
-  template?: string
-  fingerprint?: string
-  error?: string
-  checkedAt?: string
-  lastFileAt?: string
-}
 type Device = {
   id: string
   name: string
@@ -133,12 +126,6 @@ type Device = {
   sourceCategory?: SourceCategory
   templateKey?: string
   capabilities?: SourceCapabilities
-  detectionStatus?: CdrDetection['status']
-  detectionTemplate?: string
-  detectionFingerprint?: string
-  detectionError?: string
-  detectionCheckedAt?: string
-  detectionLastFileAt?: string
   replay?: ReplayProgress
 }
 type EventRow = {
@@ -377,9 +364,7 @@ type PageResponse<T> = {
   nextCursor?: PageCursor
 }
 type DataRow = EventRow | CallRow | SatelCdrRow | AntifraudRow
-type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
-  'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
-  'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown'
+type Dataset = ExportNavigationDataset
 
 let csrfToken = ''
 const PAGE_SIZE = 100
@@ -533,15 +518,13 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   }, [loadDevices])
   const hasTimezoneRebuild = devices.some((device) =>
     device.timezoneRevision !== device.activeTimezoneRevision)
-  const hasDetectionOrReplay = devices.some((device) =>
-    (device.templateKey === 'softswitch-cdr-raw-v1' &&
-      !['mixed'].includes(device.detectionStatus || 'not_checked')) ||
+  const hasReplay = devices.some((device) =>
     Boolean(device.replay?.pending || device.replay?.processing))
   useEffect(() => {
-    if (!hasTimezoneRebuild && !hasDetectionOrReplay) return
+    if (!hasTimezoneRebuild && !hasReplay) return
     const timer = window.setInterval(() => void loadDevices(), 5000)
     return () => window.clearInterval(timer)
-  }, [hasDetectionOrReplay, hasTimezoneRebuild, loadDevices])
+  }, [hasReplay, hasTimezoneRebuild, loadDevices])
   const selected = devices.find((device) => device.id === activeDevice)
   const equipment = devices.filter((device) => sourceCategory(device) === 'equipment')
   const softswitches = devices.filter((device) => sourceCategory(device) === 'softswitch')
@@ -552,25 +535,29 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     setDataset(defaultSourceDataset(device))
     setActiveView('device')
   }
-  const sourceList = (items: Device[], category: SourceCategory) => <div className="device-list">
-    {items.map((device) => <button key={device.id}
-      className={`device-button ${device.id === activeDevice ? 'active' : ''}`}
-      onClick={() => selectSource(device)}>
-      <span className={`status-dot ${device.enabled && device.purgeState !== 'purge_failed' ? 'online' : ''}`} />
-      <span>
-        <strong>{device.name}</strong>
-        <small>{device.purgeState === 'purge_failed' ? 'Ошибка удаления' :
-          device.purgeState === 'deleting' ? 'Удаление…' :
-            category === 'softswitch' ? device.ftpUsername : device.syslogSourceIp}</small>
-      </span>
-    </button>)}
-    {user.role === 'admin' && <button className="add-device" onClick={() => {
-      setActiveCategory(category)
-      setShowCreate(category)
-    }}>
-      <CirclePlus size={15} /> {category === 'equipment' ? 'Добавить оборудование' : 'Добавить софтсвитч'}
-    </button>}
-  </div>
+  const sourceList = (items: Device[], category: SourceCategory) => <>
+    <div className="device-list">
+      {items.map((device) => <button key={device.id}
+        className={`device-button ${device.id === activeDevice ? 'active' : ''}`}
+        onClick={() => selectSource(device)}>
+        <span className={`status-dot ${device.enabled && device.purgeState !== 'purge_failed' ? 'online' : ''}`} />
+        <span>
+          <strong>{device.name}</strong>
+          <small>{device.purgeState === 'purge_failed' ? 'Ошибка удаления' :
+            device.purgeState === 'deleting' ? 'Удаление…' :
+              category === 'softswitch' ? device.ftpUsername : device.syslogSourceIp}</small>
+        </span>
+      </button>)}
+      {user.role === 'admin' && <button className="add-device" onClick={() => {
+        setActiveCategory(category)
+        setShowCreate(category)
+      }}>
+        <CirclePlus size={15} /> {category === 'equipment' ? 'Добавить оборудование' : 'Добавить софтсвитч'}
+      </button>}
+    </div>
+    {selected && activeView === 'device' && sourceCategory(selected) === category &&
+      <DeviceNavigation device={selected} active={dataset} onChange={setDataset} />}
+  </>
 
   return <div className="workspace">
     <aside className="sidebar">
@@ -578,12 +565,12 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         onClick={() => setActiveView('dashboard')}>
         <img src={fineNumbersLogoUrl} alt="Fine Numbers" />
       </button>
-      <div className="side-section-label">ОБОРУДОВАНИЕ</div>
-      {sourceList(equipment, 'equipment')}
-      <div className="side-section-label">СОФТСВИТЧИ</div>
-      {sourceList(softswitches, 'softswitch')}
-      {selected && activeView === 'device' &&
-        <DeviceNavigation device={selected} active={dataset} onChange={setDataset} />}
+      <div className="sidebar-scroll">
+        <div className="side-section-label">ОБОРУДОВАНИЕ</div>
+        {sourceList(equipment, 'equipment')}
+        <div className="side-section-label">СОФТСВИТЧИ</div>
+        {sourceList(softswitches, 'softswitch')}
+      </div>
       <div className="sidebar-footer">
         <button className={activeView === 'settings' ? 'active' : ''}
           onClick={() => setActiveView('settings')}><Settings size={15} /> Настройки</button>
@@ -629,10 +616,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       {activeView === 'device' && (!selected
         ? <EmptyDevices category={activeCategory} canCreate={user.role === 'admin'}
           onCreate={() => setShowCreate(activeCategory)} />
-        : sourceCategory(selected) === 'softswitch' && !sourceCapabilities(selected).typedCdr
-          ? <SoftswitchPendingView device={selected} />
-          : <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
-            admin={user.role === 'admin'} />)}
+        : <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
+          admin={user.role === 'admin'} />)}
     </main>
     {showCreate && <CreateDeviceDialog category={showCreate} templates={templates}
       onClose={() => setShowCreate(null)} onCreated={(device) => {
@@ -907,27 +892,12 @@ function DeviceNavigation({ device, active, onChange }: {
   </nav>
 }
 
-function SatelPipelineNotice({ templateKey, detection, replay }: {
+function SatelPipelineNotice({ templateKey, replay }: {
   templateKey?: string
-  detection: CdrDetection
   replay: ReplayProgress
 }) {
   const remaining = replay.pending + replay.processing
   const total = remaining + replay.complete
-  if (templateKey === 'softswitch-cdr-raw-v1') {
-    if (detection.status === 'mixed' || detection.status === 'error') {
-      return <div className="pipeline-notice pipeline-error">
-        <strong>Формат CDR не определён автоматически</strong>
-        <span>{detection.error || 'Архивы содержат несовместимые заголовки; источник оставлен без разбора.'}</span>
-      </div>
-    }
-    return <div className="pipeline-notice pipeline-pending">
-      <strong>Определяется формат CDR</strong>
-      <span>{detection.status === 'no_samples'
-        ? 'Ожидается первый неизменяемый CDR-файл.'
-        : 'Collector проверяет заголовки архивов и безопасно активирует подходящий parser.'}</span>
-    </div>
-  }
   if (templateKey !== 'satel-rtu-cdr-v1') return null
   if (remaining > 0) {
     return <div className="pipeline-notice pipeline-pending">
@@ -937,25 +907,6 @@ function SatelPipelineNotice({ templateKey, detection, replay }: {
     </div>
   }
   return null
-}
-
-function SoftswitchPendingView({ device }: { device: Device }) {
-  const detection: CdrDetection = {
-    status: device.detectionStatus || 'not_checked',
-    template: device.detectionTemplate,
-    fingerprint: device.detectionFingerprint,
-    error: device.detectionError,
-    checkedAt: device.detectionCheckedAt,
-    lastFileAt: device.detectionLastFileAt,
-  }
-  return <section className="data-view">
-    <SatelPipelineNotice templateKey={device.templateKey} detection={detection}
-      replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />
-    <div className="table-empty">
-      <strong>Ожидается определение формата CDR</strong>
-      <p>После автоматического выбора parser здесь появится таблица вызовов.</p>
-    </div>
-  </section>
 }
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
@@ -978,8 +929,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const hasSyslog = sourceCapabilities(device).syslog
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const category = dataset === 'syslog_all' ? 'all' : dataset
-  const exportDataset = dataset === 'calls' ? 'calls' : dataset === 'antifraud' ? 'antifraud' : 'events'
-  const exportUrl = `/api/devices/${device.id}/export.xlsx?dataset=${exportDataset}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}`
+  const exportUrl = exportURL(device.id, dataset, query)
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     const base = dataset === 'calls'
       ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
@@ -1065,14 +1015,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>}
     {isSatel && dataset === 'calls' && <SatelPipelineNotice
       templateKey={device.templateKey}
-      detection={{
-        status: device.detectionStatus || 'activated',
-        template: device.detectionTemplate,
-        fingerprint: device.detectionFingerprint,
-        error: device.detectionError,
-        checkedAt: device.detectionCheckedAt,
-        lastFileAt: device.detectionLastFileAt,
-      }}
       replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />}
     {admin && dataset === 'calls' && diagnostics && <CdrIngestBanner files={diagnostics.cdrIngestFiles || []} />}
     {stats && <div className="stat-strip">
@@ -1689,7 +1631,7 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
   const [form, setForm] = useState({
     templateKey: device.templateKey || (normalizeFirmwareScheme(device.firmware) === '3.410'
       ? 'eltex-smg-1016m-3.410' : isSoftswitch
-        ? 'softswitch-cdr-raw-v1' : 'eltex-smg-1016m-3.23.2'),
+        ? 'satel-rtu-cdr-v1' : 'eltex-smg-1016m-3.23.2'),
     sourceCategory: sourceCategory(device),
     name: device.name, firmware: isSoftswitch ? '' : normalizeFirmwareScheme(device.firmware),
     timezone: device.timezone,

@@ -35,12 +35,6 @@ export const fallbackTemplates: EquipmentTemplate[] = [
     displayName: 'Satel RTU',
     capabilities: { syslog: false, typedCdr: true, rawCdr: true, antifraud: false, radius: false },
   },
-  {
-    key: 'softswitch-cdr-raw-v1',
-    category: 'softswitch',
-    displayName: 'Софтсвитч — CDR без разбора',
-    capabilities: { syslog: false, typedCdr: false, rawCdr: true, antifraud: false, radius: false },
-  },
 ]
 
 export function normalizeTemplate(value: Partial<EquipmentTemplate> & {

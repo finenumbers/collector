@@ -61,11 +61,6 @@ func (w *CDRWatcher) Run(ctx context.Context) error {
 }
 
 func (w *CDRWatcher) scan(ctx context.Context) error {
-	// Disabled raw sources are still classified from immutable archives, but
-	// ClaimNextIngestReplay leaves their replay pending until they are enabled.
-	if err := reconcileRawSatelTemplates(ctx, w.Store, w.Archive); err != nil {
-		slog.Error("raw CDR template reconciliation failed", "error", err)
-	}
 	if err := w.drainIngestReplays(ctx, 100); err != nil {
 		slog.Error("CDR archive replay failed", "error", err)
 	}
@@ -150,26 +145,9 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	}
 	fileID := claim.ID
 	objectKey = claim.ObjectKey
-	contentType := "application/octet-stream"
-	if template.Capabilities.TypedCDR {
-		contentType = "text/csv"
-	}
-	if err := w.Archive.Put(ctx, objectKey, bytes.NewReader(content), int64(len(content)), contentType); err != nil {
+	if err := w.Archive.Put(ctx, objectKey, bytes.NewReader(content), int64(len(content)), "text/csv"); err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", 0, 0, err.Error())
 		return err
-	}
-	if !template.Capabilities.TypedCDR {
-		if err := insertCDRForTemplate(ctx, template, w.Analytics, nil); err != nil {
-			_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", 0, 0, err.Error())
-			return err
-		}
-		if err := w.Store.CompleteIngestFileWithParser(
-			ctx, fileID, "archived", 0, 0, "",
-			template.Key, "raw-archive-v1",
-		); err != nil {
-			return err
-		}
-		return os.Remove(path)
 	}
 	decoded, err := decodeCDR(content)
 	if err != nil {

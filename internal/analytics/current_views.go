@@ -204,23 +204,37 @@ func (c *Client) listFallbackEventsPage(
 ) (EventPage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	query := `SELECT event_id,received_at,event_time,category,component,message,
-		payload,parse_status,attributes,source_timezone
-		FROM collector.raw_syslog WHERE device_id=?`
-	args := []any{deviceID}
+	effectiveCategory := `if(i.event_id=toUUID('00000000-0000-0000-0000-000000000000'),
+		r.category,i.category)`
+	query := `SELECT r.event_id,r.received_at,
+		if(i.event_id=toUUID('00000000-0000-0000-0000-000000000000'),r.event_time,i.event_time),
+		` + effectiveCategory + `,
+		if(i.event_id=toUUID('00000000-0000-0000-0000-000000000000'),r.component,i.component),
+		if(i.event_id=toUUID('00000000-0000-0000-0000-000000000000'),r.message,i.message),
+		r.payload,
+		if(i.event_id=toUUID('00000000-0000-0000-0000-000000000000'),r.parse_status,i.parse_status),
+		if(i.event_id=toUUID('00000000-0000-0000-0000-000000000000'),r.attributes,i.attributes),
+		r.source_timezone
+		FROM collector.raw_syslog AS r
+		LEFT JOIN (
+			SELECT event_id,device_id,event_time,parse_status,category,component,message,attributes
+			FROM collector.syslog_interpretations FINAL WHERE parser_version=?
+		) AS i ON i.device_id=r.device_id AND i.event_id=r.event_id
+		WHERE r.device_id=?`
+	args := []any{SyslogParserVersion, deviceID}
 	if category != "" && category != "all" {
-		query += ` AND category=?`
+		query += ` AND ` + effectiveCategory + `=?`
 		args = append(args, category)
 	}
 	if search != "" {
-		query += ` AND positionCaseInsensitive(payload,?)>0`
+		query += ` AND positionCaseInsensitive(r.payload,?)>0`
 		args = append(args, search)
 	}
 	if cursor != nil {
-		query += ` AND (received_at<? OR (received_at=? AND event_id<?))`
+		query += ` AND (r.received_at<? OR (r.received_at=? AND r.event_id<?))`
 		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
 	}
-	query += ` ORDER BY received_at DESC,event_id DESC LIMIT 1 BY event_id LIMIT ?`
+	query += ` ORDER BY r.received_at DESC,r.event_id DESC LIMIT 1 BY r.event_id LIMIT ?`
 	args = append(args, limit+1)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {

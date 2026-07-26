@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import main from './main.tsx?raw'
 import {
-  defaultSourceDataset, fallbackTemplates, normalizeTemplate, sourceCapabilities, sourceCategory,
-  sourceDatasets, templatesFor,
+  defaultSourceDataset, fallbackTemplates, normalizeTemplate, sourceDatasets, templatesFor,
 } from './equipment'
 
 describe('equipment templates', () => {
@@ -11,20 +10,6 @@ describe('equipment templates', () => {
       'Eltex SMG-1016M (3.23.2)',
       'Eltex SMG-1016M (3.410)',
     ])
-  })
-
-  it('isolates raw-only softswitch capabilities', () => {
-    const template = fallbackTemplates.find((item) => item.key === 'softswitch-cdr-raw-v1')!
-    expect(template.category).toBe('softswitch')
-    expect(template.capabilities).toEqual({
-      syslog: false,
-      typedCdr: false,
-      rawCdr: true,
-      antifraud: false,
-      radius: false,
-    })
-    expect(sourceCategory({ templateKey: template.key })).toBe('softswitch')
-    expect(sourceCapabilities({ templateKey: template.key }).typedCdr).toBe(false)
   })
 
   it('defines Satel RTU as typed and raw CDR softswitch', () => {
@@ -42,10 +27,9 @@ describe('equipment templates', () => {
     expect(defaultSourceDataset(template)).toBe('calls')
   })
 
-  it('keeps raw-only softswitch without a data-section tab', () => {
-    const template = fallbackTemplates.find((item) => item.key === 'softswitch-cdr-raw-v1')!
-    expect(sourceDatasets(template)).toEqual([])
-    expect(defaultSourceDataset(template)).toBe('calls')
+  it('exposes Satel RTU as the only softswitch template', () => {
+    expect(templatesFor(fallbackTemplates, 'softswitch').map((item) => item.key))
+      .toEqual(['satel-rtu-cdr-v1'])
   })
 
   it('normalizes template API aliases', () => {
@@ -69,13 +53,12 @@ describe('equipment templates', () => {
     expect(main).toContain('<SatelCallDrawer')
   })
 
-  it('surfaces automatic Satel detection and durable replay progress', () => {
-    expect(main).toContain('Определяется формат CDR')
+  it('surfaces durable Satel replay progress without raw-format detection', () => {
     expect(main).toContain('Satel RTU: обработано')
-    expect(main).toContain('Формат CDR не определён автоматически')
-    expect(main).toContain('SoftswitchPendingView')
     expect(main).toContain('device.replay?.pending')
     expect(main).toContain('device.replay?.processing')
+    expect(main).not.toContain('softswitch-cdr-raw-v1')
+    expect(main).not.toContain('SoftswitchPendingView')
     expect(main).not.toContain('Satel RTU активирован')
   })
 
@@ -90,5 +73,12 @@ describe('equipment templates', () => {
     expect(main).toContain("onClick={() => setActiveView('dashboard')}")
     expect(main).not.toContain('dashboard-nav')
     expect(main).not.toContain('LayoutDashboard')
+  })
+
+  it('keeps the footer fixed and navigation inside its source category', () => {
+    expect(main).toContain('<div className="sidebar-scroll">')
+    expect(main.indexOf('<div className="sidebar-scroll">'))
+      .toBeLessThan(main.indexOf('<div className="sidebar-footer">'))
+    expect(main).toContain("activeView === 'device' && sourceCategory(selected) === category")
   })
 })

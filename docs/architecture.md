@@ -12,7 +12,7 @@ flowchart LR
     IngressSpool -->|Unix socket with ACK| Receiver[Collector receiver]
     Receiver --> Spool[App durable spool]
     Spool --> NATS[NATS JetStream]
-    NATS --> Parser[SMG Syslog parser v11 + device timezone]
+    NATS --> Parser[Eltex Syslog parser v14 + firmware dialect + device timezone]
     Parser --> Functional[Typed functional events]
     Functional --> Radius[Batch RADIUS lifecycle assembler]
     Radius --> Dirty[Durable dirty day buckets]
@@ -49,28 +49,15 @@ flowchart LR
 `devices` остаётся общей таблицей источников и сохраняет все существующие FK. Поля
 `source_category` и `template_key` выбирают неизменяемый каталог шаблонов из кода:
 оборудование Eltex использует Syslog, typed CDR, raw archive и AntiFraud/RADIUS;
-`softswitch-cdr-raw-v1` использует только FTP и raw archive, а
 `satel-rtu-cdr-v1` — отдельный header-driven typed CDR pipeline без Syslog,
 RADIUS и AntiFraud. Поле `firmware` сохранено для совместимости, но выбор
 pipeline выполняется только по `template_key`.
 
-Raw-only файл проходит SHA-256 dedup, PostgreSQL ledger и MinIO, получает статус
-`archived`, после чего локальная копия удаляется. Decode, parser, ClickHouse и
-correlation для такого источника не запускаются. Исходник скачивается потоково через
-authenticated device-scoped API с записью в audit log.
-
-Satel RTU сначала также архивируется в MinIO, затем разбирается по именам 120 vendor
+Satel RTU сначала архивируется в MinIO, затем разбирается по именам 120 vendor
 полей в отдельную ClickHouse projection. Stable row key строится из
 `device_id + cdr_id`; наличие `connect_time`, а не vendor success flag, определяет
-answered outcome. При переводе raw-only источника на Satel RTU ledger ставит уже
-архивированные объекты в durable versioned replay, который повторно читает immutable
-MinIO object без повторной загрузки пользователем.
-
-Для существующего raw-only источника watcher проверяет до трёх последних immutable
-объектов. Только точное совпадение нормализованного набора всех 120 Satel headers во
-всех samples атомарно меняет template и ставит архивы в replay. Имя устройства и файла
-не участвуют в определении; mixed/unknown форматы остаются raw. Detection provenance и
-replay counters хранятся в PostgreSQL и публикуются в API/UI.
+answered outcome. Durable replay повторно читает immutable MinIO object без повторной
+загрузки пользователем.
 
 Retention разделён по назначению: `cdr` управляет typed CDR оборудования,
 `softswitch_cdr` — typed CDR софтсвитчей (сейчас Satel RTU), а
@@ -87,11 +74,13 @@ CDR сначала получает SHA-256 и запись ledger. Повтор
 Satel RTU — по vendor `cdr_id`; source file/row, parser template/version и raw field map
 остаются в provenance.
 
-Parser version `smg-3.410-v13` разделяет envelope (включая `CONFIG` без wall-clock),
-component-first classification и typed attributes, а фрагменты
+Parser version `eltex-smg-syslog-v14` использует общий envelope core (включая `CONFIG`
+без wall-clock) и firmware dialect из template key. Component-first classification,
+typed attributes и provenance одинаковы, а firmware-specific фрагменты
 (`#`/`##`/bare SDP/ISUP dotted-hex/`SIPT Proc`/AVP/hex/host_ip) связывает с родителем по
-`device_id + call_context` (RADIUS/SIP/ISUP burst — отдельно). Правила Syslog общие для схем
-прошивки `3.23.2` и `3.410`. Durable rebuild последовательно читает raw по integer microsecond cursor,
+`device_id + call_context` (RADIUS/SIP/ISUP burst — отдельно). Bare RFC 4566 SDP,
+включая `b=`, и dotted ISUP dump принимаются профилем `3.410`; wrapped `##` остаётся
+общим форматом. Durable rebuild последовательно читает raw по integer microsecond cursor,
 пакетно строит `syslog_facts`, `cdr_time_facts`, `radius_fragments` и
 `antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и
 остаётся read model до проверки counts и короткой catch-up фазы.

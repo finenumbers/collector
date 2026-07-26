@@ -9,7 +9,6 @@ func TestRegistryContainsStableTemplates(t *testing.T) {
 	}{
 		{TemplateEltex3410, CategoryEquipment, "Eltex SMG-1016M (3.410)", true, true, true, true},
 		{TemplateEltex3232, CategoryEquipment, "Eltex SMG-1016M (3.23.2)", true, true, true, true},
-		{TemplateSoftswitchRawV1, CategorySoftswitch, "Софтсвитч — CDR без разбора", false, false, true, false},
 		{TemplateSatelRTUCDRV1, CategorySoftswitch, "Satel RTU", false, true, true, false},
 	}
 	for _, test := range tests {
@@ -31,7 +30,7 @@ func TestRegistryContainsStableTemplates(t *testing.T) {
 
 func TestRegistryListIsCopyAndFiltersCategory(t *testing.T) {
 	all := List()
-	if len(all) != 4 {
+	if len(all) != 3 {
 		t.Fatalf("got %d templates", len(all))
 	}
 	all[0].DisplayName = "changed"
@@ -39,7 +38,8 @@ func TestRegistryListIsCopyAndFiltersCategory(t *testing.T) {
 	if resolved.DisplayName == "changed" {
 		t.Fatal("List exposed mutable registry state")
 	}
-	if got := ListCategory(CategorySoftswitch); len(got) != 2 {
+	if got := ListCategory(CategorySoftswitch); len(got) != 1 ||
+		got[0].Key != TemplateSatelRTUCDRV1 {
 		t.Fatalf("unexpected softswitch templates: %#v", got)
 	}
 	if _, err := Resolve("missing"); err != ErrUnknownTemplate {

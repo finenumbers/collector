@@ -36,6 +36,11 @@ type Config struct {
 	SecureCookies           bool
 	TrustedProxyCount       int
 	SyslogConstructsEnabled bool
+	SyslogReplayPaused      bool
+	SyslogReplayBatchSize   int
+	SyslogReplaySleep       time.Duration
+	SyslogReplayMaxThreads  int
+	SyslogReplayMaxMemory   uint64
 }
 
 func Load() (Config, error) {
@@ -68,12 +73,21 @@ func Load() (Config, error) {
 		SecureCookies:           envBool("SECURE_COOKIES", false),
 		TrustedProxyCount:       envInt("TRUSTED_PROXY_COUNT", 1),
 		SyslogConstructsEnabled: envBool("SYSLOG_CONSTRUCTS_ENABLED", false),
+		SyslogReplayPaused:      envBool("SYSLOG_REPLAY_PAUSED", false),
+		SyslogReplayBatchSize:   envInt("SYSLOG_REPLAY_BATCH_SIZE", 500),
+		SyslogReplaySleep:       envDuration("SYSLOG_REPLAY_SLEEP", 250*time.Millisecond),
+		SyslogReplayMaxThreads:  envInt("SYSLOG_REPLAY_MAX_THREADS", 2),
+		SyslogReplayMaxMemory:   envUint64("SYSLOG_REPLAY_MAX_MEMORY_BYTES", 512<<20),
 	}
 	if cfg.Role != "app" && cfg.Role != "ingress" {
 		return Config{}, fmt.Errorf("COLLECTOR_ROLE must be app or ingress")
 	}
 	if cfg.Role == "app" && cfg.PostgresURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	}
+	if cfg.SyslogReplayBatchSize <= 0 || cfg.SyslogReplayMaxThreads <= 0 ||
+		cfg.SyslogReplayMaxMemory == 0 || cfg.SyslogReplaySleep <= 0 {
+		return Config{}, fmt.Errorf("Syslog replay limits must be positive")
 	}
 	if cfg.Environment == "production" && cfg.Role == "app" {
 		if cfg.ClickHousePass == "collector" || cfg.MinIOSecretKey == "collector-change-me" ||
@@ -109,6 +123,30 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envUint64(key string, fallback uint64) uint64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return fallback
 	}

@@ -154,6 +154,59 @@ fixer;2026-07-24 12:00:00;;;20260724120000-1
 	}
 }
 
+func TestCDRParserAcceptsRepeatedMatchingBlocks(t *testing.T) {
+	const header = "Device Sign;Setup time;Connect time;Disconnect time;Sequence number"
+	const sample = `SMG1016M. CDR. File started at '20260724120000'
+Device Sign;Setup time;Connect time;Disconnect time;Sequence number
+smg;2026-07-24 12:00:00;;;20260724120000-1
+SMG1016M. CDR. File started at '20260724120100'
+ device sign ; setup-time ; connect time ; disconnect_time ; sequence number
+smg;2026-07-24 12:01:00;;;20260724120100-2
+`
+	result, err := (CDRParser{
+		DeviceID:           uuid.New(),
+		FileID:             uuid.New(),
+		Location:           time.UTC,
+		// Header-driven exports may contain a configured subset of the firmware
+		// profile. Repeated blocks must match the file's active header.
+		ExpectedHeader:     append(strings.Split(header, ";"), "Release cause"),
+		ExpectedDeviceSign: "smg",
+	}).Parse(strings.NewReader(sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected row errors: %v", result.Errors)
+	}
+	if result.Rows != 2 || len(result.Records) != 2 {
+		t.Fatalf("rows=%d records=%d, want 2/2", result.Rows, len(result.Records))
+	}
+	for _, record := range result.Records {
+		if record.RawFields["device_sign"] != "smg" {
+			t.Fatalf("banner became device_sign: %#v", record.RawFields)
+		}
+	}
+}
+
+func TestCDRParserRejectsMismatchedRepeatedBlockHeader(t *testing.T) {
+	const sample = `SMG1016M. CDR. File started at '20260724120000'
+Device Sign;Setup time;Connect time;Disconnect time;Sequence number
+smg;2026-07-24 12:00:00;;;20260724120000-1
+SMG1016M. CDR. File started at '20260724120100'
+Device Sign;Setup time;Connect time;Disconnect time;Release cause
+smg;2026-07-24 12:01:00;;;16
+`
+	_, err := (CDRParser{
+		DeviceID:           uuid.New(),
+		FileID:             uuid.New(),
+		Location:           time.UTC,
+		ExpectedDeviceSign: "smg",
+	}).Parse(strings.NewReader(sample))
+	if err == nil || !strings.Contains(err.Error(), "repeated CDR block header") {
+		t.Fatalf("got %v, want repeated header mismatch", err)
+	}
+}
+
 func TestCDRSequenceNumberIsIsolatedByDevice(t *testing.T) {
 	const sample = `Device Sign;Setup time;Connect time;Disconnect time;Sequence number
 smg;2026-07-24 12:00:00;;;20260724120000-1

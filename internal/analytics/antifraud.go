@@ -904,36 +904,6 @@ func (c *Client) AntifraudTimeline(
 	return result, rows.Err()
 }
 
-func (c *Client) NextSyslogReplayBatch(
-	ctx context.Context, parserVersion string, limit uint64,
-) ([]ReplaySyslogRow, error) {
-	rows, err := c.Conn.Query(ctx, `SELECT r.event_id,any(r.device_id),any(r.received_at),
-		any(r.source_ip),any(r.source_port),any(r.payload),any(r.source_timezone)
-		FROM collector.raw_syslog r
-		LEFT JOIN collector.syslog_reprocess_ledger l
-			ON l.event_id=r.event_id AND l.parser_version=?
-		WHERE l.event_id=toUUID('00000000-0000-0000-0000-000000000000')
-		GROUP BY r.event_id ORDER BY any(r.received_at),r.event_id LIMIT ?`, parserVersion, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]ReplaySyslogRow, 0, limit)
-	for rows.Next() {
-		var item ReplaySyslogRow
-		var payload string
-		if err := rows.Scan(
-			&item.EventID, &item.DeviceID, &item.ReceivedAt, &item.SourceIP,
-			&item.SourcePort, &payload, &item.SourceTimezone,
-		); err != nil {
-			return nil, err
-		}
-		item.Payload = []byte(payload)
-		result = append(result, item)
-	}
-	return result, rows.Err()
-}
-
 func (c *Client) MarkSyslogReprocessedBatch(
 	ctx context.Context, events []SyslogEvent, parserVersion string,
 ) error {

@@ -162,10 +162,38 @@ main { min-width: 0; display: flex; flex-direction: column; background: var(--bg
 .diagnostic-facts { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 7px 9px; border-top: 1px solid var(--line); }
 .diagnostic-breakdown { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
 .diagnostic-breakdown span { padding: 5px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-bottom: 1px solid #e8ecf2; }
-.toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
+.toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
 .toolbar h3 { font-size: 14px; margin: 0 0 2px; }
 .toolbar > div > span { color: var(--muted); font-size: 10px; }
 .toolbar-actions { display: flex; gap: 7px; }
+.export-panel { position: absolute; z-index: 12; top: calc(100% + 5px); right: 0; width: min(720px, calc(100vw - 270px));
+  max-height: min(620px, calc(100vh - 130px)); overflow: auto; border: 1px solid #c7d0dc;
+  background: var(--panel); box-shadow: 0 14px 36px rgb(31 41 55 / 18%); }
+.export-create { display: grid; grid-template-columns: minmax(220px, 1fr) 125px 125px max-content;
+  align-items: end; gap: 9px; padding: 12px; border-bottom: 1px solid var(--line); }
+.export-create strong { font-size: 12px; }
+.export-create p { margin: 4px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.export-create label { margin: 0; font-size: 10px; }
+.export-error { margin: 9px 12px 0; }
+.export-heading { display: flex; align-items: baseline; gap: 8px; padding: 11px 12px 7px; }
+.export-heading strong { font-size: 11px; }
+.export-heading span { color: var(--muted); font-size: 9px; }
+.export-list { padding: 0 12px 12px; }
+.export-empty { padding: 18px; color: var(--muted); background: var(--panel-2); text-align: center; font-size: 10px; }
+.export-job { display: flex; align-items: center; gap: 12px; min-height: 62px; padding: 9px 0;
+  border-bottom: 1px solid var(--line); }
+.export-job:last-child { border-bottom: 0; }
+.export-job-main { min-width: 0; flex: 1; }
+.export-job-main > strong, .export-job-main > span, .export-job-main > small { display: block; }
+.export-job-main > strong { overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.export-job-main > span, .export-job-main > small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.export-job-error { color: var(--bad) !important; white-space: normal; }
+.export-queued { color: var(--warn) !important; }
+.export-progress { display: grid; grid-template-columns: 120px 1fr; align-items: center; gap: 7px; margin-top: 6px; }
+.export-progress progress { width: 120px; height: 6px; accent-color: var(--accent); }
+.export-progress small { color: var(--muted); font-size: 9px; }
+.export-job-actions { display: flex; flex: none; gap: 5px; }
+.export-download { display: inline-grid; place-items: center; text-decoration: none; font-size: var(--control-font-size); }
 .search { width: 260px; height: var(--control-height); display: flex; align-items: center;
   gap: 6px; padding-left: 8px; background: #fff; border: 1px solid var(--line);
   border-radius: var(--control-radius); }
@@ -322,6 +350,9 @@ tbody tr { cursor: pointer; }
   .header-health span:last-child { display: none; }
   .toolbar { align-items: flex-start; gap: 8px; }
   .toolbar-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .export-panel { width: min(620px, calc(100vw - 220px)); }
+  .export-create { grid-template-columns: 1fr 125px 125px; }
+  .export-create > button { grid-column: 3; }
   .dashboard-kpis { grid-template-columns: repeat(2, minmax(145px, 1fr)); }
   .retention-row { grid-template-columns: 1fr 120px; }
   .user-admin-row { display: flex; flex-wrap: wrap; }
@@ -335,6 +366,9 @@ tbody tr { cursor: pointer; }
   .data-view { padding: 8px; }
   .toolbar { flex-direction: column; }
   .toolbar-actions { width: 100%; justify-content: flex-start; }
+  .export-panel { right: auto; left: 0; width: calc(100vw - 174px); }
+  .export-create { grid-template-columns: 1fr 1fr; }
+  .export-create > div, .export-create > button { grid-column: 1 / -1; }
   .search { width: min(100%, 240px); }
   .settings-page { flex-direction: column; }
   .settings-tabs { width: 100%; flex-direction: row; }

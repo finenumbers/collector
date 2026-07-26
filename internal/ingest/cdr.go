@@ -84,12 +84,29 @@ func (p CDRParser) Parse(reader io.Reader) (CDRResult, error) {
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
-		result.Rows++
 		if readErr != nil {
+			result.Rows++
 			result.Errors = append(result.Errors, fmt.Errorf("row %d: %w", result.Rows, readErr))
 			continue
 		}
 		row = trimTrailingEmpty(row)
+		if isBanner(row) {
+			repeatedHeader, repeatedErr := decoder.Read()
+			if repeatedErr != nil {
+				return CDRResult{}, fmt.Errorf(
+					"repeated CDR banner is not followed by a header: %w", repeatedErr,
+				)
+			}
+			repeatedNormalized := normalizeHeader(trimTrailingEmpty(repeatedHeader))
+			if !looksLikeHeader(repeatedHeader) ||
+				!equalHeader(repeatedNormalized, normalized) {
+				return CDRResult{}, errors.New(
+					"repeated CDR block header does not match the configured/current schema",
+				)
+			}
+			continue
+		}
+		result.Rows++
 		row = padRowToHeader(row, len(normalized))
 		if len(row) != len(normalized) {
 			result.Errors = append(result.Errors,
@@ -116,6 +133,26 @@ func (p CDRParser) Parse(reader io.Reader) (CDRResult, error) {
 		result.Records = append(result.Records, record)
 	}
 	return result, nil
+}
+
+func normalizeHeader(header []string) []string {
+	normalized := make([]string, len(header))
+	for index, value := range header {
+		normalized[index] = normalizeColumn(value)
+	}
+	return normalized
+}
+
+func equalHeader(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (p CDRParser) mapRecord(row uint64, fields map[string]string) (analytics.CDRRecord, error) {

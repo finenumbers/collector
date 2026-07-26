@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"collector/internal/analytics"
 	"collector/internal/archive"
 	"collector/internal/config"
+	"collector/internal/exportworker"
 	ftpclient "collector/internal/ftp"
 	"collector/internal/httpapi"
 	"collector/internal/ingest"
@@ -75,6 +77,10 @@ func main() {
 	if err := retentionReconciler.Run(ctx); err != nil {
 		slog.Error("startup retention reconciliation failed", "error", err)
 	}
+	if err := rawArchive.ApplyExportRetention(ctx); err != nil {
+		slog.Error("export retention setup failed", "error", err)
+		os.Exit(1)
+	}
 
 	nc, err := nats.Connect(cfg.NATSURL,
 		nats.Name("eltex-collector"), nats.Timeout(10*time.Second), nats.MaxReconnects(-1))
@@ -95,20 +101,21 @@ func main() {
 	defer durableSpool.Close()
 	ingestMetrics := &ingest.Metrics{}
 
+	apiServer := &httpapi.Server{
+		Config: cfg, Store: control, Analytics: warehouse,
+		FTP:                ftpclient.NewProvisioner(cfg.SFTPGoURL, cfg.SFTPGoAdmin, cfg.SFTPGoPassword),
+		Archive:            rawArchive,
+		StaticDir:          "/app/web",
+		Version:            version,
+		Metrics:            ingestMetrics,
+		Spool:              durableSpool,
+		NATS:               nc,
+		IngressStatusPath:  cfg.IngressStatusPath,
+		ReconcileRetention: retentionReconciler.RunNow,
+	}
 	server := &http.Server{
-		Addr: cfg.HTTPAddr,
-		Handler: (&httpapi.Server{
-			Config: cfg, Store: control, Analytics: warehouse,
-			FTP:                ftpclient.NewProvisioner(cfg.SFTPGoURL, cfg.SFTPGoAdmin, cfg.SFTPGoPassword),
-			Archive:            rawArchive,
-			StaticDir:          "/app/web",
-			Version:            version,
-			Metrics:            ingestMetrics,
-			Spool:              durableSpool,
-			NATS:               nc,
-			IngressStatusPath:  cfg.IngressStatusPath,
-			ReconcileRetention: retentionReconciler.RunNow,
-		}).Handler(),
+		Addr:              cfg.HTTPAddr,
+		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		// Synchronous SMG purge can wait on ClickHouse mutations for several minutes.
@@ -140,6 +147,17 @@ func main() {
 		}
 		errs <- watcher.Run(ctx)
 	}()
+	hostname, _ := os.Hostname()
+	exportWorker := &exportworker.Worker{
+		Store: control, Archive: rawArchive,
+		WorkerID: fmt.Sprintf("%s-%d", hostname, os.Getpid()),
+		SpoolDir: "/data/spool", Render: apiServer.AsyncExportRenderer(),
+	}
+	go func() {
+		if err := exportWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			errs <- err
+		}
+	}()
 	go func() {
 		for ctx.Err() == nil {
 			if err := ingest.RunDeviceRevisionRebuilds(
@@ -157,8 +175,13 @@ func main() {
 	}()
 	go func() {
 		for ctx.Err() == nil {
-			if err := ingest.RunHistoricalSyslogReprocess(
+			if err := ingest.RunHistoricalSyslogReprocessWithOptions(
 				ctx, warehouse, control, cfg.SyslogConstructsEnabled,
+				ingest.SyslogReplayOptions{
+					Paused: cfg.SyslogReplayPaused, BatchSize: uint64(cfg.SyslogReplayBatchSize),
+					Sleep: cfg.SyslogReplaySleep, MaxThreads: cfg.SyslogReplayMaxThreads,
+					MaxMemoryUsage: cfg.SyslogReplayMaxMemory,
+				},
 			); err != nil &&
 				!errors.Is(err, context.Canceled) {
 				slog.Error("historical Syslog reprocess failed; retrying", "error", err)
@@ -187,6 +210,20 @@ func main() {
 	}()
 	go func() {
 		for ctx.Err() == nil {
+			replayActive, replayErr := control.HasActiveSyslogParserRebuildJobs(
+				ctx, analytics.SyslogParserVersion,
+			)
+			if replayErr != nil {
+				slog.Error("Syslog replay admission check failed", "error", replayErr)
+			}
+			if replayActive {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+					continue
+				}
+			}
 			buckets, err := warehouse.ListPendingCorrelationBuckets(ctx, 20)
 			if err != nil {
 				slog.Error("dirty correlation queue read failed", "error", err)

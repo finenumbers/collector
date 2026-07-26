@@ -36,6 +36,35 @@ func (a *Archive) ApplyCDRRetention(ctx context.Context, days int) error {
 	return a.Client.SetBucketLifecycle(ctx, a.Bucket, cdrRetentionLifecycle(config, days))
 }
 
+func (a *Archive) ApplyExportRetention(ctx context.Context) error {
+	config, err := a.Client.GetBucketLifecycle(ctx, a.Bucket)
+	if err != nil {
+		response := minio.ToErrorResponse(err)
+		if response.Code != "NoSuchLifecycleConfiguration" {
+			return fmt.Errorf("read bucket lifecycle: %w", err)
+		}
+		config = lifecycle.NewConfiguration()
+	}
+	return a.Client.SetBucketLifecycle(ctx, a.Bucket, exportRetentionLifecycle(config))
+}
+
+func exportRetentionLifecycle(config *lifecycle.Configuration) *lifecycle.Configuration {
+	const ruleID = "collector-export-retention"
+	rules := make([]lifecycle.Rule, 0, len(config.Rules)+1)
+	for _, rule := range config.Rules {
+		if rule.ID != ruleID {
+			rules = append(rules, rule)
+		}
+	}
+	rules = append(rules, lifecycle.Rule{
+		ID: ruleID, Status: "Enabled",
+		RuleFilter: lifecycle.Filter{Prefix: "exports/"},
+		Expiration: lifecycle.Expiration{Days: 7},
+	})
+	config.Rules = rules
+	return config
+}
+
 func cdrRetentionLifecycle(config *lifecycle.Configuration, days int) *lifecycle.Configuration {
 	const ruleID = "collector-raw-cdr-retention"
 	rules := make([]lifecycle.Rule, 0, len(config.Rules)+1)
@@ -92,6 +121,10 @@ func (a *Archive) OpenObject(ctx context.Context, key string) (Object, error) {
 		return Object{}, err
 	}
 	return Object{Reader: reader, Size: info.Size, ContentType: info.ContentType}, nil
+}
+
+func (a *Archive) DeleteObject(ctx context.Context, key string) error {
+	return a.Client.RemoveObject(ctx, a.Bucket, key, minio.RemoveObjectOptions{})
 }
 
 func (a *Archive) DeletePrefix(ctx context.Context, prefix string) error {

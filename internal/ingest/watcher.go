@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -30,7 +31,24 @@ type CDRWatcher struct {
 	Analytics CDRAnalytics
 	Archive   CDRArchive
 	MinAge    time.Duration
+
+	retryMu sync.Mutex
+	retries map[string]watcherRetry
+	now     func() time.Time
 }
+
+type watcherRetry struct {
+	failures uint
+	next     time.Time
+	terminal bool
+}
+
+var errTerminalIngest = errors.New("terminal CDR ingest result")
+
+const (
+	initialIngestBackoff = 10 * time.Second
+	maxIngestBackoff     = 10 * time.Minute
+)
 
 type CDRArchive interface {
 	Put(context.Context, string, io.Reader, int64, string) error
@@ -103,8 +121,15 @@ func (w *CDRWatcher) scan(ctx context.Context) error {
 			if err != nil || time.Since(info.ModTime()) < w.MinAge {
 				continue
 			}
+			retryKey := ingestWatchKey(device, path, info)
+			if !w.retryReady(retryKey) {
+				continue
+			}
 			if err := w.process(ctx, device, path, info); err != nil {
+				w.recordRetry(retryKey, errors.Is(err, errTerminalIngest))
 				slog.Error("CDR processing failed", "device", deviceID, "file", file.Name(), "error", err)
+			} else {
+				w.clearRetry(retryKey)
 			}
 		}
 	}
@@ -136,12 +161,19 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	sum := sha256.Sum256(content)
 	checksum := hex.EncodeToString(sum[:])
 	objectKey := fmt.Sprintf("cdr/%s/%s/%s-%s", device.ID, time.Now().UTC().Format("2006/01/02"), checksum[:16], filepath.Base(path))
-	claim, err := w.Store.ClaimIngestFile(ctx, device.ID, filepath.Base(path), objectKey, checksum, info.Size())
+	parserTemplate, parserIdentity := ingestParserIdentity(device, template)
+	claim, err := w.Store.ClaimIngestFileForParser(
+		ctx, device.ID, filepath.Base(path), objectKey, checksum, info.Size(),
+		parserTemplate, parserIdentity,
+	)
 	if err != nil {
 		return err
 	}
 	if !claim.Retry {
-		return os.Remove(path)
+		if claim.RemoveLocal {
+			return os.Remove(path)
+		}
+		return errTerminalIngest
 	}
 	fileID := claim.ID
 	objectKey = claim.ObjectKey
@@ -153,7 +185,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 	if err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, err.Error())
 		// Keep the file so a later retry can succeed after content/config fixes.
-		return fmt.Errorf("CDR decode failed: %w", err)
+		return fmt.Errorf("%w: CDR decode failed: %v", errTerminalIngest, err)
 	}
 	location, err := time.LoadLocation(device.ActiveTimezone)
 	if err != nil {
@@ -161,7 +193,8 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 			ctx, fileID, "quarantined", 0, 0,
 			fmt.Sprintf("invalid active device timezone %q: %v", device.ActiveTimezone, err),
 		)
-		return fmt.Errorf("invalid active device timezone %q: %w", device.ActiveTimezone, err)
+		return fmt.Errorf("%w: invalid active device timezone %q: %v",
+			errTerminalIngest, device.ActiveTimezone, err)
 	}
 	var rows, valid uint64
 	var parseErrors []error
@@ -173,7 +206,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		}).Parse(bytes.NewReader(decoded))
 		if parseErr != nil {
 			_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, parseErr.Error())
-			return fmt.Errorf("Satel RTU CDR parse failed: %w", parseErr)
+			return fmt.Errorf("%w: Satel RTU CDR parse failed: %v", errTerminalIngest, parseErr)
 		}
 		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
 		err = insertSatelRTUForTemplate(ctx, template, w.Analytics, result.Records)
@@ -187,7 +220,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		if parseErr != nil {
 			_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, parseErr.Error())
 			// Keep the file for retry after device_sign / column profile corrections.
-			return fmt.Errorf("CDR parse failed: %w", parseErr)
+			return fmt.Errorf("%w: CDR parse failed: %v", errTerminalIngest, parseErr)
 		}
 		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
 		err = insertCDRForTemplate(ctx, template, w.Analytics, result.Records)
@@ -202,16 +235,87 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		status = "quarantined"
 		message = summarizeErrors(parseErrors)
 	}
-	parserVersion := "eltex-cdr-v1"
-	if template.Key == equipment.TemplateSatelRTUCDRV1 {
-		parserVersion = analytics.SatelRTUParserVersion
-	}
 	if err := w.Store.CompleteIngestFileWithParser(
-		ctx, fileID, status, rows, valid, message, template.Key, parserVersion,
+		ctx, fileID, status, rows, valid, message, parserTemplate, parserIdentity,
 	); err != nil {
 		return err
 	}
+	if status == "quarantined" {
+		return fmt.Errorf("%w: %s", errTerminalIngest, message)
+	}
 	return os.Remove(path)
+}
+
+func ingestParserIdentity(device store.Device, template equipment.Template) (string, string) {
+	version := "eltex-cdr-v2"
+	if template.Key == equipment.TemplateSatelRTUCDRV1 {
+		version = analytics.SatelRTUParserVersion
+	}
+	config := strings.Join([]string{
+		version,
+		template.Key,
+		store.NormalizeFirmwareScheme(device.Firmware),
+		strings.ToLower(strings.TrimSpace(device.DeviceSign)),
+		device.ActiveTimezone,
+		fmt.Sprint(device.ActiveTimezoneRevision),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(config))
+	return template.Key, version + "+" + hex.EncodeToString(sum[:8])
+}
+
+func ingestWatchKey(device store.Device, path string, info os.FileInfo) string {
+	template, err := equipment.Resolve(device.TemplateKey)
+	if err != nil {
+		return path
+	}
+	_, identity := ingestParserIdentity(device, template)
+	return fmt.Sprintf("%s\x00%d\x00%d\x00%s",
+		path, info.Size(), info.ModTime().UnixNano(), identity)
+}
+
+func (w *CDRWatcher) retryReady(key string) bool {
+	w.retryMu.Lock()
+	defer w.retryMu.Unlock()
+	state, exists := w.retries[key]
+	if !exists {
+		return true
+	}
+	return !state.terminal && !w.currentTime().Before(state.next)
+}
+
+func (w *CDRWatcher) recordRetry(key string, terminal bool) {
+	w.retryMu.Lock()
+	defer w.retryMu.Unlock()
+	if w.retries == nil {
+		w.retries = make(map[string]watcherRetry)
+	}
+	state := w.retries[key]
+	state.failures++
+	state.terminal = terminal
+	if !terminal {
+		delay := initialIngestBackoff
+		for count := uint(1); count < state.failures && delay < maxIngestBackoff; count++ {
+			delay *= 2
+			if delay > maxIngestBackoff {
+				delay = maxIngestBackoff
+			}
+		}
+		state.next = w.currentTime().Add(delay)
+	}
+	w.retries[key] = state
+}
+
+func (w *CDRWatcher) clearRetry(key string) {
+	w.retryMu.Lock()
+	defer w.retryMu.Unlock()
+	delete(w.retries, key)
+}
+
+func (w *CDRWatcher) currentTime() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
 }
 
 func (w *CDRWatcher) drainIngestReplays(ctx context.Context, limit int) error {

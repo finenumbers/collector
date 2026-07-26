@@ -219,48 +219,75 @@ func (c *Client) RebuildCDRTimeChunk(
 				job.CDRHighWatermarkUS
 		}
 	}
-	if err := c.Conn.Exec(ctx, `INSERT INTO collector.cdr_time_facts
-		(device_id,timezone_revision,record_id,interpreted_at,setup_wall_clock,
-		 connect_wall_clock,disconnect_wall_clock,setup_time_utc,connect_time_utc,
-		 disconnect_time_utc,source_timezone,source_utc_offset_minutes)
-		SELECT device_id,?,record_id,now64(6),
-			coalesce(nullIf(raw_fields['setup_time'],''),nullIf(raw_fields['setup'],''),''),
-			coalesce(nullIf(raw_fields['connect_time'],''),nullIf(raw_fields['connect'],''),''),
-			coalesce(nullIf(raw_fields['disconnect_time'],''),nullIf(raw_fields['disconnect'],''),''),
-			parseDateTime64BestEffortOrNull(coalesce(nullIf(raw_fields['setup_time'],''),
-				nullIf(raw_fields['setup'],'')),6,?),
-			parseDateTime64BestEffortOrNull(coalesce(nullIf(raw_fields['connect_time'],''),
-				nullIf(raw_fields['connect'],'')),6,?),
-			parseDateTime64BestEffortOrNull(coalesce(nullIf(raw_fields['disconnect_time'],''),
-				nullIf(raw_fields['disconnect'],'')),6,?),
-			?,toInt16(ifNull(dateDiff('minute',
-				parseDateTime64BestEffortOrNull(coalesce(nullIf(raw_fields['setup_time'],''),
-					nullIf(raw_fields['setup'],'')),6,?),
-				parseDateTime64BestEffortOrNull(coalesce(nullIf(raw_fields['setup_time'],''),
-					nullIf(raw_fields['setup'],'')),6,'UTC')),0))
+	location, err := time.LoadLocation(job.CDRSourceTimezone)
+	if err != nil {
+		return job, false, err
+	}
+	rows, err := c.Conn.Query(ctx, `SELECT record_id,raw_fields
 		FROM collector.cdr_records
 		WHERE device_id=? AND toUnixTimestamp64Micro(ingested_at)<=?
 		  AND (toUnixTimestamp64Micro(ingested_at)>?
 			OR (toUnixTimestamp64Micro(ingested_at)=? AND record_id>?))
 		  AND (toUnixTimestamp64Micro(ingested_at)<?
-			OR (toUnixTimestamp64Micro(ingested_at)=? AND record_id<=?))`,
-		job.Revision, job.CDRSourceTimezone, job.CDRSourceTimezone,
-		job.CDRSourceTimezone, job.CDRSourceTimezone,
-		job.CDRSourceTimezone, job.DeviceID, job.CDRHighWatermarkUS, job.CDRCursorIngestedUS,
+			OR (toUnixTimestamp64Micro(ingested_at)=? AND record_id<=?))
+		ORDER BY ingested_at,record_id`,
+		job.DeviceID, job.CDRHighWatermarkUS, job.CDRCursorIngestedUS,
 		job.CDRCursorIngestedUS, job.CDRCursorRecordID, upperUS, upperUS, upperID,
-	); err != nil {
+	)
+	if err != nil {
+		return job, false, err
+	}
+	defer rows.Close()
+	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_time_facts
+		(device_id,timezone_revision,record_id,interpreted_at,setup_wall_clock,
+		 connect_wall_clock,disconnect_wall_clock,setup_time_utc,connect_time_utc,
+		 disconnect_time_utc,source_timezone,source_utc_offset_minutes,time_source)`)
+	if err != nil {
 		return job, false, err
 	}
 	var count uint64
-	if err := c.Conn.QueryRow(ctx, `SELECT count() FROM collector.cdr_records
-		WHERE device_id=? AND toUnixTimestamp64Micro(ingested_at)<=?
-		  AND (toUnixTimestamp64Micro(ingested_at)>?
-			OR (toUnixTimestamp64Micro(ingested_at)=? AND record_id>?))
-		  AND (toUnixTimestamp64Micro(ingested_at)<?
-			OR (toUnixTimestamp64Micro(ingested_at)=? AND record_id<=?))`,
-		job.DeviceID, job.CDRHighWatermarkUS, job.CDRCursorIngestedUS,
-		job.CDRCursorIngestedUS, job.CDRCursorRecordID, upperUS, upperUS, upperID).
-		Scan(&count); err != nil {
+	now := time.Now().UTC()
+	for rows.Next() {
+		var recordID uuid.UUID
+		var rawFields map[string]string
+		if err := rows.Scan(&recordID, &rawFields); err != nil {
+			return job, false, err
+		}
+		setupWall := firstMapValue(rawFields, "setup_time", "setup", "setup-time")
+		connectWall := firstMapValue(rawFields, "connect_time", "connect", "connect-time")
+		disconnectWall := firstMapValue(
+			rawFields, "disconnect_time", "disconnect", "disconnect-time",
+		)
+		setup, err := ParseCDRWallClock(setupWall, location)
+		if err != nil {
+			return job, false, fmt.Errorf("record %s setup time: %w", recordID, err)
+		}
+		connect, err := ParseCDRWallClock(connectWall, location)
+		if err != nil {
+			return job, false, fmt.Errorf("record %s connect time: %w", recordID, err)
+		}
+		disconnect, err := ParseCDRWallClock(disconnectWall, location)
+		if err != nil {
+			return job, false, fmt.Errorf("record %s disconnect time: %w", recordID, err)
+		}
+		var offsetMinutes int16
+		if setup != nil {
+			_, offsetSeconds := setup.In(location).Zone()
+			offsetMinutes = int16(offsetSeconds / 60)
+		}
+		if err := batch.Append(
+			job.DeviceID, job.Revision, recordID, now,
+			setupWall, connectWall, disconnectWall, setup, connect, disconnect,
+			job.CDRSourceTimezone, offsetMinutes, "cdr_wall_clock",
+		); err != nil {
+			return job, false, err
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return job, false, err
+	}
+	if err := batch.Send(); err != nil {
 		return job, false, err
 	}
 	job.CDRCursorIngestedAt, job.CDRCursorRecordID = upperTime, upperID

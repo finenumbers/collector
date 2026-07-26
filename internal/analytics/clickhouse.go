@@ -147,6 +147,14 @@ type SyslogDiagnostics struct {
 	LatestAssignmentAt   time.Time            `json:"latestAssignmentAt"`
 	PendingDirtyBuckets  uint64               `json:"pendingDirtyBuckets"`
 	OldestDirtyAt        time.Time            `json:"oldestDirtyAt"`
+	LatestCorrelationRun time.Time            `json:"latestCorrelationRunAt"`
+	CorrelationDuration  uint64               `json:"lastCorrelationDurationMs"`
+	CorrelationAvgMS     float64              `json:"averageCorrelationDurationMs"`
+	CorrelationLag       uint64               `json:"correlationAssignmentLag"`
+	CorrelationStatus    string               `json:"correlationStatus"`
+	TimeFromTimestamp    uint64               `json:"correlationTimeFromTimestamp"`
+	TimeFromEnvelope     uint64               `json:"correlationTimeFromEnvelope"`
+	TimeFromReceive      uint64               `json:"correlationTimeFromReceive"`
 }
 
 type CallRow struct {
@@ -456,7 +464,7 @@ func (c *Client) InsertCDRTimeFactsBatch(ctx context.Context, records []CDRRecor
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_time_facts
 		(device_id,timezone_revision,record_id,interpreted_at,setup_wall_clock,
 		 connect_wall_clock,disconnect_wall_clock,setup_time_utc,connect_time_utc,
-		 disconnect_time_utc,source_timezone,source_utc_offset_minutes)`)
+		 disconnect_time_utc,source_timezone,source_utc_offset_minutes,time_source)`)
 	if err != nil {
 		return err
 	}
@@ -472,7 +480,7 @@ func (c *Client) InsertCDRTimeFactsBatch(ctx context.Context, records []CDRRecor
 			firstMapValue(record.RawFields, "connect_time", "connect", "connect-time"),
 			firstMapValue(record.RawFields, "disconnect_time", "disconnect", "disconnect-time"),
 			record.SetupTime, record.ConnectTime, record.DisconnectTime,
-			record.SourceTimezone, record.SourceUTCOffsetMinutes,
+			record.SourceTimezone, record.SourceUTCOffsetMinutes, "cdr_wall_clock",
 		); err != nil {
 			return err
 		}
@@ -487,6 +495,20 @@ func firstMapValue(values map[string]string, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func ParseCDRWallClock(value string, location *time.Location) (*time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05.999999", "2006-01-02 15:04:05"} {
+		parsed, err := time.ParseInLocation(layout, value, location)
+		if err == nil {
+			utc := parsed.UTC()
+			return &utc, nil
+		}
+	}
+	return nil, fmt.Errorf("unsupported timestamp %q", value)
 }
 
 func (c *Client) ReinterpretCDRTimes(

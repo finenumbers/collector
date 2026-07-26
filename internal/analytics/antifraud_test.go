@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -46,6 +47,77 @@ func TestAntifraudAssemblerCombinesFragmentsAndRejectDecision(t *testing.T) {
 	if len(transaction.RawEventIDs) != 2 ||
 		transaction.AcctSessionIDNormalized != "110003b86a63" {
 		t.Fatalf("fragments not assembled: %#v", transaction)
+	}
+}
+
+func TestCanonicalRadiusTimePrefersEmbeddedTimestamp(t *testing.T) {
+	received := time.Date(2026, 7, 27, 1, 0, 0, 0, time.UTC)
+	embedded := received.Add(-17 * time.Minute)
+	event := SyslogEvent{
+		ReceivedAt: received, SourceTimezone: "UTC",
+		Attributes: map[string]string{
+			"event_timestamp": strconv.FormatInt(embedded.Unix(), 10),
+			"acct_delay_time": "30",
+		},
+	}
+	canonical, occurredAt := canonicalizeRadiusEvent(event)
+	if !occurredAt.Equal(embedded) ||
+		canonical.Attributes["correlation_time_source"] != "event_timestamp" {
+		t.Fatalf("canonical time=%v attributes=%v", occurredAt, canonical.Attributes)
+	}
+}
+
+func TestCanonicalRadiusTimeAppliesAccountingDelay(t *testing.T) {
+	received := time.Date(2026, 7, 27, 1, 0, 0, 0, time.UTC)
+	eventTime := received.Add(-time.Minute)
+	event := SyslogEvent{
+		ReceivedAt: received, EventTime: &eventTime,
+		Attributes: map[string]string{"acct_delay_time": "45"},
+	}
+	canonical, occurredAt := canonicalizeRadiusEvent(event)
+	if !occurredAt.Equal(eventTime.Add(-45*time.Second)) ||
+		canonical.Attributes["correlation_time_source"] != "event_time_minus_acct_delay" {
+		t.Fatalf("canonical time=%v attributes=%v", occurredAt, canonical.Attributes)
+	}
+}
+
+func TestAntifraudIdentityUsesCanonicalOccurrenceWindow(t *testing.T) {
+	deviceID := uuid.New()
+	occurredAt := time.Date(2026, 7, 27, 0, 29, 59, 0, time.UTC)
+	first := SyslogEvent{
+		EventID: uuid.New(), DeviceID: deviceID,
+		ReceivedAt: occurredAt.Add(time.Minute),
+		Attributes: map[string]string{"call_context": "C-CANONICAL"},
+	}
+	second := first
+	second.EventID = uuid.New()
+	second.ReceivedAt = occurredAt.Add(31 * time.Minute)
+	if antifraudTransactionID(first, occurredAt) != antifraudTransactionID(second, occurredAt) {
+		t.Fatal("receive-time drift split one canonical lifecycle")
+	}
+}
+
+func TestLifecyclePreservesFirstCanonicalTimeProvenance(t *testing.T) {
+	firstAt := time.Date(2026, 7, 27, 1, 0, 0, 0, time.UTC)
+	transaction := &AntifraudTransaction{
+		TransactionID: uuid.New(), DeviceID: uuid.New(), Attributes: map[string]string{},
+	}
+	first := SyslogEvent{
+		EventID: uuid.New(), Attributes: map[string]string{
+			"correlation_time_source": "event_timestamp",
+			"correlation_time_utc":    firstAt.Format(time.RFC3339Nano),
+		},
+	}
+	mergeAntifraudEvent(transaction, first, firstAt, nil, nil, 0, nil)
+	later := SyslogEvent{
+		EventID: uuid.New(), Attributes: map[string]string{
+			"correlation_time_source": "received_at",
+			"correlation_time_utc":    firstAt.Add(time.Minute).Format(time.RFC3339Nano),
+		},
+	}
+	mergeAntifraudEvent(transaction, later, firstAt.Add(time.Minute), nil, nil, 0, nil)
+	if got := transaction.Attributes["correlation_time_source"]; got != "event_timestamp" {
+		t.Fatalf("first-event provenance was overwritten: %q", got)
 	}
 }
 

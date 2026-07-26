@@ -28,8 +28,21 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 15 {
-		t.Fatalf("got %d applied migrations, want 15", applied)
+	if applied != 17 {
+		t.Fatalf("got %d applied migrations, want 17", applied)
+	}
+	for table, column := range map[string]string{
+		"cdr_time_facts": "time_source", "call_assignments": "time_source",
+	} {
+		var columns uint64
+		if err := client.Conn.QueryRow(ctx, `SELECT count() FROM system.columns
+			WHERE database='collector' AND table=? AND name=?`, table, column).
+			Scan(&columns); err != nil {
+			t.Fatal(err)
+		}
+		if columns != 1 {
+			t.Fatalf("%s.%s was not migrated", table, column)
+		}
 	}
 	var hourlyEngine, viewEngine string
 	if err := client.Conn.QueryRow(ctx, `SELECT engine FROM system.tables

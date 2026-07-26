@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const compositeClockSkew = 5 * time.Minute
+
 type correlationTransaction struct {
 	ID           uuid.UUID
 	DeviceID     uuid.UUID
@@ -302,7 +304,10 @@ func exactProtocolCorrelationEdge(
 				transaction: transaction, cdr: record, method: "exact_sip_call_id",
 				confidence:  1,
 				timeDeltaMS: record.SetupTime.Sub(transaction.FirstEventAt).Milliseconds(),
-				evidence:    map[string]string{"sip_call_id": callID},
+				evidence: map[string]string{
+					"sip_call_id": callID,
+					"time_source": transaction.Attributes["correlation_time_source"],
+				},
 			}, true
 		}
 	}
@@ -312,7 +317,10 @@ func exactProtocolCorrelationEdge(
 			transaction: transaction, cdr: record, method: "exact_global_callref",
 			confidence:  1,
 			timeDeltaMS: record.SetupTime.Sub(transaction.FirstEventAt).Milliseconds(),
-			evidence:    map[string]string{"global_callref": globalCallref},
+			evidence: map[string]string{
+				"global_callref": globalCallref,
+				"time_source":    transaction.Attributes["correlation_time_source"],
+			},
 		}, true
 	}
 	return correlationEdge{}, false
@@ -322,7 +330,7 @@ func compositeCorrelationEdge(
 	transaction correlationTransaction, record correlationCDR,
 ) (correlationEdge, bool) {
 	delta := record.SetupTime.Sub(transaction.FirstEventAt)
-	if delta < -5*time.Minute || delta > 5*time.Minute {
+	if delta < -compositeClockSkew || delta > compositeClockSkew {
 		return correlationEdge{}, false
 	}
 	antiA := normalizedPhoneSet(
@@ -380,6 +388,7 @@ func compositeCorrelationEdge(
 			"anti_calling":   transaction.Calling, "anti_called": transaction.Called,
 			"cdr_incoming_cgpn": record.IncomingCgPN,
 			"cdr_incoming_cdpn": record.IncomingCdPN,
+			"time_source":       transaction.Attributes["correlation_time_source"],
 		},
 	}, true
 }

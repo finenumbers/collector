@@ -270,17 +270,7 @@ func padRowToHeader(row []string, headerLen int) []string {
 }
 
 func parseCDRTime(value string, location *time.Location) (*time.Time, error) {
-	if strings.TrimSpace(value) == "" {
-		return nil, nil
-	}
-	for _, layout := range []string{"2006-01-02 15:04:05.999999", "2006-01-02 15:04:05"} {
-		parsed, err := time.ParseInLocation(layout, value, location)
-		if err == nil {
-			utc := parsed.UTC()
-			return &utc, nil
-		}
-	}
-	return nil, fmt.Errorf("unsupported timestamp %q", value)
+	return analytics.ParseCDRWallClock(value, location)
 }
 
 func parseDuration(value string) *uint64 {

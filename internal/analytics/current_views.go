@@ -813,6 +813,42 @@ func (c *Client) currentDiagnostics(
 			&result.LatestAssignmentAt, &result.PendingDirtyBuckets, &result.OldestDirtyAt); err != nil {
 		return result, err
 	}
+	if err := c.Conn.QueryRow(ctx, `SELECT
+		coalesce(max(ran_at),toDateTime64(0,6,'UTC')),
+		ifNull(argMax(duration_ms,ran_at),0),ifNotFinite(avg(duration_ms),0)
+		FROM collector.correlation_bucket_runs
+		WHERE device_id=? AND timezone_revision=?`, deviceID, revision).
+		Scan(&result.LatestCorrelationRun, &result.CorrelationDuration,
+			&result.CorrelationAvgMS); err != nil {
+		return result, err
+	}
+	if result.LifecycleDerived > result.CorrelationTotal {
+		result.CorrelationLag = result.LifecycleDerived - result.CorrelationTotal
+	}
+	if err := c.Conn.QueryRow(ctx, `SELECT
+		countIf(source='event_timestamp'),
+		countIf(startsWith(source,'event_time')),
+		countIf(startsWith(source,'received_at'))
+		FROM
+		(
+			SELECT transaction_id,
+				argMax(attributes['correlation_time_source'],updated_at) AS source
+			FROM collector.antifraud_lifecycles
+			WHERE device_id=? AND timezone_revision=? AND is_antifraud=1
+			GROUP BY transaction_id
+		)`, deviceID, revision).
+		Scan(&result.TimeFromTimestamp, &result.TimeFromEnvelope,
+			&result.TimeFromReceive); err != nil {
+		return result, err
+	}
+	switch {
+	case result.PendingDirtyBuckets > 0 || result.CorrelationLag > 0:
+		result.CorrelationStatus = "processing"
+	case result.LifecycleDerived == 0:
+		result.CorrelationStatus = "idle"
+	default:
+		result.CorrelationStatus = "ready"
+	}
 	result.ReprocessedCurrent = result.ReplayProcessed
 	if result.ReplayTotal > result.ReplayProcessed {
 		result.ReprocessRemaining = result.ReplayTotal - result.ReplayProcessed

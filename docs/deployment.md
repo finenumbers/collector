@@ -140,3 +140,15 @@ read rows/CPU и correlation coverage
   ISUP dotted-hex / `[No optional params]`) и 3.23.2 должно опустеть; `CONFIG:` без
   timestamp — `parsed`/`config_history`; `SIPT Proc. … ISUP/SS7` остаётся в `sip`;
   списки Syslog группируются по `call_context`.
+
+### Canary CDR ↔ AntiFraud
+
+1. Сначала оставьте активным одно SMG и дождитесь `correlationStatus=ready` в diagnostics.
+2. Для active revision проверьте, что pending buckets исчезают, а
+   `exact + composite + ambiguous + orphan = total`.
+3. Проверьте реальные пары в обе стороны по `acct_session_id_normalized`; несколько
+   AntiFraud lifecycle могут корректно ссылаться на один CDR.
+4. Во время historical replay контролируйте возраст oldest pending bucket и CPU:
+   replay не должен останавливать correlation, а live budget остаётся ограниченным.
+5. Только после успешного canary включайте остальные SMG; рост
+   `correlationAssignmentLag` или `no_candidate_meets_policy` является причиной остановки.

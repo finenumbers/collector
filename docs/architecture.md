@@ -65,6 +65,8 @@ model: `syslog_fragment_links` сохраняет provenance связи, `syslog
 идентификаторы и parent links помечаются deterministic; временные burst-связи никогда не
 пересекают device/source/call context и явно публикуют confidence. API пагинирует по
 `(started_at, construct_id)`, поэтому construct не разрезается границей страницы.
+Модель оставлена для rollback и по умолчанию отключена feature flag; пользовательский
+Syslog UI показывает неизменённую плоскую ленту исходных datagram.
 
 Eltex/RFC3164 и CDR wall clock конкретного SMG интерпретируются в одной активной IANA
 timezone этого устройства. Оба потока переводятся во внутренний canonical UTC instant;

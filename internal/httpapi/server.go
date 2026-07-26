@@ -66,10 +66,13 @@ func (s *Server) Handler() http.Handler {
 			private.Get("/auth/me", s.me)
 			private.Post("/auth/logout", s.logout)
 			private.Get("/system/info", s.systemInfo)
+			private.Get("/dashboard", s.dashboard)
 			private.With(s.requireAdmin).Get("/system/users", s.listUsers)
 			private.With(s.requireAdmin).Post("/system/users", s.createUser)
 			private.With(s.requireAdmin).Patch("/system/users/{userID}", s.updateUser)
 			private.With(s.requireAdmin).Delete("/system/users/{userID}", s.deleteUser)
+			private.With(s.requireAdmin).Get("/system/retention", s.listRetention)
+			private.With(s.requireAdmin).Patch("/system/retention", s.updateRetention)
 			private.Get("/devices", s.listDevices)
 			private.With(s.requireAdmin).Post("/devices", s.createDevice)
 			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
@@ -230,6 +233,142 @@ func (s *Server) systemInfo(writer http.ResponseWriter, request *http.Request) {
 		"user":     currentSession(request).User,
 		"services": services,
 	})
+}
+
+func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
+	windowText := request.URL.Query().Get("window")
+	window, err := analytics.ValidateDashboardWindow(windowText)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if windowText == "" {
+		windowText = "24h"
+	}
+	devices, err := s.Store.ListDevices(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to list devices")
+		return
+	}
+	fleet := s.Analytics.Dashboard(request.Context(), window)
+	rows := make([]map[string]any, 0, len(devices))
+	totals := map[string]any{
+		"calls": uint64(0), "failed": uint64(0), "averageTalkMs": float64(0),
+		"alarms": uint64(0), "unknown": uint64(0), "antifraud": uint64(0),
+		"rejects": uint64(0), "incomplete": uint64(0), "activeDevices": 0,
+	}
+	var calls, failed, alarms, unknown, antifraud, rejects, incomplete uint64
+	var weightedTalk float64
+	activeDevices := 0
+	for _, configured := range devices {
+		metrics := fleet.Devices[configured.ID]
+		if metrics == nil {
+			metrics = &analytics.DashboardDevice{DeviceID: configured.ID}
+		}
+		if configured.Enabled && configured.PurgeState == "active" {
+			activeDevices++
+		}
+		calls += metrics.Calls
+		failed += metrics.FailedCalls
+		alarms += metrics.Alarms
+		unknown += metrics.Unknown
+		antifraud += metrics.Antifraud
+		rejects += metrics.AntifraudRejected
+		incomplete += metrics.AntifraudIncomplete
+		weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
+		rows = append(rows, map[string]any{
+			"id": configured.ID, "name": configured.Name, "model": configured.Model,
+			"firmware": configured.Firmware, "timezone": configured.Timezone,
+			"enabled": configured.Enabled, "metrics": metrics,
+			"freshness": map[string]any{
+				"latestSyslogAt": metrics.LatestSyslogAt, "latestCdrAt": metrics.LatestCDRAt,
+			},
+			"revision": map[string]any{
+				"configured": configured.TimezoneRevision,
+				"active":     metrics.ActiveRevision, "building": metrics.BuildingRevision,
+				"status":  metrics.RevisionStatus,
+				"aligned": uint64(configured.ActiveTimezoneRevision) == metrics.ActiveRevision,
+			},
+		})
+	}
+	averageTalk := float64(0)
+	if calls > 0 {
+		averageTalk = weightedTalk / float64(calls)
+	}
+	totals["calls"], totals["failed"], totals["averageTalkMs"] = calls, failed, averageTalk
+	totals["alarms"], totals["unknown"], totals["antifraud"] = alarms, unknown, antifraud
+	totals["rejects"], totals["incomplete"], totals["activeDevices"] = rejects, incomplete, activeDevices
+
+	services := map[string]bool{"api": true}
+	serviceCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	defer cancel()
+	services["postgres"] = s.Store.DB.Ping(serviceCtx) == nil
+	services["clickhouse"] = s.Analytics.Conn.Ping(serviceCtx) == nil
+	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
+	var spoolDepth uint64
+	if s.Spool != nil {
+		if depth, depthErr := s.Spool.Depth(); depthErr == nil {
+			spoolDepth = depth
+		} else {
+			fleet.Diagnostics = append(fleet.Diagnostics, "spool: "+depthErr.Error())
+		}
+	}
+	var natsMessages uint64
+	if s.NATS != nil {
+		if js, jsErr := s.NATS.JetStream(); jsErr == nil {
+			if info, infoErr := js.StreamInfo("SYSLOG"); infoErr == nil {
+				natsMessages = info.State.Msgs
+			} else {
+				fleet.Diagnostics = append(fleet.Diagnostics, "nats: "+infoErr.Error())
+			}
+		}
+	}
+	var runtime any
+	if s.Metrics != nil {
+		runtime = s.Metrics.Snapshot()
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"window": windowText, "totals": totals, "devices": rows,
+		"system": map[string]any{
+			"version": s.Version, "services": services, "runtime": runtime,
+			"spoolDepth": spoolDepth, "natsStreamMessages": natsMessages,
+		},
+		"diagnostics": fleet.Diagnostics,
+	})
+}
+
+func (s *Server) listRetention(writer http.ResponseWriter, request *http.Request) {
+	policies, err := s.Store.ListRetentionPolicies(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to list retention policies")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": policies})
+}
+
+func (s *Server) updateRetention(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		PolicyClass string `json:"policyClass"`
+		Days        int    `json:"days"`
+		Confirm     bool   `json:"confirm"`
+		Cancel      bool   `json:"cancel"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	session := currentSession(request)
+	policy, err := s.Store.UpdateRetentionPolicy(request.Context(), input.PolicyClass,
+		input.Days, input.Confirm, input.Cancel, session.User, request.RemoteAddr)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "retention policy not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, policy)
 }
 
 func (s *Server) listUsers(writer http.ResponseWriter, request *http.Request) {
@@ -529,6 +668,12 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) listSyslogConstructs(writer http.ResponseWriter, request *http.Request) {
+	if !s.Config.SyslogConstructsEnabled {
+		writeJSON(writer, http.StatusNotFound, map[string]string{
+			"error": "feature_disabled", "message": "Syslog constructs are disabled",
+		})
+		return
+	}
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
@@ -567,6 +712,12 @@ func (s *Server) listSyslogConstructs(writer http.ResponseWriter, request *http.
 }
 
 func (s *Server) getSyslogConstruct(writer http.ResponseWriter, request *http.Request) {
+	if !s.Config.SyslogConstructsEnabled {
+		writeJSON(writer, http.StatusNotFound, map[string]string{
+			"error": "feature_disabled", "message": "Syslog constructs are disabled",
+		})
+		return
+	}
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return

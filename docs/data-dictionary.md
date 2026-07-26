@@ -118,8 +118,9 @@ Parser также публикует boundary facts `protocol_message_kind`, `di
 `readable-syslog-v1` создаёт `syslog_constructs` и ordered
 `syslog_construct_members`; `construct_id` стабилен от
 `device_id + grouping_version + anchor_event_id`. Связи сохраняются в
-`syslog_fragment_links` с method/confidence. UI по умолчанию читает constructs,
-а режим **Raw события** и раскрытие каждого исходного payload остаются доступны.
+`syslog_fragment_links` с method/confidence. Эта rollback-модель сохраняется, но при
+`SYSLOG_CONSTRUCTS_ENABLED=false` не пополняется. Рабочий UI всегда читает плоскую
+пагинацию raw-событий: одна строка соответствует одному исходному datagram.
 
 Категории:
 

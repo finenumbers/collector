@@ -54,7 +54,7 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 	if err := RunHistoricalSyslogReprocessOnce(ctx, client, resolver); err != nil {
 		t.Fatal(err)
 	}
-	var ledgerRows, transactions uint64
+	var ledgerRows, transactions, constructs uint64
 	if err := client.Conn.QueryRow(ctx, `SELECT count() FROM collector.syslog_reprocess_ledger FINAL
 		WHERE event_id=? AND parser_version=?`, eventID, analytics.SyslogParserVersion).
 		Scan(&ledgerRows); err != nil {
@@ -64,7 +64,14 @@ func TestHistoricalSyslogReprocessIsIdempotent(t *testing.T) {
 		WHERE device_id=?`, deviceID).Scan(&transactions); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Conn.QueryRow(ctx, `SELECT count() FROM collector.syslog_constructs FINAL
+		WHERE device_id=?`, deviceID).Scan(&constructs); err != nil {
+		t.Fatal(err)
+	}
 	if ledgerRows != 1 || transactions != 1 {
 		t.Fatalf("ledger=%d transactions=%d, want 1/1", ledgerRows, transactions)
+	}
+	if constructs != 0 {
+		t.Fatalf("disabled replay inserted %d Syslog constructs", constructs)
 	}
 }

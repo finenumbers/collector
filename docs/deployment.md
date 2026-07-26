@@ -1,5 +1,27 @@
 # Развёртывание и эксплуатация
 
+## Retention and optional constructs
+
+`SYSLOG_CONSTRUCTS_ENABLED` defaults to `false`. While disabled, raw Syslog,
+parser interpretations/facts, lifecycle processing, and correlation continue
+normally, but construct assembly and construct-table inserts are skipped. The
+construct list/detail API returns a JSON `feature_disabled` 404 response.
+
+Administrators manage retention through `GET /api/system/retention` and
+`PATCH /api/system/retention`. The four independent policy classes are
+`syslog`, `cdr`, `derived`, and `raw_cdr_archive`; each accepts 7–1095 days and
+defaults to 1095. Increases are eligible for immediate reconciliation.
+Decreases require `"confirm": true` and are scheduled with a seven-day grace
+period. A pending change can be cancelled with `"cancel": true`.
+
+The collector reconciles policies at startup and hourly under a PostgreSQL
+advisory lock. ClickHouse TTL changes use a fixed table/column allowlist. The
+raw CDR archive policy installs a MinIO lifecycle rule scoped only to `cdr/`;
+the PostgreSQL `ingest_files` ledger, NATS streams, and durable spools are not
+retention targets. A policy becomes active only after all resources for that
+class have accepted the change; failures remain pending and expose
+`lastError`.
+
 ## Хост
 
 Рекомендуемый старт для 10 SMG / 100 CPS peak:

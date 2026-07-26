@@ -152,6 +152,7 @@ services:
       SFTPGO_URL: http://sftpgo:8080
       SFTPGO_ADMIN: collector
       SFTPGO_ADMIN_PASSWORD: ${SFTPGO_ADMIN_PASSWORD}
+      SYSLOG_CONSTRUCTS_ENABLED: ${SYSLOG_CONSTRUCTS_ENABLED:-false}
       SECURE_COOKIES: ${SECURE_COOKIES:-true}
       TZ: ${TZ:-UTC}
     volumes:

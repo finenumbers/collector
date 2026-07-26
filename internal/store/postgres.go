@@ -41,11 +41,14 @@ type User struct {
 }
 
 type ManagedUser struct {
-	ID        uuid.UUID `json:"id"`
-	Username  string    `json:"username"`
-	Role      string    `json:"role"`
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID             uuid.UUID  `json:"id"`
+	Username       string     `json:"username"`
+	Role           string     `json:"role"`
+	Active         bool       `json:"active"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	LastSeenAt     *time.Time `json:"lastSeenAt"`
+	LockedUntil    *time.Time `json:"lockedUntil"`
+	FailedAttempts int        `json:"failedAttempts"`
 }
 
 type UserUpdate struct {
@@ -256,6 +259,9 @@ func (s *Store) Session(ctx context.Context, token, csrf string, requireCSRF boo
 			return Session{}, ErrNotFound
 		}
 	}
+	if _, err := s.DB.Exec(ctx, `UPDATE sessions SET last_seen_at=now() WHERE id_hash=$1`, tokenHash[:]); err != nil {
+		return Session{}, err
+	}
 	session.CSRF = csrf
 	return session, nil
 }
@@ -267,8 +273,10 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]ManagedUser, error) {
-	rows, err := s.DB.Query(ctx, `SELECT id,username,role,active,created_at
-		FROM users ORDER BY username`)
+	rows, err := s.DB.Query(ctx, `SELECT u.id,u.username,u.role,u.active,u.created_at,
+		max(s.last_seen_at),u.locked_until,u.failed_attempts
+		FROM users u LEFT JOIN sessions s ON s.user_id=u.id
+		GROUP BY u.id ORDER BY u.username`)
 	if err != nil {
 		return nil, err
 	}
@@ -276,12 +284,33 @@ func (s *Store) ListUsers(ctx context.Context) ([]ManagedUser, error) {
 	var users []ManagedUser
 	for rows.Next() {
 		var user ManagedUser
-		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &user.Active, &user.CreatedAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &user.Active, &user.CreatedAt,
+			&user.LastSeenAt, &user.LockedUntil, &user.FailedAttempts); err != nil {
 			return nil, err
 		}
 		users = append(users, user)
 	}
 	return users, rows.Err()
+}
+
+func (s *Store) ManagedUser(ctx context.Context, id uuid.UUID) (ManagedUser, error) {
+	var user ManagedUser
+	err := s.DB.QueryRow(ctx, `SELECT u.id,u.username,u.role,u.active,u.created_at,
+		max(s.last_seen_at),u.locked_until,u.failed_attempts
+		FROM users u LEFT JOIN sessions s ON s.user_id=u.id
+		WHERE u.id=$1 GROUP BY u.id`, id).Scan(
+		&user.ID, &user.Username, &user.Role, &user.Active, &user.CreatedAt,
+		&user.LastSeenAt, &user.LockedUntil, &user.FailedAttempts,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ManagedUser{}, ErrNotFound
+	}
+	return user, err
+}
+
+func (s *Store) CleanupExpiredSessions(ctx context.Context) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM sessions WHERE expires_at<=now()`)
+	return err
 }
 
 func (s *Store) CreateUser(
@@ -317,7 +346,7 @@ func (s *Store) CreateUser(
 	if err := tx.Commit(ctx); err != nil {
 		return ManagedUser{}, err
 	}
-	return user, nil
+	return s.ManagedUser(ctx, user.ID)
 }
 
 func (s *Store) UpdateUser(
@@ -394,7 +423,7 @@ func (s *Store) UpdateUser(
 	if err := tx.Commit(ctx); err != nil {
 		return ManagedUser{}, err
 	}
-	return user, nil
+	return s.ManagedUser(ctx, user.ID)
 }
 
 func (s *Store) DeleteUser(

@@ -18,6 +18,7 @@ import (
 	ftpclient "collector/internal/ftp"
 	"collector/internal/httpapi"
 	"collector/internal/ingest"
+	"collector/internal/retention"
 	"collector/internal/spool"
 	"collector/internal/store"
 
@@ -68,6 +69,12 @@ func main() {
 		slog.Error("object archive startup failed", "error", err)
 		os.Exit(1)
 	}
+	retentionReconciler := &retention.Reconciler{
+		Store: control, Analytics: warehouse, Archive: rawArchive,
+	}
+	if err := retentionReconciler.Run(ctx); err != nil {
+		slog.Error("startup retention reconciliation failed", "error", err)
+	}
 
 	nc, err := nats.Connect(cfg.NATSURL,
 		nats.Name("eltex-collector"), nats.Timeout(10*time.Second), nats.MaxReconnects(-1))
@@ -106,7 +113,7 @@ func main() {
 		// Synchronous SMG purge can wait on ClickHouse mutations for several minutes.
 		WriteTimeout:   16 * time.Minute,
 		IdleTimeout:    2 * time.Minute,
-		MaxHeaderBytes:    1 << 20,
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	errs := make(chan error, 5)
@@ -124,7 +131,7 @@ func main() {
 		errs <- ingest.RunSpoolPublisher(ctx, durableSpool, nc)
 	}()
 	go func() {
-		errs <- ingest.RunSyslogWorker(ctx, nc, warehouse, control)
+		errs <- ingest.RunSyslogWorker(ctx, nc, warehouse, control, cfg.SyslogConstructsEnabled)
 	}()
 	go func() {
 		watcher := ingest.CDRWatcher{
@@ -134,7 +141,9 @@ func main() {
 	}()
 	go func() {
 		for ctx.Err() == nil {
-			if err := ingest.RunDeviceRevisionRebuilds(ctx, warehouse, control); err != nil &&
+			if err := ingest.RunDeviceRevisionRebuilds(
+				ctx, warehouse, control, cfg.SyslogConstructsEnabled,
+			); err != nil &&
 				!errors.Is(err, context.Canceled) {
 				slog.Error("versioned device rebuild failed; retrying", "error", err)
 			}
@@ -147,7 +156,9 @@ func main() {
 	}()
 	go func() {
 		for ctx.Err() == nil {
-			if err := ingest.RunHistoricalSyslogReprocess(ctx, warehouse, control); err != nil &&
+			if err := ingest.RunHistoricalSyslogReprocess(
+				ctx, warehouse, control, cfg.SyslogConstructsEnabled,
+			); err != nil &&
 				!errors.Is(err, context.Canceled) {
 				slog.Error("historical Syslog reprocess failed; retrying", "error", err)
 			}
@@ -155,6 +166,21 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-time.After(5 * time.Second):
+			}
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := retentionReconciler.Run(ctx); err != nil &&
+					!errors.Is(err, context.Canceled) {
+					slog.Error("retention reconciliation failed", "error", err)
+				}
 			}
 		}
 	}()

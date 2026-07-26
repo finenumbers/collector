@@ -1,20 +1,73 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Activity, AlertTriangle, CirclePlus, Database, FileClock,
-  LogOut, Network, PhoneCall, Radio, Search, Server, Settings, ShieldCheck,
+  LayoutDashboard, LogOut, Network, PhoneCall, Radio, Search, Server, Settings, ShieldCheck,
 } from 'lucide-react'
 import './styles.css'
 import {
   canManageUsers, normalizeFirmwareScheme, purgeConfirmationReady, purgeRetryLabel,
 } from './settings'
-import {
-  constructMemberParameters, isTechnicalConstructMember, orderedConstructMembers,
-} from './syslogConstructs'
+import { antifraudOutcome, cdrOutcome, outcomeLabel } from './outcomes'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
-type ManagedUser = User & { active: boolean; createdAt: string }
+type ManagedUser = User & {
+  active: boolean
+  createdAt: string
+  lastSeenAt?: string
+  lockedUntil?: string
+  failedAttempts?: number
+}
 type SystemInfo = { version: string; status: string; user: User; services: Record<string, boolean> }
+type RetentionPolicy = {
+  policyClass: 'syslog' | 'cdr' | 'derived' | 'raw_cdr_archive'
+  activeDays: number
+  pendingDays?: number
+  effectiveAt?: string
+  lastAppliedAt?: string
+  lastError?: string
+}
+type DashboardDevice = {
+  id: string
+  name: string
+  model: string
+  firmware: string
+  timezone: string
+  enabled: boolean
+  metrics: {
+    calls: number
+    failedCalls: number
+    alarms: number
+    unknown: number
+    antifraud: number
+    antifraudRejected: number
+  }
+  freshness: { latestSyslogAt?: string; latestCdrAt?: string }
+  revision: { aligned: boolean; status: string }
+}
+type DashboardSnapshot = {
+  window: string
+  totals: {
+    activeDevices: number
+    calls: number
+    failed: number
+    averageTalkMs: number
+    alarms: number
+    unknown: number
+    antifraud: number
+    rejects: number
+    incomplete: number
+  }
+  devices: DashboardDevice[]
+  system: {
+    version: string
+    services: Record<string, boolean>
+    spoolDepth: number
+    natsStreamMessages: number
+    runtime?: IngestRuntime
+  }
+  diagnostics: string[]
+}
 type Device = {
   id: string
   name: string
@@ -51,25 +104,6 @@ type EventRow = {
   attributes: Record<string, string>
 }
 type TimelineRow = EventRow & { method: string; confidence: number }
-type SyslogConstruct = {
-  constructId: string
-  startedAt: string
-  endedAt?: string
-  constructType: string
-  category: string
-  direction?: string
-  title: string
-  summary: string
-  callContext?: string
-  messageName?: string
-  completeness: string
-  groupingMethod: string
-  groupingReason?: string
-  confidence?: number
-  memberCount: number
-  hiddenCount: number
-  attributes: Record<string, string>
-}
 type DeviceStats = {
   calls24h: number; failedCalls24h: number; averageTalkMs: number
   alarms24h: number; radius24h: number; unknown24h: number
@@ -213,8 +247,7 @@ type PageResponse<T> = {
   hasMore: boolean
   nextCursor?: PageCursor
 }
-type DataRow = EventRow | CallRow | AntifraudRow | SyslogConstruct
-type SyslogViewMode = 'constructs' | 'raw'
+type DataRow = EventRow | CallRow | AntifraudRow
 type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
   'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
   'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown'
@@ -350,11 +383,11 @@ function AuthScreen(props: {
 function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [devices, setDevices] = useState<Device[]>([])
   const [activeDevice, setActiveDevice] = useState<string>('')
+  const [activeView, setActiveView] = useState<'dashboard' | 'device' | 'settings'>('dashboard')
   const [dataset, setDataset] = useState<Dataset>('calls')
   const [showCreate, setShowCreate] = useState(false)
   const [editingDevice, setEditingDevice] = useState<Device | null>(null)
   const [credentials, setCredentials] = useState<Device | null>(null)
-  const [showSettings, setShowSettings] = useState(false)
   const [error, setError] = useState('')
 
   const loadDevices = useCallback(() => api<{ items: Device[] }>('/devices').then(({ items }) => {
@@ -375,12 +408,22 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   return <div className="workspace">
     <aside className="sidebar">
-      <div className="brand"><Radio size={17} /><span>SMG Collector</span></div>
+      <button className="brand" onClick={() => setActiveView('dashboard')}>
+        <Radio size={17} /><span>SMG Collector</span>
+      </button>
+      <button className={`dashboard-nav ${activeView === 'dashboard' ? 'active' : ''}`}
+        onClick={() => setActiveView('dashboard')}>
+        <LayoutDashboard size={14} /> Dashboard
+      </button>
       <div className="side-section-label">ОБОРУДОВАНИЕ</div>
       <div className="device-list">
         {devices.map((device) => <button key={device.id}
           className={`device-button ${device.id === activeDevice ? 'active' : ''}`}
-          onClick={() => { setActiveDevice(device.id); setDataset('calls') }}>
+          onClick={() => {
+            setActiveDevice(device.id)
+            setDataset('calls')
+            setActiveView('device')
+          }}>
           <span className={`status-dot ${device.enabled && device.purgeState !== 'purge_failed' ? 'online' : ''}`} />
           <span>
             <strong>{device.name}</strong>
@@ -394,9 +437,11 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
           <CirclePlus size={15} /> Добавить SMG
         </button>}
       </div>
-      {selected && <DeviceNavigation active={dataset} onChange={setDataset} />}
+      {selected && activeView === 'device' &&
+        <DeviceNavigation active={dataset} onChange={setDataset} />}
       <div className="sidebar-footer">
-        <button onClick={() => setShowSettings(true)}><Settings size={15} /> Настройки</button>
+        <button className={activeView === 'settings' ? 'active' : ''}
+          onClick={() => setActiveView('settings')}><Settings size={15} /> Настройки</button>
         <div className="user-line"><span><strong>{user.username}</strong><small>{user.role}</small></span>
           <button title="Выйти" onClick={onLogout}><LogOut size={15} /></button></div>
       </div>
@@ -404,10 +449,15 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     <main>
       <header className="topbar">
         <div>
-          <h2>{selected?.name || 'Обзор оборудования'}</h2>
-          {selected && <span>{selected.model} · {selected.firmware} · {selected.timezone}</span>}
+          <h2>{activeView === 'dashboard' ? 'Dashboard' :
+            activeView === 'settings' ? 'Настройки системы' :
+              selected?.name || 'Оборудование'}</h2>
+          {activeView === 'dashboard' && <span>Состояние Collector и оборудования</span>}
+          {activeView === 'settings' && <span>Пользователи, сервисы и хранение данных</span>}
+          {activeView === 'device' && selected &&
+            <span>{selected.model} · {selected.firmware} · {selected.timezone}</span>}
         </div>
-        {selected && <div className="header-health">
+        {activeView === 'device' && selected && <div className="header-health">
           <span><i className={`status-dot ${selected.enabled && selected.purgeState !== 'purge_failed' ? 'online' : ''}`} />
             {selected.purgeState === 'purge_failed' ? 'Удаление не завершено' :
               selected.purgeState === 'deleting' ? 'Идёт удаление' :
@@ -423,9 +473,17 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>}
       </header>
       {error && <div className="global-error">{error}</div>}
-      {!selected ? <EmptyDevices canCreate={user.role === 'admin'} onCreate={() => setShowCreate(true)} /> :
-        <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
-          admin={user.role === 'admin'} />}
+      {activeView === 'dashboard' && <DashboardPage devices={devices}
+        onSelectDevice={(deviceID) => {
+          setActiveDevice(deviceID)
+          setDataset('calls')
+          setActiveView('device')
+        }} />}
+      {activeView === 'settings' && <SystemSettingsPage user={user} />}
+      {activeView === 'device' && (!selected
+        ? <EmptyDevices canCreate={user.role === 'admin'} onCreate={() => setShowCreate(true)} />
+        : <DataView key={`${selected.id}:${dataset}`} device={selected} dataset={dataset}
+          admin={user.role === 'admin'} />)}
     </main>
     {showCreate && <CreateDeviceDialog onClose={() => setShowCreate(false)} onCreated={(device) => {
       setShowCreate(false)
@@ -444,7 +502,6 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
         void loadDevices()
       }} />}
     {credentials && <CredentialsDialog device={credentials} onClose={() => setCredentials(null)} />}
-    {showSettings && <SystemSettingsDialog user={user} onClose={() => setShowSettings(false)} />}
   </div>
 }
 
@@ -471,6 +528,107 @@ const navigation: { id: Dataset; label: string; icon: typeof Activity }[] = [
   { id: 'unknown', label: 'Нераспознанное', icon: AlertTriangle },
 ]
 
+function DashboardPage({ devices, onSelectDevice }: {
+  devices: Device[]
+  onSelectDevice: (deviceID: string) => void
+}) {
+  const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null)
+  const [windowValue, setWindowValue] = useState('24h')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let active = true
+    api<DashboardSnapshot>(`/dashboard?window=${windowValue}`)
+      .then((value) => { if (active) setSnapshot(value) })
+      .catch((reason) => {
+        if (active) setError(reason instanceof Error ? reason.message : 'Dashboard недоступен')
+      })
+    return () => { active = false }
+  }, [windowValue])
+  const totals = snapshot?.totals
+  return <section className="dashboard-page">
+    <div className="page-heading">
+      <div><h3>Обзор системы</h3><p>Ключевые показатели Collector и всех подключённых SMG.</p></div>
+      <select value={windowValue} onChange={(event) => setWindowValue(event.target.value)}
+        aria-label="Интервал Dashboard">
+        <option value="1h">Последний час</option>
+        <option value="24h">24 часа</option>
+        <option value="7d">7 дней</option>
+      </select>
+    </div>
+    {error && <div className="form-error">{error}</div>}
+    <div className="dashboard-kpis">
+      <DashboardKPI label="Оборудование"
+        value={`${totals?.activeDevices ?? devices.filter((item) => item.enabled).length} / ${devices.length}`}
+        detail="активно / всего" />
+      <DashboardKPI label="Вызовы" value={formatCount(totals?.calls)}
+        detail={`неуспешных ${formatCount(totals?.failed)}`} tone={totals?.failed ? 'bad' : 'good'} />
+      <DashboardKPI label="ASR" value={formatPercent(totals?.calls, totals?.failed)}
+        detail="доля успешных вызовов" />
+      <DashboardKPI label="Средний разговор"
+        value={totals ? `${(totals.averageTalkMs / 1000).toFixed(1)} с` : '—'} />
+      <DashboardKPI label="Аварии" value={formatCount(totals?.alarms)}
+        tone={totals?.alarms ? 'bad' : 'good'} />
+      <DashboardKPI label="Нераспознано" value={formatCount(totals?.unknown)}
+        tone={totals?.unknown ? 'warn' : 'good'} />
+      <DashboardKPI label="AntiFraud" value={formatCount(totals?.antifraud)}
+        detail={`reject ${formatCount(totals?.rejects)}`} />
+      <DashboardKPI label="Очередь"
+        value={formatCount(snapshot?.system?.natsStreamMessages)}
+        detail={`spool ${formatCount(snapshot?.system?.spoolDepth)}`}
+        tone={(snapshot?.system?.natsStreamMessages || snapshot?.system?.spoolDepth) ? 'warn' : 'good'} />
+    </div>
+    <section className="dashboard-panel">
+      <div className="panel-heading"><div><h4>Сервисы</h4>
+        <span>{snapshot?.system?.version || 'Collector'}</span></div>
+        <span>{snapshot?.diagnostics?.length ? `${snapshot.diagnostics.length} предупреждений` : 'Без ошибок'}</span></div>
+      <div className="service-grid">
+        {Object.entries(snapshot?.system?.services || {}).map(([name, healthy]) =>
+          <span key={name} className={healthy ? 'healthy' : 'service-error'}>
+            <i className={`status-dot ${healthy ? 'online' : ''}`} /> {name}
+          </span>)}
+      </div>
+    </section>
+    <section className="dashboard-panel fleet-panel">
+      <div className="panel-heading"><div><h4>Оборудование</h4><span>Метрики за выбранный интервал</span></div></div>
+      <table><thead><tr><th>SMG</th><th>Firmware / timezone</th><th>Статус</th><th>Вызовы</th><th>Неуспешные</th>
+        <th>AntiFraud / reject</th><th>Аварии</th><th>Unknown</th><th>Последний Syslog</th>
+        <th>Revision</th></tr></thead>
+        <tbody>{(snapshot?.devices || []).map((row) => <tr key={row.id}
+          onClick={() => onSelectDevice(row.id)}>
+          <td><strong>{row.name}</strong><small>{row.model}</small></td>
+          <td>{row.firmware || '—'} / {row.timezone || 'UTC'}</td>
+          <td><span className={row.enabled ? 'healthy' : 'service-error'}>
+            {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
+          <td className="right">{formatCount(row.metrics.calls)}</td>
+          <td className="right">{formatCount(row.metrics.failedCalls)}</td>
+          <td className="right">{formatCount(row.metrics.antifraud)} / {formatCount(row.metrics.antifraudRejected)}</td>
+          <td className="right">{formatCount(row.metrics.alarms)}</td>
+          <td className="right">{formatCount(row.metrics.unknown)}</td>
+          <td className="mono">{formatTime(row.freshness.latestSyslogAt, 'UTC')}</td>
+          <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
+        </tr>)}</tbody></table>
+      {snapshot && snapshot.devices.length === 0 &&
+        <div className="table-empty"><strong>SMG ещё не добавлены</strong></div>}
+    </section>
+  </section>
+}
+
+function DashboardKPI({ label, value, detail, tone }: {
+  label: string
+  value: string
+  detail?: string
+  tone?: 'good' | 'warn' | 'bad'
+}) {
+  return <div className={`dashboard-kpi ${tone || ''}`}>
+    <small>{label}</small><strong>{value}</strong>{detail && <span>{detail}</span>}
+  </div>
+}
+
+function formatPercent(total?: number, failed?: number) {
+  if (!total) return '—'
+  return `${Math.max(0, ((total - (failed || 0)) / total) * 100).toFixed(1)}%`
+}
+
 function DeviceNavigation({ active, onChange }: { active: Dataset; onChange: (value: Dataset) => void }) {
   return <nav className="device-nav">
     {navigation.map((item) => <button key={item.id} className={active === item.id ? 'active' : ''}
@@ -480,20 +638,11 @@ function DeviceNavigation({ active, onChange }: { active: Dataset; onChange: (va
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
-  const [viewMode, setViewMode] = useState<SyslogViewMode>(
-    dataset === 'calls' || dataset === 'antifraud' ? 'raw' : 'constructs',
-  )
-  const [constructKind, setConstructKind] = useState('')
-  const [constructDirection, setConstructDirection] = useState('')
-  const [messageFilter, setMessageFilter] = useState('')
-  const [contextFilter, setContextFilter] = useState('')
-  const [problemsOnly, setProblemsOnly] = useState(false)
   const [rows, setRows] = useState<DataRow[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
   const [selectedAntifraud, setSelectedAntifraud] = useState<AntifraudRow | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
-  const [selectedConstruct, setSelectedConstruct] = useState<SyslogConstruct | null>(null)
   const [stats, setStats] = useState<DeviceStats | null>(null)
   const [diagnostics, setDiagnostics] = useState<SyslogDiagnostics | null>(null)
   const [cursor, setCursor] = useState<PageCursor | null>(null)
@@ -504,8 +653,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const generationRef = useRef(0)
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const category = dataset === 'syslog_all' ? 'all' : dataset
-  const canUseConstructs = dataset !== 'calls' && dataset !== 'antifraud'
-  const usesConstructs = canUseConstructs && viewMode === 'constructs'
   const exportDataset = dataset === 'calls' ? 'calls' : dataset === 'antifraud' ? 'antifraud' : 'events'
   const exportUrl = `/api/devices/${device.id}/export.xlsx?dataset=${exportDataset}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}`
   const pagePath = useCallback((pageCursor?: PageCursor) => {
@@ -513,19 +660,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
       : dataset === 'antifraud'
         ? `/devices/${device.id}/antifraud?q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
-        : usesConstructs
-          ? `/devices/${device.id}/syslog-constructs?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}` +
-            `&kind=${encodeURIComponent(constructKind)}&direction=${encodeURIComponent(constructDirection)}` +
-            `&message_name=${encodeURIComponent(messageFilter)}&call_context=${encodeURIComponent(contextFilter)}` +
-            `&problems=${problemsOnly}`
-          : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
+        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [
-    category, constructDirection, constructKind, contextFilter, dataset, device.id,
-    messageFilter, problemsOnly, query, usesConstructs,
-  ])
+  }, [category, dataset, device.id, query])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -544,7 +683,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setRows([])
       setCursor(null)
       setHasMore(false)
-      setSelectedConstruct(null)
       setSelectedEvent(null)
       if (tableShellRef.current) tableShellRef.current.scrollTop = 0
       setBusy(true)
@@ -614,46 +752,13 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>}
     {admin && diagnostics && <SyslogDiagnosticPanel value={diagnostics} />}
     <div className="toolbar">
-      <div><h3>{title}</h3><span>{rows.length} {usesConstructs ? 'конструкций' : 'записей'} в текущей выборке</span></div>
+      <div><h3>{title}</h3><span>{rows.length} записей в текущей выборке</span></div>
       <div className="toolbar-actions">
-        {canUseConstructs && <div className="view-toggle" role="group" aria-label="Режим просмотра">
-          <button type="button" className={viewMode === 'constructs' ? 'active' : ''}
-            aria-pressed={viewMode === 'constructs'} onClick={() => setViewMode('constructs')}>
-            Конструкты
-          </button>
-          <button type="button" className={viewMode === 'raw' ? 'active' : ''}
-            aria-pressed={viewMode === 'raw'} onClick={() => setViewMode('raw')}>
-            Raw события
-          </button>
-        </div>}
         <div className="search"><Search size={14} /><input placeholder="Поиск по данным…"
           value={query} onChange={(event) => setQuery(event.target.value)} /></div>
         <button className="secondary" onClick={() => { window.location.href = exportUrl }}>Экспорт XLSX</button>
       </div>
     </div>
-    {usesConstructs && <div className="construct-filters" aria-label="Фильтры конструкций">
-      <select value={constructKind} onChange={(event) => setConstructKind(event.target.value)}
-        aria-label="Протокол">
-        <option value="">Все протоколы</option>
-        <option value="sip_exchange">SIP / SDP</option>
-        <option value="isup_pdu">ISUP</option>
-        <option value="q931_message">Q.931</option>
-        <option value="radius_packet">RADIUS</option>
-        <option value="single_event">Одиночные события</option>
-      </select>
-      <select value={constructDirection}
-        onChange={(event) => setConstructDirection(event.target.value)} aria-label="Направление">
-        <option value="">TX и RX</option>
-        <option value="TX">TX</option>
-        <option value="RX">RX</option>
-      </select>
-      <input value={messageFilter} onChange={(event) => setMessageFilter(event.target.value)}
-        placeholder="Message name / status" aria-label="Имя сообщения" />
-      <input value={contextFilter} onChange={(event) => setContextFilter(event.target.value)}
-        placeholder="Call context" aria-label="Контекст вызова" />
-      <label><input type="checkbox" checked={problemsOnly}
-        onChange={(event) => setProblemsOnly(event.target.checked)} /> Только проблемы</label>
-    </div>}
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
       {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]}
@@ -661,11 +766,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedAntifraud} />
-          : usesConstructs
-            ? <SyslogConstructList rows={rows as SyslogConstruct[]}
-              timezone={activeDeviceTimezone(device)} onSelect={setSelectedConstruct} />
-            : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
-              onSelect={setSelectedEvent} />}
+          : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
+            onSelect={setSelectedEvent} />}
       {showRadiusEmpty && <RadiusEmptyState />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
@@ -677,9 +779,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       onClose={() => setSelectedAntifraud(null)} />}
     {selectedEvent && <EventDrawer event={selectedEvent} timezone={activeDeviceTimezone(device)}
       onClose={() => setSelectedEvent(null)} />}
-    {selectedConstruct && <ConstructDrawer key={selectedConstruct.constructId}
-      device={device} initial={selectedConstruct}
-      timezone={activeDeviceTimezone(device)} onClose={() => setSelectedConstruct(null)} />}
   </section>
 }
 
@@ -801,11 +900,15 @@ function AntifraudTable({ rows, timezone, onSelect }: {
     <th>RADIUS server</th><th>Latency</th><th>Accounting</th><th>Корреляция</th><th>CDR legs</th>
     <th>Полнота</th><th>Acct-Session-Id</th><th>Call context</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.transactionId}
+    className={`outcome-row outcome-${antifraudOutcome(row)}`}
     onClick={() => onSelect(row)}>
     <td className="mono">{formatTime(row.lastEventAt, timezone)}</td>
     <td><span className="tag">{row.requestType || 'не определена'}</span></td>
     <td><span className={`decision ${row.decision || 'pending'}`}>
-      {decisionLabel(row.decision)}</span></td>
+      {decisionLabel(row.decision)}</span>
+      <span className={`outcome-badge ${antifraudOutcome(row)}`}>
+        {outcomeLabel(antifraudOutcome(row))}
+      </span></td>
     <td className="mono">{row.srcNumberIn || row.callingStationId || '—'}</td>
     <td className="mono">{row.dstNumberIn || row.calledStationId || '—'}</td>
     <td>{row.inTrunkgroupLabel || '—'}</td><td>{row.outTrunkgroupLabel || '—'}</td>
@@ -900,13 +1003,18 @@ function CallsTable({ rows, timezone, onSelect }: {
     <th>Установка</th><th>Входящий маршрут</th><th>Исходящий маршрут</th><th>Номер A: вход</th>
     <th>Номер A: выход</th><th>Номер B: вход</th><th>Номер B: выход</th><th>Длит.</th>
     <th>Q.850</th><th>Результат</th><th>Acct-Session-Id</th><th>UniqueTag</th>
-  </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId} onClick={() => onSelect(row)}>
+  </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId}
+    className={`outcome-row outcome-${cdrOutcome(row.releaseCause)}`}
+    onClick={() => onSelect(row)}>
     <td className="mono">{formatTime(row.setupTime, timezone)}</td>
     <td>{row.incomingDescription || '—'}</td><td>{row.outgoingDescription || '—'}</td>
     <td className="mono">{row.incomingCgpn || '—'}</td><td className="mono">{row.outgoingCgpn || '—'}</td>
     <td className="mono">{row.incomingCdpn || '—'}</td><td className="mono">{row.outgoingCdpn || '—'}</td>
     <td className="right">{row.durationMs == null ? '—' : `${(row.durationMs / 1000).toFixed(3)} c`}</td>
-    <td className="right">{row.releaseCause ?? '—'}</td><td>{row.releaseInfo || '—'}</td>
+    <td className="right">{row.releaseCause ?? '—'}</td><td>
+      <span className={`outcome-badge ${cdrOutcome(row.releaseCause)}`}>
+        {outcomeLabel(cdrOutcome(row.releaseCause))}
+      </span> {row.releaseInfo || '—'}</td>
     <td className="mono">{row.radiusSessionId || '—'}</td><td className="mono">{row.uniqueTag || '—'}</td>
   </tr>)}</tbody></table>
 }
@@ -973,155 +1081,6 @@ function groupCallTimeline(items: TimelineRow[]) {
   return timelineGroupOrder
     .map(([id, label]) => ({ id, label, items: groups.get(id) || [] }))
     .filter((group) => group.items.length > 0)
-}
-
-function SyslogConstructList({ rows, timezone, onSelect }: {
-  rows: SyslogConstruct[]
-  timezone: string
-  onSelect: (row: SyslogConstruct) => void
-}) {
-  return <div className="construct-list">
-    {rows.map((row) => <button className="construct-row" type="button"
-      key={row.constructId} onClick={() => onSelect(row)}>
-      <time className="mono">{formatTime(row.startedAt, timezone)}</time>
-      <span className={`construct-direction ${(row.direction || '').toLowerCase()}`}>
-        {formatDirection(row.direction)}
-      </span>
-      <SyslogConstructSummary row={row} />
-      <span className="construct-meta">
-        <span>{row.memberCount.toLocaleString('ru-RU')} событий</span>
-        <span className={`parse-status ${row.completeness}`}>{row.completeness || '—'}</span>
-        <span className={`grouping-indicator ${isExactGrouping(row.groupingMethod) ? 'exact' : 'heuristic'}`}>
-          {isExactGrouping(row.groupingMethod) ? 'точная связь' : 'эвристика'}
-        </span>
-      </span>
-    </button>)}
-    {rows.length === 0 && <div className="table-empty">
-      <strong>Конструкты не найдены</strong>
-      <p>Измените поисковый запрос или проверьте наличие Syslog в этом разделе.</p>
-    </div>}
-  </div>
-}
-
-function SyslogConstructSummary({ row }: { row: SyslogConstruct }) {
-  return <span className="construct-summary">
-    <span className="construct-heading">
-      <span className="tag">{row.category || row.constructType}</span>
-      <strong>{row.title || row.messageName || row.constructType}</strong>
-      {row.messageName && row.messageName !== row.title &&
-        <span className="mono">{row.messageName}</span>}
-    </span>
-    <span className="construct-description">{row.summary || 'Без описания'}</span>
-    {row.callContext && <span className="construct-context">
-      Call context: <span className="mono">{row.callContext}</span>
-    </span>}
-  </span>
-}
-
-function ConstructDrawer({ device, initial, timezone, onClose }: {
-  device: Device
-  initial: SyslogConstruct
-  timezone: string
-  onClose: () => void
-}) {
-  const [detail, setDetail] = useState<{ construct: SyslogConstruct; members: EventRow[] } | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [showTechnical, setShowTechnical] = useState(false)
-  useEffect(() => {
-    let active = true
-    api<{ construct: SyslogConstruct; members: EventRow[] }>(
-      `/devices/${device.id}/syslog-constructs/${initial.constructId}`,
-    ).then((response) => {
-      if (active) setDetail(response)
-    }).catch((reason) => {
-      if (active) setError(reason instanceof Error ? reason.message : 'Ошибка загрузки конструкта')
-    }).finally(() => {
-      if (active) setLoading(false)
-    })
-    return () => { active = false }
-  }, [device.id, initial.constructId])
-  const construct = detail?.construct || initial
-  const members = useMemo(() => orderedConstructMembers(detail?.members || []), [detail?.members])
-  const technicalCount = members.filter(isTechnicalConstructMember).length
-  const visibleMembers = showTechnical
-    ? members
-    : members.filter((member) => !isTechnicalConstructMember(member))
-  const reportedHiddenCount = Math.max(technicalCount, construct.hiddenCount || 0)
-
-  return <div className="drawer construct-drawer">
-    <div className="drawer-header"><div><h3>{construct.title || construct.messageName || 'Syslog-конструкт'}</h3>
-      <span className="mono">{construct.constructId}</span></div>
-      <button type="button" aria-label="Закрыть" onClick={onClose}>×</button></div>
-    <div className="construct-drawer-summary">
-      <div className="construct-heading">
-        <span className="tag">{construct.category || construct.constructType}</span>
-        <span className={`construct-direction ${(construct.direction || '').toLowerCase()}`}>
-          {formatDirection(construct.direction)}
-        </span>
-        <span className={`grouping-indicator ${isExactGrouping(construct.groupingMethod) ? 'exact' : 'heuristic'}`}>
-          {isExactGrouping(construct.groupingMethod) ? 'точная связь' : 'эвристика'}
-        </span>
-      </div>
-      <p>{construct.summary || 'Без описания'}</p>
-    </div>
-    <div className="call-facts">
-      <span><small>Начало</small><strong>{formatTime(construct.startedAt, timezone)}</strong></span>
-      <span><small>Окончание</small><strong>{formatTime(construct.endedAt, timezone)}</strong></span>
-      <span><small>Call context</small><strong className="mono">{construct.callContext || '—'}</strong></span>
-      <span><small>Message name</small><strong className="mono">{construct.messageName || '—'}</strong></span>
-      <span><small>Полнота</small><strong>{construct.completeness || '—'}</strong></span>
-      <span><small>Группировка</small><strong>{construct.groupingMethod || '—'}</strong></span>
-      <span><small>Причина</small><strong>{construct.groupingReason || '—'}</strong></span>
-      <span><small>Confidence</small><strong>
-        {construct.confidence == null ? '—' : construct.confidence.toFixed(2)}
-      </strong></span>
-    </div>
-    <div className="construct-members-heading">
-      <h4>События конструкта · {visibleMembers.length}/{members.length || construct.memberCount}</h4>
-      {reportedHiddenCount > 0 && <button type="button" className="secondary"
-        aria-pressed={showTechnical} onClick={() => setShowTechnical((current) => !current)}>
-        {showTechnical ? 'Скрыть технические' : `Показать технические (${reportedHiddenCount})`}
-      </button>}
-    </div>
-    {loading && <div className="drawer-state">Загрузка событий…</div>}
-    {error && <div className="form-error drawer-state">{error}</div>}
-    {!loading && !error && visibleMembers.length === 0 &&
-      <div className="drawer-state">Читаемые события отсутствуют.</div>}
-    <div className="construct-members">
-      {visibleMembers.map((member) => <ConstructMember key={member.eventId}
-        member={member} timezone={timezone} />)}
-    </div>
-  </div>
-}
-
-function ConstructMember({ member, timezone }: { member: EventRow; timezone: string }) {
-  const parameters = constructMemberParameters(member)
-  return <article className={`construct-member ${isTechnicalConstructMember(member) ? 'technical' : ''}`}>
-    <div className="construct-member-head">
-      <time className="mono">{formatTime(member.eventTime || member.receivedAt, timezone)}</time>
-      <span className="tag">{member.category}</span>
-      <strong>{member.component || 'SMG'}</strong>
-      {isTechnicalConstructMember(member) && <span className="technical-label">technical</span>}
-    </div>
-    <pre className="construct-member-message">{member.message || '—'}</pre>
-    {parameters.map(([name, value]) => <div className="construct-parameter" key={name}>
-      <small>{name}</small><pre>{value}</pre>
-    </div>)}
-    <details className="raw-drilldown">
-      <summary>Raw payload</summary>
-      <pre className="raw-payload">{member.rawPayload || '—'}</pre>
-    </details>
-  </article>
-}
-
-function isExactGrouping(method?: string) {
-  return (method || '').toLowerCase() !== 'heuristic'
-}
-
-function formatDirection(direction?: string) {
-  const normalized = (direction || '').toUpperCase()
-  return normalized === 'TX' || normalized === 'RX' ? normalized : '—'
 }
 
 function EventsTable({ rows, timezone, onSelect }: {
@@ -1371,18 +1330,28 @@ function EditDeviceDialog({ device, onClose, onSaved, onDeleted, initialDeleting
   </Modal>
 }
 
-function SystemSettingsDialog({ user, onClose }: { user: User; onClose: () => void }) {
+function SystemSettingsPage({ user }: { user: User }) {
+  const [tab, setTab] = useState<'system' | 'users' | 'retention'>('system')
   const [info, setInfo] = useState<SystemInfo | null>(null)
   const [users, setUsers] = useState<ManagedUser[]>([])
+  const [retention, setRetention] = useState<RetentionPolicy[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [busyUserID, setBusyUserID] = useState('')
+  const [userErrors, setUserErrors] = useState<Record<string, string>>({})
+  const [resetUser, setResetUser] = useState<ManagedUser | null>(null)
+  const [userQuery, setUserQuery] = useState('')
   const [form, setForm] = useState({ username: '', password: '', role: 'viewer' })
   const load = useCallback(async () => {
     try {
       setInfo(await api<SystemInfo>('/system/info'))
       if (user.role === 'admin') {
-        const response = await api<{ items: ManagedUser[] }>('/system/users')
-        setUsers(response.items || [])
+        const [userResponse, retentionResponse] = await Promise.all([
+          api<{ items: ManagedUser[] }>('/system/users'),
+          api<{ items: RetentionPolicy[] }>('/system/retention'),
+        ])
+        setUsers(userResponse.items || [])
+        setRetention(retentionResponse.items || [])
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Ошибка загрузки настроек')
@@ -1395,6 +1364,9 @@ function SystemSettingsDialog({ user, onClose }: { user: User; onClose: () => vo
       void api<{ items: ManagedUser[] }>('/system/users')
         .then((response) => setUsers(response.items || []))
         .catch((reason) => setError(reason instanceof Error ? reason.message : 'Ошибка загрузки пользователей'))
+      void api<{ items: RetentionPolicy[] }>('/system/retention')
+        .then((response) => setRetention(response.items || []))
+        .catch((reason) => setError(reason instanceof Error ? reason.message : 'Ошибка загрузки retention'))
     }
   }, [user.role])
   async function create(event: FormEvent) {
@@ -1412,8 +1384,8 @@ function SystemSettingsDialog({ user, onClose }: { user: User; onClose: () => vo
     }
   }
   async function update(managed: ManagedUser, patch: Partial<ManagedUser>, password = '') {
-    setBusy(true)
-    setError('')
+    setBusyUserID(managed.id)
+    setUserErrors((current) => ({ ...current, [managed.id]: '' }))
     try {
       const updated = await api<ManagedUser>(`/system/users/${managed.id}`, {
         method: 'PATCH',
@@ -1424,27 +1396,87 @@ function SystemSettingsDialog({ user, onClose }: { user: User; onClose: () => vo
         }),
       })
       setUsers((current) => current.map((item) => item.id === updated.id ? updated : item))
+      return true
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Ошибка изменения пользователя')
+      setUserErrors((current) => ({
+        ...current,
+        [managed.id]: reason instanceof Error ? reason.message : 'Ошибка изменения пользователя',
+      }))
+      return false
     } finally {
-      setBusy(false)
+      setBusyUserID('')
     }
   }
   async function remove(managed: ManagedUser) {
     if (managed.active || managed.id === user.id) return
-    setBusy(true)
-    setError('')
+    if (!window.confirm(`Удалить пользователя ${managed.username}? Это действие нельзя отменить.`)) return
+    setBusyUserID(managed.id)
+    setUserErrors((current) => ({ ...current, [managed.id]: '' }))
     try {
       await api<void>(`/system/users/${managed.id}`, { method: 'DELETE' })
       setUsers((current) => current.filter((item) => item.id !== managed.id))
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Ошибка удаления пользователя')
+      setUserErrors((current) => ({
+        ...current,
+        [managed.id]: reason instanceof Error ? reason.message : 'Ошибка удаления пользователя',
+      }))
+    } finally {
+      setBusyUserID('')
+    }
+  }
+  async function changeRetention(policy: RetentionPolicy, days: number) {
+    const decreasing = days < policy.activeDays
+    if (decreasing && !window.confirm(
+      `Срок ${retentionLabel(policy.policyClass)} уменьшится с ${policy.activeDays} до ${days} дней. ` +
+      'Удаление станет необратимым после 7-дневного периода ожидания.',
+    )) return
+    setBusy(true)
+    setError('')
+    try {
+      await api('/system/retention', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          policyClass: policy.policyClass, days, confirm: decreasing,
+        }),
+      })
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка изменения retention')
     } finally {
       setBusy(false)
     }
   }
-  return <Modal title="Системные настройки" onClose={onClose}>
-    <div className="system-settings">
+  async function cancelRetention(policy: RetentionPolicy) {
+    setBusy(true)
+    setError('')
+    try {
+      await api('/system/retention', {
+        method: 'PATCH',
+        body: JSON.stringify({ policyClass: policy.policyClass, cancel: true }),
+      })
+      await load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ошибка отмены изменения')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const filteredUsers = users.filter((managed) =>
+    managed.username.toLowerCase().includes(userQuery.trim().toLowerCase()))
+  return <section className="settings-page">
+    <nav className="settings-tabs" aria-label="Разделы настроек">
+      <button className={tab === 'system' ? 'active' : ''} onClick={() => setTab('system')}>
+        Система
+      </button>
+      {canManageUsers(user.role) && <button className={tab === 'users' ? 'active' : ''}
+        onClick={() => setTab('users')}>Пользователи</button>}
+      {canManageUsers(user.role) && <button className={tab === 'retention' ? 'active' : ''}
+        onClick={() => setTab('retention')}>Хранение</button>}
+    </nav>
+    <div className="settings-content">
+      {tab === 'system' && <>
+        <div className="page-heading"><div><h3>Состояние системы</h3>
+          <p>Версия Collector и доступность зависимых сервисов.</p></div></div>
       <section className="settings-summary">
         <div><small>Collector</small><strong>{info?.version || '…'}</strong></div>
         <div><small>Состояние API</small><strong className="healthy">{info?.status || 'проверка'}</strong></div>
@@ -1456,29 +1488,45 @@ function SystemSettingsDialog({ user, onClose }: { user: User; onClose: () => vo
             <i className={`status-dot ${healthy ? 'online' : ''}`} /> {name}
           </span>)}
       </div>}
-      {canManageUsers(user.role) && <section data-testid="user-admin">
-        <h3>Пользователи</h3>
+      </>}
+      {tab === 'users' && canManageUsers(user.role) && <section data-testid="user-admin">
+        <div className="page-heading"><div><h3>Пользователи</h3>
+          <p>Роли, доступ и безопасность учётных записей.</p></div>
+          <input placeholder="Поиск пользователя" value={userQuery}
+            onChange={(event) => setUserQuery(event.target.value)} /></div>
         <div className="user-admin-list">
-          {users.map((managed) => <div className="user-admin-row" key={managed.id}>
-            <span><strong>{managed.username}</strong><small>{managed.active ? ' активен' : ' отключён'}</small></span>
-            <select value={managed.role} disabled={busy}
+          {filteredUsers.map((managed) => {
+            const rowBusy = busyUserID === managed.id
+            return <div className="user-admin-row" key={managed.id}>
+            <span><strong>{managed.username}</strong><small>
+              {managed.active ? 'Активен' : 'Отключён'} · создан {formatTime(managed.createdAt, 'UTC')}
+            </small><small>Последний вход: {formatTime(managed.lastSeenAt, 'UTC')}</small></span>
+            <select value={managed.role} disabled={rowBusy}
               onChange={(event) => void update(managed, {
                 role: event.target.value as ManagedUser['role'],
               })}>
-              <option value="admin">admin</option>
-              <option value="analyst">analyst</option>
-              <option value="viewer">viewer</option>
+              <option value="admin">Администратор</option>
+              <option value="analyst">Аналитик</option>
+              <option value="viewer">Наблюдатель</option>
             </select>
-            <button className="secondary" disabled={busy || managed.id === user.id}
-              onClick={() => void update(managed, { active: !managed.active })}>
+            <button className="secondary" disabled={rowBusy || managed.id === user.id}
+              onClick={() => {
+                if (managed.active && !window.confirm(
+                  `Отключить пользователя ${managed.username} и завершить его активные сессии?`,
+                )) return
+                void update(managed, { active: !managed.active })
+              }}>
               {managed.active ? 'Отключить' : 'Включить'}
             </button>
-            <UserPasswordReset disabled={busy}
-              onReset={(password) => update(managed, {}, password)} />
-            <button className="danger ghost" disabled={busy || managed.active || managed.id === user.id}
+            <button className="secondary" disabled={rowBusy}
+              onClick={() => setResetUser(managed)}>Сбросить пароль</button>
+            <button className="danger ghost" disabled={rowBusy || managed.active || managed.id === user.id}
               title={managed.active ? 'Сначала отключите пользователя' : 'Удалить пользователя'}
               onClick={() => void remove(managed)}>Удалить</button>
-          </div>)}
+            {userErrors[managed.id] && <span className="form-error row-error">
+              {userErrors[managed.id]}
+            </span>}
+          </div>})}
         </div>
         <form className="new-user-form" onSubmit={create}>
           <input required placeholder="Логин" value={form.username}
@@ -1486,29 +1534,113 @@ function SystemSettingsDialog({ user, onClose }: { user: User; onClose: () => vo
           <input required minLength={12} type="password" placeholder="Пароль (не менее 12 символов)"
             value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
           <select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value })}>
-            <option value="viewer">viewer</option><option value="analyst">analyst</option>
-            <option value="admin">admin</option>
+            <option value="viewer">Наблюдатель</option><option value="analyst">Аналитик</option>
+            <option value="admin">Администратор</option>
           </select>
           <button className="primary" disabled={busy}>Добавить</button>
         </form>
       </section>}
+      {tab === 'retention' && canManageUsers(user.role) && <section>
+        <div className="page-heading"><div><h3>Хранение данных</h3>
+          <p>Уменьшение срока вступает в силу через 7 дней и может быть отменено.</p></div></div>
+        <div className="retention-list">{retention.map((policy) =>
+          <RetentionPolicyEditor key={`${policy.policyClass}:${policy.activeDays}:${policy.pendingDays}`}
+            policy={policy} busy={busy}
+            onChange={(days) => changeRetention(policy, days)}
+            onCancel={() => cancelRetention(policy)} />)}</div>
+      </section>}
       {error && <div className="form-error">{error}</div>}
-      <div className="dialog-actions"><button className="primary" onClick={onClose}>Закрыть</button></div>
     </div>
-  </Modal>
+    {resetUser && <UserPasswordReset user={resetUser}
+      disabled={busyUserID === resetUser.id} onClose={() => setResetUser(null)}
+      onReset={(password) => update(resetUser, {}, password)} />}
+  </section>
 }
 
-function UserPasswordReset({ disabled, onReset }: {
+function RetentionPolicyEditor({ policy, busy, onChange, onCancel }: {
+  policy: RetentionPolicy
+  busy: boolean
+  onChange: (days: number) => Promise<void>
+  onCancel: () => Promise<void>
+}) {
+  const [days, setDays] = useState(policy.pendingDays || policy.activeDays)
+  const [referenceNow] = useState(() => Date.now())
+  return <article className="retention-row">
+    <div><strong>{retentionLabel(policy.policyClass)}</strong>
+      <p>{retentionDescription(policy.policyClass)}</p></div>
+    <label>Текущий срок<strong>{policy.activeDays} дней</strong>
+      <small>Граница удаления: {new Date(referenceNow - policy.activeDays * 86_400_000)
+        .toLocaleDateString('ru-RU')}</small>
+    </label>
+    <label>Новый срок<input type="number" min={7} max={1095} value={days}
+      onChange={(event) => setDays(Number(event.target.value))} /></label>
+    <div className="retention-actions">
+      <button className="secondary" disabled={busy || days < 7 || days > 1095 ||
+        days === (policy.pendingDays || policy.activeDays)}
+      onClick={() => void onChange(days)}>Сохранить</button>
+      {policy.pendingDays != null && <button className="danger ghost" disabled={busy}
+        onClick={() => void onCancel()}>Отменить</button>}
+    </div>
+    {policy.pendingDays != null && <div className="retention-pending">
+      Запланировано: {policy.pendingDays} дней с {formatTime(policy.effectiveAt, 'UTC')}
+      {' · '}{retentionCountdown(policy.effectiveAt, referenceNow)}
+    </div>}
+    {policy.lastError && <div className="form-error">{policy.lastError}</div>}
+  </article>
+}
+
+function retentionLabel(value: RetentionPolicy['policyClass']) {
+  return {
+    syslog: 'Syslog и события',
+    cdr: 'CDR и факты времени',
+    derived: 'AntiFraud и производная аналитика',
+    raw_cdr_archive: 'Raw CDR архив MinIO',
+  }[value]
+}
+
+function retentionDescription(value: RetentionPolicy['policyClass']) {
+  return {
+    syslog: 'Исходные Syslog datagram и их parser facts.',
+    cdr: 'Нормализованные CDR и timezone interpretations.',
+    derived: 'RADIUS lifecycle, AntiFraud и корреляция.',
+    raw_cdr_archive: 'Неизменённые исходные CDR-файлы в объектном хранилище.',
+  }[value]
+}
+
+function retentionCountdown(effectiveAt: string | undefined, now: number) {
+  if (!effectiveAt) return 'ожидает применения'
+  const remaining = new Date(effectiveAt).getTime() - now
+  if (remaining <= 0) return 'применяется'
+  const hours = Math.ceil(remaining / 3_600_000)
+  return hours >= 48 ? `через ${Math.ceil(hours / 24)} дн.` : `через ${hours} ч.`
+}
+
+function UserPasswordReset({ user, disabled, onReset, onClose }: {
+  user: ManagedUser
   disabled: boolean
-  onReset: (password: string) => Promise<void>
+  onReset: (password: string) => Promise<boolean>
+  onClose: () => void
 }) {
   const [password, setPassword] = useState('')
-  return <span className="password-reset">
-    <input type="password" minLength={12} placeholder="Новый пароль" value={password}
-      disabled={disabled} onChange={(event) => setPassword(event.target.value)} />
-    <button className="secondary" disabled={disabled || password.length < 12}
-      onClick={() => void onReset(password).then(() => setPassword(''))}>Сменить</button>
-  </span>
+  return <Modal title={`Сбросить пароль · ${user.username}`} onClose={onClose}>
+    <form className="device-form" onSubmit={(event) => {
+      event.preventDefault()
+      void onReset(password).then((changed) => {
+        if (changed) onClose()
+      })
+    }}>
+      <p>Новый пароль завершит все активные сессии пользователя.</p>
+      <label>Новый пароль<input type="password" minLength={12} autoFocus
+        placeholder="Не менее 12 символов" value={password}
+        disabled={disabled} onChange={(event) => setPassword(event.target.value)} /></label>
+      <div className="dialog-actions">
+        <button type="button" className="secondary" onClick={onClose}>Отмена</button>
+        <button className="primary" disabled={disabled || password.length < 12}>
+          Сбросить пароль
+        </button>
+      </div>
+    </form>
+  </Modal>
 }
 
 function CredentialsDialog({ device, onClose }: { device: Device; onClose: () => void }) {

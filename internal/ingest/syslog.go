@@ -537,6 +537,7 @@ func RunSyslogWorker(
 	nc *nats.Conn,
 	client *analytics.Client,
 	timeResolver DeviceTimeConfigResolver,
+	syslogConstructsEnabled ...bool,
 ) error {
 	js, err := nc.JetStream()
 	if err != nil {
@@ -553,7 +554,11 @@ func RunSyslogWorker(
 	}
 	timeConfigs := make(map[uuid.UUID]cachedTimeConfig)
 	continuations := NewContinuationAssembler()
-	constructs := NewSyslogConstructAssembler()
+	constructsEnabled := len(syslogConstructsEnabled) > 0 && syslogConstructsEnabled[0]
+	var constructs *SyslogConstructAssembler
+	if constructsEnabled {
+		constructs = NewSyslogConstructAssembler()
+	}
 	for ctx.Err() == nil {
 		messages, err := subscription.Fetch(250, nats.MaxWait(time.Second))
 		if errors.Is(err, nats.ErrTimeout) {
@@ -627,7 +632,6 @@ func RunSyslogWorker(
 			if len(activeEvents) == 0 {
 				return false
 			}
-			constructRows, memberRows, fragmentLinks := constructs.Assemble(activeEvents)
 			if err := client.InsertSyslogBatch(ctx, activeEvents); err != nil {
 				slog.Error("syslog batch persistence failed", "count", len(activeEvents), "error", err)
 				for _, item := range activeParsed {
@@ -635,26 +639,29 @@ func RunSyslogWorker(
 				}
 				return true
 			}
-			if err := client.InsertSyslogFragmentLinksBatch(ctx, fragmentLinks); err != nil {
-				slog.Error("Syslog fragment link persistence failed", "error", err)
-				for _, item := range activeParsed {
-					_ = item.message.NakWithDelay(5 * time.Second)
+			if constructsEnabled {
+				constructRows, memberRows, fragmentLinks := constructs.Assemble(activeEvents)
+				if err := client.InsertSyslogFragmentLinksBatch(ctx, fragmentLinks); err != nil {
+					slog.Error("Syslog fragment link persistence failed", "error", err)
+					for _, item := range activeParsed {
+						_ = item.message.NakWithDelay(5 * time.Second)
+					}
+					return true
 				}
-				return true
-			}
-			if err := client.InsertSyslogConstructsBatch(ctx, constructRows); err != nil {
-				slog.Error("Syslog construct persistence failed", "error", err)
-				for _, item := range activeParsed {
-					_ = item.message.NakWithDelay(5 * time.Second)
+				if err := client.InsertSyslogConstructsBatch(ctx, constructRows); err != nil {
+					slog.Error("Syslog construct persistence failed", "error", err)
+					for _, item := range activeParsed {
+						_ = item.message.NakWithDelay(5 * time.Second)
+					}
+					return true
 				}
-				return true
-			}
-			if err := client.InsertSyslogConstructMembersBatch(ctx, memberRows); err != nil {
-				slog.Error("Syslog construct member persistence failed", "error", err)
-				for _, item := range activeParsed {
-					_ = item.message.NakWithDelay(5 * time.Second)
+				if err := client.InsertSyslogConstructMembersBatch(ctx, memberRows); err != nil {
+					slog.Error("Syslog construct member persistence failed", "error", err)
+					for _, item := range activeParsed {
+						_ = item.message.NakWithDelay(5 * time.Second)
+					}
+					return true
 				}
-				return true
 			}
 			if err := client.ProcessSyslogShadowDerivedBatch(ctx, activeEvents); err != nil {
 				slog.Error("Syslog shadow lifecycle batch failed", "error", err)

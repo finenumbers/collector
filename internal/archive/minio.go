@@ -7,11 +7,45 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/lifecycle"
 )
 
 type Archive struct {
 	Client *minio.Client
 	Bucket string
+}
+
+func (a *Archive) ApplyCDRRetention(ctx context.Context, days int) error {
+	if days < 7 || days > 1095 {
+		return fmt.Errorf("retention days must be between 7 and 1095")
+	}
+	config, err := a.Client.GetBucketLifecycle(ctx, a.Bucket)
+	if err != nil {
+		response := minio.ToErrorResponse(err)
+		if response.Code != "NoSuchLifecycleConfiguration" {
+			return fmt.Errorf("read bucket lifecycle: %w", err)
+		}
+		config = lifecycle.NewConfiguration()
+	}
+	return a.Client.SetBucketLifecycle(ctx, a.Bucket, cdrRetentionLifecycle(config, days))
+}
+
+func cdrRetentionLifecycle(config *lifecycle.Configuration, days int) *lifecycle.Configuration {
+	const ruleID = "collector-raw-cdr-retention"
+	rules := make([]lifecycle.Rule, 0, len(config.Rules)+1)
+	for _, rule := range config.Rules {
+		if rule.ID != ruleID {
+			rules = append(rules, rule)
+		}
+	}
+	rules = append(rules, lifecycle.Rule{
+		ID:         ruleID,
+		Status:     "Enabled",
+		RuleFilter: lifecycle.Filter{Prefix: "cdr/"},
+		Expiration: lifecycle.Expiration{Days: lifecycle.ExpirationDays(days)},
+	})
+	config.Rules = rules
+	return config
 }
 
 func Open(ctx context.Context, endpoint, accessKey, secretKey, bucket string, useTLS bool) (*Archive, error) {

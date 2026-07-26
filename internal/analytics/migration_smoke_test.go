@@ -28,7 +28,7 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 11 {
-		t.Fatalf("got %d applied migrations, want 11", applied)
+	if applied != 12 {
+		t.Fatalf("got %d applied migrations, want 12", applied)
 	}
 }

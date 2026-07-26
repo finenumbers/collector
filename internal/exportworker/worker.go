@@ -26,21 +26,46 @@ const (
 )
 
 type Health struct {
-	lastPoll atomic.Int64
+	lastSuccess         atomic.Int64
+	consecutiveFailures atomic.Uint64
+	lastError           atomic.Value
 }
 
-func (h *Health) markPoll() {
-	if h != nil {
-		h.lastPoll.Store(time.Now().UnixNano())
+func (h *Health) recordSuccess() {
+	if h == nil {
+		return
 	}
+	h.lastSuccess.Store(time.Now().UnixNano())
+	h.consecutiveFailures.Store(0)
+	h.lastError.Store("")
+}
+
+func (h *Health) recordFailure(err error) {
+	if h == nil || err == nil {
+		return
+	}
+	h.consecutiveFailures.Add(1)
+	h.lastError.Store(err.Error())
 }
 
 func (h *Health) Available(maxAge time.Duration) bool {
 	if h == nil {
 		return true
 	}
-	value := h.lastPoll.Load()
-	return value != 0 && time.Since(time.Unix(0, value)) <= maxAge
+	value := h.lastSuccess.Load()
+	return value != 0 && h.consecutiveFailures.Load() < 3 &&
+		time.Since(time.Unix(0, value)) <= maxAge
+}
+
+func (h *Health) LastError() string {
+	if h == nil {
+		return ""
+	}
+	value := h.lastError.Load()
+	if value == nil {
+		return ""
+	}
+	return value.(string)
 }
 
 type ProgressFunc func(rows int64) error
@@ -118,13 +143,14 @@ func (w *Worker) Run(ctx context.Context) error {
 		if w.runOnce != nil {
 			iteration = w.runOnce
 		}
-		w.Health.markPoll()
 		worked, err := iteration(ctx)
-		w.Health.markPoll()
 		if err != nil && !errors.Is(err, context.Canceled) {
+			w.Health.recordFailure(err)
 			slog.Warn("async export worker iteration failed; retrying",
 				"worker", w.WorkerID, "error", err, "retryAfter", w.Poll)
 			worked = false
+		} else {
+			w.Health.recordSuccess()
 		}
 		delay := w.Poll
 		if worked {
@@ -188,10 +214,14 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 			case <-renderCtx.Done():
 				return
 			case <-ticker.C:
-				w.Health.markPoll()
 				cancelled, updateErr := w.Store.UpdateExportProgress(
 					renderCtx, job.ID, w.WorkerID, processedRows.Load(), writer.written.Load(), w.Lease,
 				)
+				if updateErr != nil {
+					w.Health.recordFailure(updateErr)
+				} else {
+					w.Health.recordSuccess()
+				}
 				if updateErr != nil || cancelled {
 					heartbeatMu.Lock()
 					heartbeatErr = updateErr
@@ -206,14 +236,15 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 		}
 	}()
 	progress := func(rows int64) error {
-		w.Health.markPoll()
 		processedRows.Store(rows)
 		cancelled, updateErr := w.Store.UpdateExportProgress(
 			renderCtx, job.ID, w.WorkerID, rows, writer.written.Load(), w.Lease,
 		)
 		if updateErr != nil {
+			w.Health.recordFailure(updateErr)
 			return updateErr
 		}
+		w.Health.recordSuccess()
 		if cancelled {
 			return context.Canceled
 		}

@@ -956,6 +956,7 @@ function ExportButton({ deviceID, dataset, query, date }: {
         .then(({ job: next }) => {
           if (!active) return
           failures = 0
+          setError('')
           setJob(next)
           if (next.status === 'completed') {
             window.sessionStorage.removeItem(storageKey)

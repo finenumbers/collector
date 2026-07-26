@@ -946,6 +946,19 @@ function ExportButton({ deviceID, dataset, query, date }: {
   const jobID = job?.id
   const jobStatus = job?.status
 
+  const download = useCallback((completed: ExportJob, forget: boolean) => {
+    const link = document.createElement('a')
+    link.href = exportDownloadURL(deviceID, completed.id)
+    link.download = completed.filename || ''
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    if (forget) {
+      window.sessionStorage.removeItem(storageKey)
+      setJob(null)
+    }
+  }, [deviceID, storageKey])
+
   useEffect(() => {
     if (!jobID || !jobStatus || !isExportActive(jobStatus)) return
     let active = true
@@ -959,13 +972,7 @@ function ExportButton({ deviceID, dataset, query, date }: {
           setError('')
           setJob(next)
           if (next.status === 'completed') {
-            window.sessionStorage.removeItem(storageKey)
-            const link = document.createElement('a')
-            link.href = exportDownloadURL(deviceID, next.id)
-            link.download = next.filename || ''
-            document.body.appendChild(link)
-            link.click()
-            link.remove()
+            download(next, false)
             return
           }
           if (!isExportActive(next.status)) {
@@ -987,7 +994,7 @@ function ExportButton({ deviceID, dataset, query, date }: {
       active = false
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [deviceID, jobID, jobStatus, storageKey])
+  }, [deviceID, download, jobID, jobStatus, storageKey])
 
   const createJob = () => {
     setCreating(true)
@@ -1008,9 +1015,11 @@ function ExportButton({ deviceID, dataset, query, date }: {
   const active = creating || (job != null && isExportActive(job.status))
   const label = creating ? 'Запуск…' : job?.status === 'queued' ? 'Архив в очереди…'
     : job?.status === 'running' ? `Архив: ${job.rowsWritten.toLocaleString('ru-RU')} строк…`
-      : error ? 'Повторить экспорт' : 'Экспорт CSV.zip'
+      : job?.status === 'completed' ? 'Скачать архив'
+        : error ? 'Повторить экспорт' : 'Экспорт CSV.zip'
   return <div className="export-button-wrap">
-    <button className="secondary" disabled={active} onClick={createJob}>{label}</button>
+    <button className="secondary" disabled={active}
+      onClick={() => job?.status === 'completed' ? download(job, true) : createJob()}>{label}</button>
     {error && <small className="export-inline-error" title={error}>{error}</small>}
   </div>
 }

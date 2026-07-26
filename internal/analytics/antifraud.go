@@ -833,7 +833,7 @@ func (c *Client) ListAntifraudPage(
 		return AntifraudPage{}, err
 	}
 	defer rows.Close()
-	items := make([]AntifraudRow, 0, limit)
+	items := make([]AntifraudRow, 0, 200)
 	for rows.Next() {
 		var item AntifraudRow
 		if err := rows.Scan(

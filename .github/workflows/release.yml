@@ -44,8 +44,8 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
           labels: |
-            org.opencontainers.image.title=SMG Collector
-            org.opencontainers.image.description=Eltex SMG-1016M Syslog, CDR and AntiFraud analytics
+            org.opencontainers.image.title=Logs Collector
+            org.opencontainers.image.description=Telecom equipment and softswitch log/CDR analytics
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push multi-architecture image

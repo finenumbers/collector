@@ -10,9 +10,10 @@ import {
 } from './settings'
 import { antifraudOutcome, cdrOutcome, outcomeLabel } from './outcomes'
 import {
-  EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
-  sourceCategory, SourceCapabilities, SourceCategory, templatesFor,
+  defaultSourceDataset, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
+  sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
 } from './equipment'
+import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v2.png'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
 type ManagedUser = User & {
@@ -41,6 +42,7 @@ type DashboardDevice = {
   metrics: {
     calls: number
     failedCalls: number
+    averageTalkMs: number
     alarms: number
     unknown: number
     antifraud: number
@@ -65,7 +67,10 @@ type DashboardSnapshot = {
     antifraud: number
     rejects: number
     incomplete: number
+    equipment?: DashboardCategoryTotals
+    softswitch?: DashboardCategoryTotals
   }
+  categoryTotals?: Partial<Record<SourceCategory, DashboardCategoryTotals>>
   devices: DashboardDevice[]
   system: {
     version: string
@@ -75,6 +80,19 @@ type DashboardSnapshot = {
     runtime?: IngestRuntime
   }
   diagnostics: string[]
+}
+type DashboardCategoryTotals = {
+  activeSources?: number
+  totalSources?: number
+  calls?: number
+  failed?: number
+  averageTalkMs?: number
+  alarms?: number
+  unknown?: number
+  antifraud?: number
+  rejects?: number
+  files?: number
+  bytes?: number
 }
 type Device = {
   id: string
@@ -213,6 +231,82 @@ type CallRow = {
   radiusSessionId: string
   uniqueTag: string
 }
+type SatelCdrRow = {
+  recordId: string
+  externalCdrId?: string
+  cdrId?: string
+  setupTime?: string
+  connectTime?: string
+  disconnectTime?: string
+  durationMs?: number
+  outcome?: string
+  inAni?: string
+  inDnis?: string
+  outAni?: string
+  outDnis?: string
+  billAni?: string
+  billDnis?: string
+  srcName?: string
+  dstName?: string
+  dpName?: string
+  protocols?: string[] | string
+  sigNodeName?: string
+  signalNodeName?: string
+  inLegProto?: string
+  outLegProto?: string
+  inLegTransportProto?: string
+  outLegTransportProto?: string
+  confId?: string
+  callId?: string
+  srcCallId?: string
+  dstCallId?: string
+  inLegCallId?: string
+  outLegCallId?: string
+  disconnectCode?: string | number
+  disconnectText?: string
+  disconnectSuccess?: boolean
+  disconnectInitiator?: string
+  endpoints?: unknown
+  codecs?: unknown
+  timing?: unknown
+  media?: unknown
+  pddMs?: number
+  scdMs?: number
+  pdd?: number
+  scd?: number
+  termElapsedTime?: number
+  termSetupTime?: string
+  termConnectTime?: string
+  termDisconnectTime?: string
+  termPdd?: number
+  termScd?: number
+  srcGatekeeperAddress?: string
+  remoteSrcSigAddress?: string
+  remoteDstSigAddress?: string
+  remoteSrcMediaAddress?: string
+  remoteDstMediaAddress?: string
+  localSrcSigAddress?: string
+  localDstSigAddress?: string
+  localSrcMediaAddress?: string
+  localDstMediaAddress?: string
+  inLegCodecs?: string
+  outLegCodecs?: string
+  srcMediaBytesIn?: number
+  srcMediaBytesOut?: number
+  dstMediaBytesIn?: number
+  dstMediaBytesOut?: number
+  srcMediaPackets?: number
+  dstMediaPackets?: number
+  srcMediaPacketsLate?: number
+  dstMediaPacketsLate?: number
+  srcMediaPacketsLost?: number
+  dstMediaPacketsLost?: number
+  srcMinJitter?: number
+  srcMaxJitter?: number
+  dstMinJitter?: number
+  dstMaxJitter?: number
+  rawFields?: Record<string, unknown>
+}
 type AntifraudRow = {
   transactionId: string
   firstEventAt: string
@@ -260,7 +354,7 @@ type PageResponse<T> = {
   hasMore: boolean
   nextCursor?: PageCursor
 }
-type DataRow = EventRow | CallRow | AntifraudRow
+type DataRow = EventRow | CallRow | SatelCdrRow | AntifraudRow
 type Dataset = 'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
   'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
   'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown' |
@@ -377,7 +471,7 @@ function AuthScreen(props: {
   }
   return <Centered>
     <form className="auth-panel" onSubmit={submit}>
-      <div className="product-mark"><img src="/fine-numbers-logo.png" alt="Fine Numbers" /></div>
+      <div className="product-mark"><img src={fineNumbersLogoUrl} alt="Fine Numbers" /></div>
       <h1>{props.bootstrap ? 'Первичная настройка' : 'Вход в систему'}</h1>
       <p>{props.bootstrap
         ? 'Создайте первого администратора. Пароль должен содержать не менее 12 символов.'
@@ -430,7 +524,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
     const category = sourceCategory(device)
     setActiveDevice(device.id)
     setActiveCategory(category)
-    setDataset(category === 'softswitch' ? 'ingest_files' : 'calls')
+    setDataset(defaultSourceDataset(device))
     setActiveView('device')
   }
   const sourceList = (items: Device[], category: SourceCategory) => <div className="device-list">
@@ -456,7 +550,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   return <div className="workspace">
     <aside className="sidebar">
       <button className="brand" onClick={() => setActiveView('dashboard')}>
-        <img src="/fine-numbers-logo.png" alt="Fine Numbers" />
+        <img src={fineNumbersLogoUrl} alt="Fine Numbers" />
       </button>
       <button className={`dashboard-nav ${activeView === 'dashboard' ? 'active' : ''}`}
         onClick={() => setActiveView('dashboard')}>
@@ -526,7 +620,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       setActiveDevice(device.id)
       const category = sourceCategory(device)
       setActiveCategory(category)
-      setDataset(category === 'softswitch' ? 'ingest_files' : 'calls')
+      setDataset(defaultSourceDataset(device))
       setActiveView('device')
     }} />}
     {editingDevice && <EditDeviceDialog device={editingDevice} templates={templates}
@@ -583,7 +677,10 @@ function DashboardPage({ devices, onSelectDevice }: {
       })
     return () => { active = false }
   }, [windowValue])
-  const totals = snapshot?.totals
+  const equipmentRows = dashboardRows(snapshot, devices, 'equipment')
+  const softswitchRows = dashboardRows(snapshot, devices, 'softswitch')
+  const equipmentTotals = dashboardCategoryTotals(snapshot, devices, equipmentRows, 'equipment')
+  const softswitchTotals = dashboardCategoryTotals(snapshot, devices, softswitchRows, 'softswitch')
   return <section className="dashboard-page">
     <div className="page-heading">
       <div><h3>Обзор системы</h3><p>Ключевые показатели Collector и всех источников данных.</p></div>
@@ -595,27 +692,95 @@ function DashboardPage({ devices, onSelectDevice }: {
       </select>
     </div>
     {error && <div className="form-error">{error}</div>}
+    <div className="dashboard-category-heading"><h4>Оборудование</h4><span>Eltex · Syslog, CDR и AntiFraud</span></div>
     <div className="dashboard-kpis">
       <DashboardKPI label="Оборудование"
-        value={`${totals?.activeDevices ?? devices.filter((item) => item.enabled).length} / ${devices.length}`}
+        value={`${equipmentTotals.activeSources} / ${equipmentTotals.totalSources}`}
         detail="активно / всего" />
-      <DashboardKPI label="Вызовы" value={formatCount(totals?.calls)}
-        detail={`неуспешных ${formatCount(totals?.failed)}`} tone={totals?.failed ? 'bad' : 'good'} />
-      <DashboardKPI label="ASR" value={formatPercent(totals?.calls, totals?.failed)}
+      <DashboardKPI label="Вызовы" value={formatCount(equipmentTotals.calls)}
+        detail={`неуспешных ${formatCount(equipmentTotals.failed)}`}
+        tone={equipmentTotals.failed ? 'bad' : 'good'} />
+      <DashboardKPI label="ASR" value={formatPercent(equipmentTotals.calls, equipmentTotals.failed)}
         detail="доля успешных вызовов" />
       <DashboardKPI label="Средний разговор"
-        value={totals ? `${(totals.averageTalkMs / 1000).toFixed(1)} с` : '—'} />
-      <DashboardKPI label="Аварии" value={formatCount(totals?.alarms)}
-        tone={totals?.alarms ? 'bad' : 'good'} />
-      <DashboardKPI label="Нераспознано" value={formatCount(totals?.unknown)}
-        tone={totals?.unknown ? 'warn' : 'good'} />
-      <DashboardKPI label="AntiFraud" value={formatCount(totals?.antifraud)}
-        detail={`reject ${formatCount(totals?.rejects)}`} />
+        value={formatDurationAverage(equipmentTotals.averageTalkMs)} />
+      <DashboardKPI label="Аварии" value={formatCount(equipmentTotals.alarms)}
+        tone={equipmentTotals.alarms ? 'bad' : 'good'} />
+      <DashboardKPI label="Нераспознано" value={formatCount(equipmentTotals.unknown)}
+        tone={equipmentTotals.unknown ? 'warn' : 'good'} />
+      <DashboardKPI label="AntiFraud" value={formatCount(equipmentTotals.antifraud)}
+        detail={`reject ${formatCount(equipmentTotals.rejects)}`} />
       <DashboardKPI label="Очередь"
         value={formatCount(snapshot?.system?.natsStreamMessages)}
         detail={`spool ${formatCount(snapshot?.system?.spoolDepth)}`}
         tone={(snapshot?.system?.natsStreamMessages || snapshot?.system?.spoolDepth) ? 'warn' : 'good'} />
     </div>
+    <section className="dashboard-panel fleet-panel">
+      <div className="panel-heading"><div><h4>Оборудование</h4><span>Метрики Eltex за выбранный интервал</span></div></div>
+      <table><thead><tr><th>Оборудование</th><th>Шаблон / timezone</th><th>Статус</th>
+        <th>Вызовы</th><th>Неуспешные</th><th>AntiFraud / reject</th><th>Аварии</th>
+        <th>Unknown</th><th>Последний Syslog</th><th>Revision</th></tr></thead>
+        <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
+          <td><strong>{row.name}</strong><small>{row.model}</small></td>
+          <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}</td>
+          <td><span className={row.enabled ? 'healthy' : 'service-error'}>
+            {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
+          <td className="right">{formatCount(row.metrics.calls)}</td>
+          <td className="right">{formatCount(row.metrics.failedCalls)}</td>
+          <td className="right">{`${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}`}</td>
+          <td className="right">{formatCount(row.metrics.alarms)}</td>
+          <td className="right">{formatCount(row.metrics.unknown)}</td>
+          <td className="mono">{formatTime(row.freshness.latestSyslogAt, 'UTC')}</td>
+          <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
+        </tr>)}</tbody></table>
+      {equipmentRows.length === 0 && <div className="table-empty">
+        <strong>Оборудование ещё не добавлено</strong>
+      </div>}
+    </section>
+    <div className="dashboard-category-heading"><h4>Софтсвитчи</h4><span>Типизированные и исходные CDR</span></div>
+    <div className="dashboard-kpis">
+      <DashboardKPI label="Софтсвитчи"
+        value={`${softswitchTotals.activeSources} / ${softswitchTotals.totalSources}`}
+        detail="активно / всего" />
+      <DashboardKPI label="Вызовы" value={formatCount(softswitchTotals.calls)}
+        detail={`неуспешных ${formatCount(softswitchTotals.failed)}`}
+        tone={softswitchTotals.failed ? 'bad' : 'good'} />
+      <DashboardKPI label="ASR" value={formatPercent(softswitchTotals.calls, softswitchTotals.failed)}
+        detail="для типизированных CDR" />
+      <DashboardKPI label="Средний разговор"
+        value={formatDurationAverage(softswitchTotals.averageTalkMs)} />
+      <DashboardKPI label="CDR-файлы" value={formatCount(softswitchTotals.files)}
+        detail={formatBytes(softswitchTotals.bytes)} />
+    </div>
+    <section className="dashboard-panel fleet-panel">
+      <div className="panel-heading"><div><h4>Софтсвитчи</h4><span>Метрики за выбранный интервал</span></div></div>
+      <table><thead><tr><th>Софтсвитч</th><th>Шаблон / timezone</th><th>Статус</th>
+        <th>Вызовы</th><th>Успешные</th><th>Неуспешные</th><th>ASR</th>
+        <th>Средний разговор</th><th>CDR-файлы</th><th>Объём файлов</th>
+        <th>Последний CDR</th></tr></thead>
+        <tbody>{softswitchRows.map((row) => {
+          const typed = sourceCapabilities(row).typedCdr
+          return <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
+            <td><strong>{row.name}</strong><small>{row.model || 'Софтсвитч'}</small></td>
+            <td>{row.templateKey || '—'} / {row.timezone || 'UTC'}</td>
+            <td><span className={row.enabled ? 'healthy' : 'service-error'}>
+              {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
+            <td className="right">{typed ? formatCount(row.metrics.calls) : '—'}</td>
+            <td className="right">{typed
+              ? formatCount(Math.max(0, row.metrics.calls - row.metrics.failedCalls)) : '—'}</td>
+            <td className="right">{typed ? formatCount(row.metrics.failedCalls) : '—'}</td>
+            <td className="right">{typed
+              ? formatPercent(row.metrics.calls, row.metrics.failedCalls) : '—'}</td>
+            <td className="right">{typed ? formatDurationAverage(row.metrics.averageTalkMs) : '—'}</td>
+            <td className="right">{formatCount(row.fileMetrics?.files)}</td>
+            <td className="right">{formatBytes(row.fileMetrics?.bytes)}</td>
+            <td className="mono">{formatTime(row.fileMetrics?.latestAt || row.freshness.latestCdrAt, 'UTC')}</td>
+          </tr>
+        })}</tbody></table>
+      {softswitchRows.length === 0 && <div className="table-empty">
+        <strong>Софтсвитчи ещё не добавлены</strong>
+      </div>}
+    </section>
     <section className="dashboard-panel">
       <div className="panel-heading"><div><h4>Сервисы</h4>
         <span>{snapshot?.system?.version || 'Collector'}</span></div>
@@ -626,33 +791,6 @@ function DashboardPage({ devices, onSelectDevice }: {
             <i className={`status-dot ${healthy ? 'online' : ''}`} /> {name}
           </span>)}
       </div>
-    </section>
-    <section className="dashboard-panel fleet-panel">
-      <div className="panel-heading"><div><h4>Оборудование</h4><span>Метрики за выбранный интервал</span></div></div>
-      <table><thead><tr><th>Источник</th><th>Шаблон / timezone</th><th>Статус</th><th>Вызовы / файлы</th><th>Неуспешные</th>
-        <th>AntiFraud / reject</th><th>Аварии</th><th>Unknown</th><th>Последние данные</th>
-        <th>Revision</th></tr></thead>
-        <tbody>{(snapshot?.devices || []).map((row) => <tr key={row.id}
-          onClick={() => onSelectDevice(row.id)}>
-          <td><strong>{row.name}</strong><small>{row.model}</small></td>
-          <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}</td>
-          <td><span className={row.enabled ? 'healthy' : 'service-error'}>
-            {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
-          <td className="right">{sourceCapabilities(row).typedCdr
-            ? formatCount(row.metrics.calls)
-            : `${formatCount(row.fileMetrics?.files)} / ${formatBytes(row.fileMetrics?.bytes)}`}</td>
-          <td className="right">{sourceCapabilities(row).typedCdr
-            ? formatCount(row.metrics.failedCalls) : '—'}</td>
-          <td className="right">{sourceCapabilities(row).antifraud
-            ? `${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}` : '—'}</td>
-          <td className="right">{sourceCapabilities(row).syslog ? formatCount(row.metrics.alarms) : '—'}</td>
-          <td className="right">{sourceCapabilities(row).syslog ? formatCount(row.metrics.unknown) : '—'}</td>
-          <td className="mono">{formatTime(sourceCapabilities(row).syslog
-            ? row.freshness.latestSyslogAt : row.fileMetrics?.latestAt || row.freshness.latestCdrAt, 'UTC')}</td>
-          <td>{sourceCapabilities(row).syslog ? (row.revision.aligned ? 'aligned' : 'rebuild') : '—'}</td>
-        </tr>)}</tbody></table>
-      {snapshot && snapshot.devices.length === 0 &&
-        <div className="table-empty"><strong>Источники данных ещё не добавлены</strong></div>}
     </section>
   </section>
 }
@@ -668,6 +806,63 @@ function DashboardKPI({ label, value, detail, tone }: {
   </div>
 }
 
+function dashboardRows(
+  snapshot: DashboardSnapshot | null,
+  devices: Device[],
+  category: SourceCategory,
+) {
+  return (snapshot?.devices || []).map((row) => {
+    const source = devices.find((device) => device.id === row.id)
+    return {
+      ...row,
+      sourceCategory: row.sourceCategory || source?.sourceCategory,
+      templateKey: row.templateKey || source?.templateKey,
+      capabilities: row.capabilities || source?.capabilities,
+      metrics: row.metrics || {
+        calls: 0, failedCalls: 0, alarms: 0, unknown: 0, antifraud: 0, antifraudRejected: 0,
+      },
+      revision: row.revision || { aligned: true, status: '' },
+    }
+  }).filter((row) => sourceCategory(row) === category)
+}
+
+function dashboardCategoryTotals(
+  snapshot: DashboardSnapshot | null,
+  devices: Device[],
+  rows: DashboardDevice[],
+  category: SourceCategory,
+): Required<DashboardCategoryTotals> {
+  const apiTotals = snapshot?.categoryTotals?.[category] || snapshot?.totals?.[category] || {}
+  const sources = devices.filter((device) => sourceCategory(device) === category)
+  const fallback = rows.reduce((totals, row) => ({
+    calls: totals.calls + (sourceCapabilities(row).typedCdr ? row.metrics.calls || 0 : 0),
+    failed: totals.failed + (sourceCapabilities(row).typedCdr ? row.metrics.failedCalls || 0 : 0),
+    alarms: totals.alarms + (row.metrics.alarms || 0),
+    unknown: totals.unknown + (row.metrics.unknown || 0),
+    antifraud: totals.antifraud + (row.metrics.antifraud || 0),
+    rejects: totals.rejects + (row.metrics.antifraudRejected || 0),
+    files: totals.files + (row.fileMetrics?.files || 0),
+    bytes: totals.bytes + (row.fileMetrics?.bytes || 0),
+  }), { calls: 0, failed: 0, alarms: 0, unknown: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0 })
+  return {
+    activeSources: apiTotals.activeSources ?? sources.filter((source) => source.enabled).length,
+    totalSources: apiTotals.totalSources ?? sources.length,
+    calls: apiTotals.calls ?? fallback.calls,
+    failed: apiTotals.failed ?? fallback.failed,
+    averageTalkMs: apiTotals.averageTalkMs ?? 0,
+    alarms: apiTotals.alarms ?? fallback.alarms,
+    unknown: apiTotals.unknown ?? fallback.unknown,
+    antifraud: apiTotals.antifraud ?? fallback.antifraud,
+    rejects: apiTotals.rejects ?? fallback.rejects,
+    files: apiTotals.files ?? fallback.files,
+    bytes: apiTotals.bytes ?? fallback.bytes,
+  }
+}
+
+function formatDurationAverage(value?: number) {
+  return value ? `${(value / 1000).toFixed(1)} с` : '—'
+}
+
 function formatPercent(total?: number, failed?: number) {
   if (!total) return '—'
   return `${Math.max(0, ((total - (failed || 0)) / total) * 100).toFixed(1)}%`
@@ -680,7 +875,8 @@ function DeviceNavigation({ device, active, onChange }: {
 }) {
   const capabilities = sourceCapabilities(device)
   const items = sourceCategory(device) === 'softswitch'
-    ? [rawCdrNavigation]
+    ? sourceDatasets(device).map((dataset) =>
+      dataset === 'calls' ? navigation[0] : rawCdrNavigation)
     : navigation.filter((item) =>
       (item.id !== 'calls' || capabilities.typedCdr) &&
       (item.id !== 'antifraud' || capabilities.antifraud) &&
@@ -753,6 +949,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const [rows, setRows] = useState<DataRow[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
+  const [selectedSatelCall, setSelectedSatelCall] = useState<SatelCdrRow | null>(null)
   const [selectedAntifraud, setSelectedAntifraud] = useState<AntifraudRow | null>(null)
   const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null)
   const [stats, setStats] = useState<DeviceStats | null>(null)
@@ -763,6 +960,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const sentinelRef = useRef<HTMLDivElement>(null)
   const loadingRef = useRef(false)
   const generationRef = useRef(0)
+  const isSatel = device.templateKey === 'satel-rtu-cdr-v1'
+  const hasSyslog = sourceCapabilities(device).syslog
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const category = dataset === 'syslog_all' ? 'all' : dataset
   const exportDataset = dataset === 'calls' ? 'calls' : dataset === 'antifraud' ? 'antifraud' : 'events'
@@ -783,11 +982,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   }, [])
   useEffect(() => {
     api<DeviceStats>(`/devices/${device.id}/stats`).then(setStats).catch(() => setStats(null))
-    if (admin) {
+    if (admin && hasSyslog) {
       api<SyslogDiagnostics>(`/devices/${device.id}/syslog-diagnostics`)
         .then(setDiagnostics).catch(() => setDiagnostics(null))
     }
-  }, [admin, device.id])
+  }, [admin, device.id, hasSyslog])
   useEffect(() => {
     const generation = ++generationRef.current
     let active = true
@@ -855,12 +1054,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       <span><small>Вызовов, 24 ч</small><strong>{stats.calls24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Неуспешных</small><strong>{stats.failedCalls24h.toLocaleString('ru-RU')}</strong></span>
       <span><small>Средняя длительность</small><strong>{(stats.averageTalkMs / 1000).toFixed(1)} с</strong></span>
-      <span><small>Аварий, 24 ч</small><strong>{stats.alarms24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>RADIUS, 24 ч</small><strong>{stats.radius24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>AntiFraud, 24 ч</small><strong>{stats.antifraud24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>Reject, 24 ч</small><strong className={stats.antifraudRejected24h ? 'warning-text' : ''}>{stats.antifraudRejected24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>Без связи CDR</small><strong className={stats.unlinkedCalls24h ? 'warning-text' : ''}>{stats.unlinkedCalls24h.toLocaleString('ru-RU')}</strong></span>
-      <span><small>Нераспознано, 24 ч</small><strong className={stats.unknown24h ? 'warning-text' : ''}>{stats.unknown24h.toLocaleString('ru-RU')}</strong></span>
+      {!isSatel && <>
+        <span><small>Аварий, 24 ч</small><strong>{stats.alarms24h.toLocaleString('ru-RU')}</strong></span>
+        <span><small>RADIUS, 24 ч</small><strong>{stats.radius24h.toLocaleString('ru-RU')}</strong></span>
+        <span><small>AntiFraud, 24 ч</small><strong>{stats.antifraud24h.toLocaleString('ru-RU')}</strong></span>
+        <span><small>Reject, 24 ч</small><strong className={stats.antifraudRejected24h ? 'warning-text' : ''}>{stats.antifraudRejected24h.toLocaleString('ru-RU')}</strong></span>
+        <span><small>Без связи CDR</small><strong className={stats.unlinkedCalls24h ? 'warning-text' : ''}>{stats.unlinkedCalls24h.toLocaleString('ru-RU')}</strong></span>
+        <span><small>Нераспознано, 24 ч</small><strong className={stats.unknown24h ? 'warning-text' : ''}>{stats.unknown24h.toLocaleString('ru-RU')}</strong></span>
+      </>}
     </div>}
     {admin && diagnostics && <SyslogDiagnosticPanel value={diagnostics} />}
     <div className="toolbar">
@@ -873,8 +1074,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
-      {dataset === 'calls' ? <CallsTable rows={rows as CallRow[]}
-        timezone={activeDeviceTimezone(device)} onSelect={setSelectedCall} /> :
+      {dataset === 'calls' ? (isSatel
+        ? <SatelCallsTable rows={rows as SatelCdrRow[]}
+          timezone={activeDeviceTimezone(device)} onSelect={setSelectedSatelCall} />
+        : <CallsTable rows={rows as CallRow[]}
+          timezone={activeDeviceTimezone(device)} onSelect={setSelectedCall} />) :
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedAntifraud} />
@@ -887,6 +1091,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       </div>
     </div>
     {selectedCall && <CallDrawer device={device} call={selectedCall} onClose={() => setSelectedCall(null)} />}
+    {selectedSatelCall && <SatelCallDrawer call={selectedSatelCall}
+      timezone={activeDeviceTimezone(device)} onClose={() => setSelectedSatelCall(null)} />}
     {selectedAntifraud && <AntifraudDrawer device={device} row={selectedAntifraud}
       onClose={() => setSelectedAntifraud(null)} />}
     {selectedEvent && <EventDrawer event={selectedEvent} timezone={activeDeviceTimezone(device)}
@@ -1131,6 +1337,119 @@ function CallsTable({ rows, timezone, onSelect }: {
   </tr>)}</tbody></table>
 }
 
+function satelCallOutcome(row: SatelCdrRow): 'success' | 'failure' | 'warning' {
+  if (row.connectTime) return 'success'
+  const outcome = (row.outcome || '').toLowerCase()
+  if (['answered', 'answer', 'connected', 'success', 'completed'].includes(outcome)) return 'success'
+  if (outcome || row.disconnectTime) return 'failure'
+  return 'warning'
+}
+
+function formatSatelProtocols(row: SatelCdrRow) {
+  const configured = Array.isArray(row.protocols) ? row.protocols.join(' / ') : row.protocols
+  return configured || [row.inLegProto, row.outLegProto].filter(Boolean).join(' → ') || '—'
+}
+
+function SatelCallsTable({ rows, timezone, onSelect }: {
+  rows: SatelCdrRow[]
+  timezone: string
+  onSelect: (row: SatelCdrRow) => void
+}) {
+  return <table className="satel-cdr-table"><thead><tr>
+    <th>Установка</th><th>Соединение</th><th>Завершение</th><th>Результат</th><th>ANI вход</th><th>DNIS вход</th>
+    <th>ANI выход</th><th>DNIS выход</th><th>Src маршрут</th><th>Dst маршрут</th>
+    <th>DP маршрут</th><th>Длительность</th><th>Протоколы</th>
+    <th>Разъединение</th><th>Код</th><th>Узел</th>
+  </tr></thead><tbody>{rows.map((row) => {
+    const outcome = satelCallOutcome(row)
+    return <tr key={row.recordId} className={`outcome-row outcome-${outcome}`}
+      onClick={() => onSelect(row)}>
+      <td className="mono">{formatTime(row.setupTime, timezone)}</td>
+      <td className="mono">{formatTime(row.connectTime, timezone)}</td>
+      <td className="mono">{formatTime(row.disconnectTime, timezone)}</td>
+      <td><span className={`outcome-badge ${outcome}`}>{row.outcome || (row.connectTime ? 'answered' : 'failed')}</span></td>
+      <td className="mono">{row.inAni || '—'}</td><td className="mono">{row.inDnis || '—'}</td>
+      <td className="mono">{row.outAni || '—'}</td><td className="mono">{row.outDnis || '—'}</td>
+      <td>{row.srcName || '—'}</td><td>{row.dstName || '—'}</td><td>{row.dpName || '—'}</td>
+      <td className="right">{row.durationMs == null ? '—' : `${(row.durationMs / 1000).toFixed(3)} c`}</td>
+      <td>{formatSatelProtocols(row)}</td><td>{row.disconnectText || '—'}</td>
+      <td className="right">{row.disconnectCode ?? '—'}</td><td>{row.signalNodeName || row.sigNodeName || '—'}</td>
+    </tr>
+  })}</tbody></table>
+}
+
+function SatelCallDrawer({ call, timezone, onClose }: {
+  call: SatelCdrRow
+  timezone: string
+  onClose: () => void
+}) {
+  return <div className="drawer">
+    <div className="drawer-header"><div><h3>CDR Satel RTU</h3>
+      <span className="mono">{call.recordId}</span></div><button onClick={onClose}>×</button></div>
+    <div className="call-facts">
+      <span><small>Установка</small><strong>{formatTime(call.setupTime, timezone)}</strong></span>
+      <span><small>Соединение</small><strong>{formatTime(call.connectTime, timezone)}</strong></span>
+      <span><small>Завершение</small><strong>{formatTime(call.disconnectTime, timezone)}</strong></span>
+      <span><small>Результат</small><strong>{call.outcome || (call.connectTime ? 'answered' : 'failed')}</strong></span>
+      <span><small>Длительность</small><strong>{call.durationMs == null ? '—' : `${(call.durationMs / 1000).toFixed(3)} c`}</strong></span>
+      <span><small>Разъединение</small><strong>{call.disconnectText || '—'} · {call.disconnectCode ?? '—'}</strong></span>
+      <span><small>Инициатор</small><strong>{call.disconnectInitiator || '—'}</strong></span>
+      <span><small>Сигнальный узел</small><strong>{call.signalNodeName || call.sigNodeName || '—'}</strong></span>
+    </div>
+    <h4>Идентификаторы вызова</h4>
+    <div className="call-facts">
+      <span><small>External CDR ID</small><strong className="mono">{call.externalCdrId || call.cdrId || '—'}</strong></span>
+      <span><small>Call ID</small><strong className="mono">{call.callId || call.inLegCallId || '—'}</strong></span>
+      <span><small>Source Call ID</small><strong className="mono">{call.srcCallId || '—'}</strong></span>
+      <span><small>Destination Call ID</small><strong className="mono">{call.dstCallId || call.outLegCallId || '—'}</strong></span>
+      <span><small>Conference ID</small><strong className="mono">{call.confId || '—'}</strong></span>
+      <span><small>Протоколы</small><strong>{formatSatelProtocols(call)}</strong></span>
+    </div>
+    <h4>Номера и маршруты</h4>
+    <div className="call-facts">
+      <span><small>ANI: вход / выход</small><strong className="mono">{call.inAni || '—'} / {call.outAni || '—'}</strong></span>
+      <span><small>DNIS: вход / выход</small><strong className="mono">{call.inDnis || '—'} / {call.outDnis || '—'}</strong></span>
+      <span><small>Billing ANI / DNIS</small><strong className="mono">{call.billAni || '—'} / {call.billDnis || '—'}</strong></span>
+      <span><small>Src / Dst / DP</small><strong>{call.srcName || '—'} / {call.dstName || '—'} / {call.dpName || '—'}</strong></span>
+    </div>
+    <h4>Endpoints и codecs</h4>
+    <pre className="raw-payload">{JSON.stringify({
+      endpoints: call.endpoints || {
+        srcGatekeeper: call.srcGatekeeperAddress,
+        remoteSrcSignal: call.remoteSrcSigAddress,
+        remoteDstSignal: call.remoteDstSigAddress,
+        localSrcSignal: call.localSrcSigAddress,
+        localDstSignal: call.localDstSigAddress,
+        remoteSrcMedia: call.remoteSrcMediaAddress,
+        remoteDstMedia: call.remoteDstMediaAddress,
+        localSrcMedia: call.localSrcMediaAddress,
+        localDstMedia: call.localDstMediaAddress,
+      },
+      codecs: call.codecs || { incoming: call.inLegCodecs, outgoing: call.outLegCodecs },
+    }, null, 2)}</pre>
+    <h4>PDD / SCD и timing</h4>
+    <pre className="raw-payload">{JSON.stringify({
+      pdd: call.pdd ?? call.pddMs, scd: call.scd ?? call.scdMs, timing: call.timing || {
+        termElapsed: call.termElapsedTime, termSetup: call.termSetupTime,
+        termConnect: call.termConnectTime, termDisconnect: call.termDisconnectTime,
+        termPdd: call.termPdd, termScd: call.termScd,
+      },
+    }, null, 2)}</pre>
+    <h4>Качество медиа</h4>
+    <pre className="raw-payload">{JSON.stringify(call.media || {
+      srcBytesIn: call.srcMediaBytesIn, srcBytesOut: call.srcMediaBytesOut,
+      dstBytesIn: call.dstMediaBytesIn, dstBytesOut: call.dstMediaBytesOut,
+      srcPackets: call.srcMediaPackets, dstPackets: call.dstMediaPackets,
+      srcPacketsLate: call.srcMediaPacketsLate, dstPacketsLate: call.dstMediaPacketsLate,
+      srcPacketsLost: call.srcMediaPacketsLost, dstPacketsLost: call.dstMediaPacketsLost,
+      srcJitter: [call.srcMinJitter, call.srcMaxJitter],
+      dstJitter: [call.dstMinJitter, call.dstMaxJitter],
+    }, null, 2)}</pre>
+    <h4>Исходные поля</h4>
+    <pre className="raw-payload">{JSON.stringify(call.rawFields ?? {}, null, 2)}</pre>
+  </div>
+}
+
 function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; onClose: () => void }) {
   const [timeline, setTimeline] = useState<TimelineRow[]>([])
   useEffect(() => {
@@ -1301,7 +1620,7 @@ function CreateDeviceDialog({ category, templates, onClose, onCreated }: {
     <form className="device-form" onSubmit={submit}>
       <div className="form-grid">
         <label>Название<input autoFocus required value={form.name} onChange={(e) => update('name', e.target.value)} /></label>
-        <label>{isSoftswitch ? 'Шаблон приёма' : 'Оборудование'}
+        <label>{isSoftswitch ? 'Софтсвитч' : 'Оборудование'}
           <select required value={form.templateKey}
             onChange={(e) => updateTemplate(e.target.value)}>
             {options.map((item) => <option key={item.key} value={item.key}>{item.displayName}</option>)}
@@ -1444,8 +1763,8 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
       <div className="form-grid">
         <label>Название<input autoFocus required value={form.name}
           onChange={(e) => update('name', e.target.value)} /></label>
-        <label>{isSoftswitch ? 'Шаблон приёма' : 'Оборудование'}
-          <select required value={form.templateKey} disabled={isSoftswitch}
+        <label>{isSoftswitch ? 'Софтсвитч' : 'Оборудование'}
+          <select required value={form.templateKey}
             onChange={(e) => updateTemplate(e.target.value)}>
             {templateOptions.map((item) =>
               <option key={item.key} value={item.key}>{item.displayName}</option>)}

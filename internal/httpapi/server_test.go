@@ -78,6 +78,8 @@ func TestEquipmentTemplatesAPIUsesStableLabels(t *testing.T) {
 		`"key":"eltex-smg-1016m-3.23.2"`,
 		`"displayName":"Eltex SMG-1016M (3.23.2)"`,
 		`"key":"softswitch-cdr-raw-v1"`,
+		`"key":"satel-rtu-cdr-v1"`,
+		`"displayName":"Satel RTU"`,
 	} {
 		if !strings.Contains(body, value) {
 			t.Fatalf("template response missing %s: %s", value, body)

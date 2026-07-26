@@ -25,6 +25,8 @@ var retentionTables = map[string][]retentionTable{
 		{name: "cdr_records", timeExpr: "coalesce(setup_time, ingested_at)"},
 		{name: "cdr_time_interpretations", timeExpr: "interpreted_at"},
 		{name: "cdr_time_facts", timeExpr: "interpreted_at"},
+		{name: "satel_rtu_cdr", timeExpr: "coalesce(setup_time, cdr_date, ingested_at)"},
+		{name: "satel_rtu_cdr_time_facts", timeExpr: "interpreted_at"},
 	},
 	"derived": {
 		{name: "radius_events", timeExpr: "occurred_at"},

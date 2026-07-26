@@ -737,16 +737,25 @@ func (s *Store) RegisterIngestFile(
 }
 
 type IngestFileSummary struct {
-	ID           uuid.UUID  `json:"id"`
-	OriginalName string     `json:"originalName"`
-	SHA256       string     `json:"sha256"`
-	SizeBytes    int64      `json:"sizeBytes"`
-	Status       string     `json:"status"`
-	RowsTotal    uint64     `json:"rowsTotal"`
-	RowsValid    uint64     `json:"rowsValid"`
-	Error        string     `json:"error,omitempty"`
-	ReceivedAt   time.Time  `json:"receivedAt"`
-	ProcessedAt  *time.Time `json:"processedAt,omitempty"`
+	ID              uuid.UUID  `json:"id"`
+	OriginalName    string     `json:"originalName"`
+	SHA256          string     `json:"sha256"`
+	SizeBytes       int64      `json:"sizeBytes"`
+	Status          string     `json:"status"`
+	RowsTotal       uint64     `json:"rowsTotal"`
+	RowsValid       uint64     `json:"rowsValid"`
+	Error           string     `json:"error,omitempty"`
+	ParserTemplate  string     `json:"parserTemplate"`
+	ParserVersion   string     `json:"parserVersion"`
+	ReplayState     string     `json:"replayState"`
+	ReplayTemplate  string     `json:"replayTemplate,omitempty"`
+	ReplayVersion   string     `json:"replayVersion,omitempty"`
+	ReplayAttempts  uint32     `json:"replayAttempts"`
+	ReplayError     string     `json:"replayError,omitempty"`
+	ReceivedAt      time.Time  `json:"receivedAt"`
+	ProcessedAt     *time.Time `json:"processedAt,omitempty"`
+	ReplayRequested *time.Time `json:"replayRequestedAt,omitempty"`
+	ReplayCompleted *time.Time `json:"replayCompletedAt,omitempty"`
 }
 
 func (s *Store) ListRecentIngestFiles(ctx context.Context, deviceID uuid.UUID, limit int) ([]IngestFileSummary, error) {
@@ -754,7 +763,9 @@ func (s *Store) ListRecentIngestFiles(ctx context.Context, deviceID uuid.UUID, l
 		limit = 20
 	}
 	rows, err := s.DB.Query(ctx, `SELECT id,original_name,sha256,size_bytes,status,rows_total,rows_valid,
-		COALESCE(error,''),received_at,processed_at
+		COALESCE(error,''),parser_template,parser_version,replay_state,
+		COALESCE(replay_template,''),COALESCE(replay_version,''),replay_attempts,
+		COALESCE(replay_error,''),received_at,processed_at,replay_requested_at,replay_completed_at
 		FROM ingest_files WHERE device_id=$1
 		ORDER BY received_at DESC LIMIT $2`, deviceID, limit)
 	if err != nil {
@@ -767,7 +778,10 @@ func (s *Store) ListRecentIngestFiles(ctx context.Context, deviceID uuid.UUID, l
 		if err := rows.Scan(
 			&item.ID, &item.OriginalName, &item.SHA256, &item.SizeBytes,
 			&item.Status, &item.RowsTotal, &item.RowsValid,
-			&item.Error, &item.ReceivedAt, &item.ProcessedAt,
+			&item.Error, &item.ParserTemplate, &item.ParserVersion, &item.ReplayState,
+			&item.ReplayTemplate, &item.ReplayVersion, &item.ReplayAttempts,
+			&item.ReplayError, &item.ReceivedAt, &item.ProcessedAt,
+			&item.ReplayRequested, &item.ReplayCompleted,
 		); err != nil {
 			return nil, err
 		}
@@ -784,11 +798,16 @@ type IngestFileObject struct {
 func (s *Store) IngestFile(ctx context.Context, deviceID, fileID uuid.UUID) (IngestFileObject, error) {
 	var item IngestFileObject
 	err := s.DB.QueryRow(ctx, `SELECT id,original_name,sha256,size_bytes,status,
-		rows_total,rows_valid,COALESCE(error,''),received_at,processed_at,object_key
+		rows_total,rows_valid,COALESCE(error,''),parser_template,parser_version,replay_state,
+		COALESCE(replay_template,''),COALESCE(replay_version,''),replay_attempts,
+		COALESCE(replay_error,''),received_at,processed_at,replay_requested_at,replay_completed_at,
+		object_key
 		FROM ingest_files WHERE device_id=$1 AND id=$2`, deviceID, fileID).Scan(
 		&item.ID, &item.OriginalName, &item.SHA256, &item.SizeBytes, &item.Status,
-		&item.RowsTotal, &item.RowsValid, &item.Error, &item.ReceivedAt,
-		&item.ProcessedAt, &item.ObjectKey,
+		&item.RowsTotal, &item.RowsValid, &item.Error, &item.ParserTemplate,
+		&item.ParserVersion, &item.ReplayState, &item.ReplayTemplate,
+		&item.ReplayVersion, &item.ReplayAttempts, &item.ReplayError, &item.ReceivedAt,
+		&item.ProcessedAt, &item.ReplayRequested, &item.ReplayCompleted, &item.ObjectKey,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return IngestFileObject{}, ErrNotFound
@@ -826,6 +845,89 @@ func (s *Store) CompleteIngestFile(ctx context.Context, id uuid.UUID, status str
 	return err
 }
 
+func (s *Store) CompleteIngestFileWithParser(
+	ctx context.Context,
+	id uuid.UUID,
+	status string,
+	rowsTotal, rowsValid uint64,
+	message, parserTemplate, parserVersion string,
+) error {
+	_, err := s.DB.Exec(ctx, `UPDATE ingest_files
+		SET status=$2,rows_total=$3,rows_valid=$4,error=NULLIF($5,''),processed_at=now(),
+			parser_template=$6,parser_version=$7
+		WHERE id=$1`,
+		id, status, rowsTotal, rowsValid, message, parserTemplate, parserVersion)
+	return err
+}
+
+type IngestReplayClaim struct {
+	ID             uuid.UUID
+	DeviceID       uuid.UUID
+	ObjectKey      string
+	OriginalName   string
+	ReplayTemplate string
+	ReplayVersion  string
+	Attempts       uint32
+}
+
+func (s *Store) ClaimNextIngestReplay(ctx context.Context) (IngestReplayClaim, error) {
+	var claim IngestReplayClaim
+	err := s.DB.QueryRow(ctx, `WITH candidate AS
+		(
+			SELECT id FROM ingest_files
+			WHERE replay_state='pending'
+			   OR (replay_state='processing'
+			       AND replay_started_at < now()-interval '5 minutes')
+			ORDER BY replay_requested_at,id
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE ingest_files AS f
+		SET replay_state='processing',replay_started_at=now(),
+			replay_attempts=f.replay_attempts+1,replay_error=NULL
+		FROM candidate
+		WHERE f.id=candidate.id
+		RETURNING f.id,f.device_id,f.object_key,f.original_name,
+			f.replay_template,f.replay_version,f.replay_attempts`).
+		Scan(
+			&claim.ID, &claim.DeviceID, &claim.ObjectKey, &claim.OriginalName,
+			&claim.ReplayTemplate, &claim.ReplayVersion, &claim.Attempts,
+		)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return IngestReplayClaim{}, ErrNotFound
+	}
+	return claim, err
+}
+
+func (s *Store) RetryIngestReplay(
+	ctx context.Context, id uuid.UUID, replayErr error,
+) error {
+	message := "unknown replay error"
+	if replayErr != nil {
+		message = replayErr.Error()
+	}
+	_, err := s.DB.Exec(ctx, `UPDATE ingest_files
+		SET replay_state='pending',replay_started_at=NULL,replay_error=$2
+		WHERE id=$1 AND replay_state='processing'`, id, message)
+	return err
+}
+
+func (s *Store) CompleteIngestReplay(
+	ctx context.Context,
+	id uuid.UUID,
+	status string,
+	rowsTotal, rowsValid uint64,
+	message, parserTemplate, parserVersion string,
+) error {
+	_, err := s.DB.Exec(ctx, `UPDATE ingest_files
+		SET status=$2,rows_total=$3,rows_valid=$4,error=NULLIF($5,''),
+			processed_at=now(),parser_template=$6,parser_version=$7,
+			replay_state='complete',replay_completed_at=now(),replay_error=NULL
+		WHERE id=$1 AND replay_state='processing'`,
+		id, status, rowsTotal, rowsValid, message, parserTemplate, parserVersion)
+	return err
+}
+
 func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, remoteIP string) (Device, error) {
 	if strings.TrimSpace(input.Name) == "" {
 		return Device{}, errors.New("name is required")
@@ -851,7 +953,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		input.SyslogSourceIP = syslogSourceIP
 	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled ||
 		(input.AntifraudMode != "" && input.AntifraudMode != "OFF") {
-		return Device{}, errors.New("raw softswitch does not support syslog or AntiFraud/RADIUS")
+		return Device{}, errors.New("softswitch template does not support syslog or AntiFraud/RADIUS")
 	}
 	if input.ManagementIP != "" {
 		managementIP, valid := normalizeHostIP(input.ManagementIP)
@@ -862,7 +964,10 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	}
 	if template.Category == equipment.CategorySoftswitch {
 		input.Model = "Softswitch"
-		input.Firmware = "raw"
+		input.Firmware = template.Key
+		if template.Key == equipment.TemplateSoftswitchRawV1 {
+			input.Firmware = "raw"
+		}
 		input.ManagementIP = ""
 		input.DeviceSign = ""
 		input.AntifraudMode = "OFF"
@@ -946,6 +1051,8 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 func (s *Store) UpdateDevice(
 	ctx context.Context, id uuid.UUID, input DeviceUpdate, actor User, remoteIP string,
 ) (Device, error) {
+	release := s.LockDevicePurge(id)
+	defer release()
 	current, err := s.Device(ctx, id)
 	if err != nil {
 		return Device{}, err
@@ -983,7 +1090,7 @@ func (s *Store) UpdateDevice(
 		input.SyslogSourceIP = syslogSourceIP
 	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled ||
 		(input.AntifraudMode != "" && input.AntifraudMode != "OFF") {
-		return Device{}, errors.New("raw softswitch does not support syslog or AntiFraud/RADIUS")
+		return Device{}, errors.New("softswitch template does not support syslog or AntiFraud/RADIUS")
 	}
 	if _, err := time.LoadLocation(input.Timezone); err != nil {
 		return Device{}, fmt.Errorf("invalid IANA timezone %q", input.Timezone)
@@ -996,7 +1103,10 @@ func (s *Store) UpdateDevice(
 		input.ManagementIP = managementIP
 	}
 	if template.Category == equipment.CategorySoftswitch {
-		input.Firmware = "raw"
+		input.Firmware = template.Key
+		if template.Key == equipment.TemplateSoftswitchRawV1 {
+			input.Firmware = "raw"
+		}
 		input.ManagementIP = ""
 		input.DeviceSign = ""
 		input.AntifraudEnabled = false
@@ -1009,7 +1119,8 @@ func (s *Store) UpdateDevice(
 			input.Firmware = FirmwareScheme3232
 		}
 	}
-	activateTimezoneImmediately := !template.Capabilities.Syslog && !template.Capabilities.TypedCDR
+	activateTimezoneImmediately := template.Key == equipment.TemplateSatelRTUCDRV1 ||
+		(!template.Capabilities.Syslog && !template.Capabilities.TypedCDR)
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return Device{}, err
@@ -1049,6 +1160,18 @@ func (s *Store) UpdateDevice(
 	}
 	if err != nil {
 		return Device{}, err
+	}
+	if current.TemplateKey == equipment.TemplateSoftswitchRawV1 &&
+		template.Key == equipment.TemplateSatelRTUCDRV1 {
+		if _, err := tx.Exec(ctx, `UPDATE ingest_files
+			SET replay_state='pending',replay_template=$2,replay_version=$3,
+				replay_requested_at=now(),replay_started_at=NULL,replay_completed_at=NULL,
+				replay_attempts=0,replay_error=NULL
+			WHERE device_id=$1 AND object_key<>''`,
+			id, equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion,
+		); err != nil {
+			return Device{}, err
+		}
 	}
 	normalizeDeviceFirmware(&device)
 	details, _ := json.Marshal(map[string]any{

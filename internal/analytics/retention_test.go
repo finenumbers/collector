@@ -18,6 +18,17 @@ func TestRetentionRegistryIncludesSyslogHourly(t *testing.T) {
 	}
 }
 
+func TestRetentionRegistryIncludesSatelRTU(t *testing.T) {
+	foundRecords, foundTimes := false, false
+	for _, table := range retentionTables["cdr"] {
+		foundRecords = foundRecords || table.name == "satel_rtu_cdr"
+		foundTimes = foundTimes || table.name == "satel_rtu_cdr_time_facts"
+	}
+	if !foundRecords || !foundTimes {
+		t.Fatalf("Satel retention incomplete: records=%v times=%v", foundRecords, foundTimes)
+	}
+}
+
 func TestApplyRetentionRejectsUnsafeInputBeforeDatabaseAccess(t *testing.T) {
 	client := &Client{}
 	for _, days := range []int{0, 6, 1096} {

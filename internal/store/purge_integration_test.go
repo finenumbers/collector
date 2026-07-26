@@ -9,6 +9,13 @@ import (
 	"time"
 )
 
+func resetStoreIntegrationData(t *testing.T, ctx context.Context, control *Store) {
+	t.Helper()
+	if _, err := control.DB.Exec(ctx, `TRUNCATE TABLE users,devices CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDevicePurgeAndUserAdministrationPostgres(t *testing.T) {
 	databaseURL := os.Getenv("POSTGRES_TEST_URL")
 	if databaseURL == "" {
@@ -24,6 +31,7 @@ func TestDevicePurgeAndUserAdministrationPostgres(t *testing.T) {
 	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
 		t.Fatal(err)
 	}
+	resetStoreIntegrationData(t, ctx, control)
 	admin, err := control.CreateInitialAdmin(ctx, "purge-admin", "test-password-123")
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +100,7 @@ func TestClaimIngestFileRetriesFailedLedger(t *testing.T) {
 	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
 		t.Fatal(err)
 	}
+	resetStoreIntegrationData(t, ctx, control)
 	admin, err := control.CreateInitialAdmin(ctx, "cdr-retry-admin", "test-password-123")
 	if err != nil {
 		t.Fatal(err)

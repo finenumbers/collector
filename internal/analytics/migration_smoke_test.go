@@ -28,8 +28,8 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 13 {
-		t.Fatalf("got %d applied migrations, want 13", applied)
+	if applied != 14 {
+		t.Fatalf("got %d applied migrations, want 14", applied)
 	}
 	var hourlyEngine, viewEngine string
 	if err := client.Conn.QueryRow(ctx, `SELECT engine FROM system.tables
@@ -45,5 +45,13 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 	}
 	if viewEngine != "MaterializedView" {
 		t.Fatalf("syslog_hourly_mv engine is %s, want MaterializedView", viewEngine)
+	}
+	var satelEngine string
+	if err := client.Conn.QueryRow(ctx, `SELECT engine FROM system.tables
+		WHERE database='collector' AND name='satel_rtu_cdr'`).Scan(&satelEngine); err != nil {
+		t.Fatal(err)
+	}
+	if satelEngine != "ReplacingMergeTree" {
+		t.Fatalf("satel_rtu_cdr engine is %s, want ReplacingMergeTree", satelEngine)
 	}
 }

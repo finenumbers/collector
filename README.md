@@ -1,9 +1,10 @@
-# SMG Collector
+# Logs Collector
 
 [![CI](https://github.com/finenumbers/collector/actions/workflows/ci.yml/badge.svg)](https://github.com/finenumbers/collector/actions/workflows/ci.yml)
 [![GHCR](https://img.shields.io/badge/GHCR-ghcr.io%2Ffinenumbers%2Fcollector-blue)](https://github.com/finenumbers/collector/pkgs/container/collector)
 
-Внутренний сервис приёма, нормализации и аналитики CDR/Syslog цифровых транковых шлюзов Eltex SMG-1016M. Целевая версия прошивки — `3.410.0.7443`.
+Внутренний сервис приёма, нормализации и аналитики CDR/Syslog телеком-оборудования
+и софтсвитчей. Поддерживаются Eltex SMG-1016M и typed CDR Satel RTU.
 
 ## Реализовано
 
@@ -17,6 +18,8 @@
   собираются в пагинируемые protocol constructs с durable parent links, provenance
   exact/heuristic и полным raw drill-down;
 - приём CDR через SFTPGo FTP, неизменяемый raw-архив MinIO, UTF-8/Windows-1251 и динамический порядок колонок;
+- отдельный header-driven Satel RTU parser, versioned replay архивов из MinIO и
+  специализированная CDR projection/UI без смешивания с Eltex;
 - нормализация полного CDR, включая Acct-Session-Id, UniqueTag, SIP Call-ID, GCR, CIC и исходные поля;
 - stateful сборка RADIUS AntiFraud request/reply/accounting lifecycle с
   `check_call` Accept/Reject/timeout fail-open, server/latency/retry и completeness;

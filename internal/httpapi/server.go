@@ -276,6 +276,16 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	var calls, failed, alarms, unknown, antifraud, rejects, incomplete uint64
 	var weightedTalk float64
 	activeDevices := 0
+	type categoryAccumulator struct {
+		totalSources, activeSources      int
+		calls, failed, alarms, unknown   uint64
+		antifraud, rejects, files, bytes uint64
+		weightedTalk                     float64
+	}
+	categoryTotals := map[string]*categoryAccumulator{
+		equipment.CategoryEquipment:  {},
+		equipment.CategorySoftswitch: {},
+	}
 	for _, configured := range devices {
 		var metrics *analytics.DashboardDevice
 		var fileMetrics *store.IngestFileMetrics
@@ -284,7 +294,8 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			if metrics == nil {
 				metrics = &analytics.DashboardDevice{DeviceID: configured.ID}
 			}
-		} else {
+		}
+		if configured.SourceCategory == equipment.CategorySoftswitch {
 			ledger, ledgerErr := s.Store.DeviceIngestFileMetrics(request.Context(), configured.ID)
 			if ledgerErr != nil {
 				fleet.Diagnostics = append(fleet.Diagnostics, "ingest ledger: "+ledgerErr.Error())
@@ -295,6 +306,15 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		if configured.Enabled && configured.PurgeState == "active" {
 			activeDevices++
 		}
+		category := categoryTotals[configured.SourceCategory]
+		if category == nil {
+			category = &categoryAccumulator{}
+			categoryTotals[configured.SourceCategory] = category
+		}
+		category.totalSources++
+		if configured.Enabled && configured.PurgeState == "active" {
+			category.activeSources++
+		}
 		if metrics != nil {
 			calls += metrics.Calls
 			failed += metrics.FailedCalls
@@ -304,6 +324,17 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			rejects += metrics.AntifraudRejected
 			incomplete += metrics.AntifraudIncomplete
 			weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
+			category.calls += metrics.Calls
+			category.failed += metrics.FailedCalls
+			category.alarms += metrics.Alarms
+			category.unknown += metrics.Unknown
+			category.antifraud += metrics.Antifraud
+			category.rejects += metrics.AntifraudRejected
+			category.weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
+		}
+		if fileMetrics != nil {
+			category.files += fileMetrics.Files
+			category.bytes += fileMetrics.Bytes
 		}
 		var latestSyslogAt, latestCDRAt any
 		if metrics != nil {
@@ -339,6 +370,20 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	totals["calls"], totals["failed"], totals["averageTalkMs"] = calls, failed, averageTalk
 	totals["alarms"], totals["unknown"], totals["antifraud"] = alarms, unknown, antifraud
 	totals["rejects"], totals["incomplete"], totals["activeDevices"] = rejects, incomplete, activeDevices
+	categoryResponse := make(map[string]any, len(categoryTotals))
+	for name, category := range categoryTotals {
+		average := float64(0)
+		if category.calls > 0 {
+			average = category.weightedTalk / float64(category.calls)
+		}
+		categoryResponse[name] = map[string]any{
+			"totalSources": category.totalSources, "activeSources": category.activeSources,
+			"calls": category.calls, "failed": category.failed, "averageTalkMs": average,
+			"alarms": category.alarms, "unknown": category.unknown,
+			"antifraud": category.antifraud, "rejects": category.rejects,
+			"files": category.files, "bytes": category.bytes,
+		}
+	}
 
 	services := map[string]bool{"api": true}
 	serviceCtx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
@@ -369,7 +414,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		runtime = s.Metrics.Snapshot()
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"window": windowText, "totals": totals, "devices": rows,
+		"window": windowText, "totals": totals, "categoryTotals": categoryResponse, "devices": rows,
 		"system": map[string]any{
 			"version": s.Version, "services": services, "runtime": runtime,
 			"spoolDepth": spoolDepth, "natsStreamMessages": natsMessages,
@@ -548,7 +593,9 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	if (device.Capabilities.Syslog || device.Capabilities.TypedCDR) && s.Analytics != nil {
+	if (device.Capabilities.Syslog ||
+		(device.Capabilities.TypedCDR && device.TemplateKey != equipment.TemplateSatelRTUCDRV1)) &&
+		s.Analytics != nil {
 		if err := s.Analytics.ScheduleDeviceRebuild(
 			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
 		); err != nil {
@@ -611,16 +658,26 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	if (device.Capabilities.Syslog || device.Capabilities.TypedCDR) &&
-		device.TimezoneRevision != device.ActiveTimezoneRevision {
-		if err := s.Analytics.ScheduleDeviceRebuild(
+	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 &&
+		previous.Timezone != device.Timezone {
+		if err := s.Analytics.ReinterpretSatelRTUTimes(
 			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
 		); err != nil {
-			slog.Error("unable to schedule device timezone revision",
-				"device", device.ID, "revision", device.TimezoneRevision, "error", err)
 			writeError(writer, http.StatusInternalServerError,
-				"device saved; timezone rebuild could not be scheduled")
+				"device saved; Satel RTU timezone reparse failed")
 			return
+		}
+	} else if device.TimezoneRevision != device.ActiveTimezoneRevision {
+		if device.Capabilities.Syslog || device.Capabilities.TypedCDR {
+			if err := s.Analytics.ScheduleDeviceRebuild(
+				request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
+			); err != nil {
+				slog.Error("unable to schedule device timezone revision",
+					"device", device.ID, "revision", device.TimezoneRevision, "error", err)
+				writeError(writer, http.StatusInternalServerError,
+					"device saved; timezone rebuild could not be scheduled")
+				return
+			}
 		}
 	}
 	writeJSON(writer, http.StatusOK, device)
@@ -938,9 +995,10 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
 		return device.Capabilities.TypedCDR
-	}, "typed CDR calls") {
+	}, "typed CDR calls")
+	if !ok {
 		return
 	}
 	limit, _ := strconv.ParseUint(request.URL.Query().Get("limit"), 10, 64)
@@ -956,6 +1014,25 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		}
 		cursor = &analytics.CallCursor{SortTime: sortTime, RecordID: recordID}
 	}
+	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+		page, err := s.Analytics.ListSatelRTUCallsPage(
+			request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
+		)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "unable to query Satel RTU calls")
+			return
+		}
+		var nextCursor any
+		if page.HasMore && len(page.Items) > 0 {
+			last := page.Items[len(page.Items)-1]
+			nextCursor = map[string]any{"before": last.SortTime, "beforeId": last.RecordID}
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
+			"templateKey": device.TemplateKey,
+		})
+		return
+	}
 	page, err := s.Analytics.ListCallsPage(
 		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
 	)
@@ -970,6 +1047,7 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
+		"templateKey": device.TemplateKey,
 	})
 }
 
@@ -1022,12 +1100,19 @@ func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) 
 	if !ok {
 		return
 	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
 		return device.Capabilities.Syslog || device.Capabilities.TypedCDR
-	}, "analytics statistics") {
+	}, "analytics statistics")
+	if !ok {
 		return
 	}
-	stats, err := s.Analytics.Stats(request.Context(), deviceID)
+	var stats analytics.DeviceStats
+	var err error
+	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+		stats, err = s.Analytics.SatelRTUStats(request.Context(), deviceID)
+	} else {
+		stats, err = s.Analytics.Stats(request.Context(), deviceID)
+	}
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to query device statistics")
 		return
@@ -1139,14 +1224,19 @@ func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request)
 	if !ok {
 		return
 	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
 		return device.Capabilities.TypedCDR
-	}, "typed CDR calls") {
+	}, "typed CDR calls")
+	if !ok {
 		return
 	}
 	recordID, err := uuid.Parse(chi.URLParam(request, "recordID"))
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid record id")
+		return
+	}
+	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+		writeJSON(writer, http.StatusOK, map[string]any{"items": []analytics.TimelineRow{}})
 		return
 	}
 	rows, err := s.Analytics.CallTimeline(request.Context(), deviceID, recordID)
@@ -1227,22 +1317,85 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if dataset == "calls" {
-		rows, queryErr := s.Analytics.ListCalls(request.Context(), deviceID, search, 50000)
-		if queryErr != nil {
-			writeError(writer, http.StatusInternalServerError, "unable to export calls")
-			return
-		}
-		headers := []any{"Установка", "Входящий маршрут", "Исходящий маршрут", "Номер A вход", "Номер A выход",
-			"Номер B вход", "Номер B выход", "Длительность, мс", "Q.850", "Результат", "Acct-Session-Id", "UniqueTag"}
-		_ = stream.SetRow("A1", headers)
-		for index, row := range rows {
-			values := []any{
-				formatTimeInLocation(row.SetupTime, location),
-				row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
-				row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS, row.ReleaseCause,
-				row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag}
-			cell, _ := excelize.CoordinatesToCellName(1, index+2)
-			_ = stream.SetRow(cell, values)
+		if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+			rows, queryErr := s.Analytics.ListSatelRTUCalls(
+				request.Context(), deviceID, search, 50000,
+			)
+			if queryErr != nil {
+				writeError(writer, http.StatusInternalServerError, "unable to export Satel RTU calls")
+				return
+			}
+			headers := []any{
+				"CDR ID", "CDR date", "Setup", "Connect", "Disconnect", "Duration, ms", "Elapsed",
+				"Outcome", "In ANI", "In DNIS", "Out ANI", "Out DNIS", "Bill ANI",
+				"Bill DNIS", "Source", "Destination", "Dial plan", "In protocol",
+				"Out protocol", "In transport", "Out transport", "Conference ID",
+				"In Call-ID", "Out Call-ID", "Source in conference ID",
+				"Source in Call-ID", "Source out Call-ID", "Signal node", "Source gatekeeper",
+				"Remote source signal", "Remote destination signal", "Remote source media",
+				"Remote destination media", "Local source signal", "Local destination signal",
+				"Local source media", "Local destination media", "In codecs", "Out codecs",
+				"Disconnect code", "Disconnect text", "Disconnect success",
+				"Disconnect initiator", "PDD", "SCD", "Term elapsed", "Term setup",
+				"Term connect", "Term disconnect", "Term PDD", "Term SCD",
+				"Source bytes in", "Source bytes out", "Destination bytes in",
+				"Destination bytes out", "Source packets", "Destination packets",
+				"Source packets late", "Destination packets late", "Source packets lost",
+				"Destination packets lost", "Source min jitter", "Source max jitter",
+				"Destination min jitter", "Destination max jitter", "Record type", "Last CDR",
+				"Parser version", "Source timezone", "Raw fields",
+			}
+			_ = stream.SetRow("A1", headers)
+			for index, row := range rows {
+				raw, _ := json.Marshal(row.RawFields)
+				values := []any{
+					row.CDRID, formatTimeInLocation(row.CDRDate, location),
+					formatTimeInLocation(row.SetupTime, location),
+					formatTimeInLocation(row.ConnectTime, location),
+					formatTimeInLocation(row.DisconnectTime, location), row.DurationMS, row.ElapsedTime,
+					row.Outcome, row.InANI, row.InDNIS, row.OutANI, row.OutDNIS,
+					row.BillANI, row.BillDNIS, row.SrcName, row.DstName, row.DPName,
+					row.InLegProto, row.OutLegProto, row.InLegTransportProto,
+					row.OutLegTransportProto, row.ConfID, row.InLegCallID, row.OutLegCallID,
+					row.SrcInLegConfID, row.SrcInLegCallID, row.SrcOutLegCallID,
+					row.SignalNodeName, row.SrcGatekeeperAddress, row.RemoteSrcSigAddress,
+					row.RemoteDstSigAddress, row.RemoteSrcMediaAddress,
+					row.RemoteDstMediaAddress, row.LocalSrcSigAddress,
+					row.LocalDstSigAddress, row.LocalSrcMediaAddress,
+					row.LocalDstMediaAddress, row.InLegCodecs, row.OutLegCodecs,
+					row.DisconnectCode, row.DisconnectText, row.DisconnectSuccess,
+					row.DisconnectInitiator, row.PDD, row.SCD, row.TermElapsedTime,
+					formatTimeInLocation(row.TermSetupTime, location),
+					formatTimeInLocation(row.TermConnectTime, location),
+					formatTimeInLocation(row.TermDisconnectTime, location),
+					row.TermPDD, row.TermSCD, row.SrcMediaBytesIn, row.SrcMediaBytesOut,
+					row.DstMediaBytesIn, row.DstMediaBytesOut, row.SrcMediaPackets,
+					row.DstMediaPackets, row.SrcMediaPacketsLate, row.DstMediaPacketsLate,
+					row.SrcMediaPacketsLost, row.DstMediaPacketsLost, row.SrcMinJitter,
+					row.SrcMaxJitter, row.DstMinJitter, row.DstMaxJitter, row.RecordType,
+					row.LastCDR, row.ParserVersion, row.SourceTimezone, string(raw),
+				}
+				cell, _ := excelize.CoordinatesToCellName(1, index+2)
+				_ = stream.SetRow(cell, values)
+			}
+		} else {
+			rows, queryErr := s.Analytics.ListCalls(request.Context(), deviceID, search, 50000)
+			if queryErr != nil {
+				writeError(writer, http.StatusInternalServerError, "unable to export calls")
+				return
+			}
+			headers := []any{"Установка", "Входящий маршрут", "Исходящий маршрут", "Номер A вход", "Номер A выход",
+				"Номер B вход", "Номер B выход", "Длительность, мс", "Q.850", "Результат", "Acct-Session-Id", "UniqueTag"}
+			_ = stream.SetRow("A1", headers)
+			for index, row := range rows {
+				values := []any{
+					formatTimeInLocation(row.SetupTime, location),
+					row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
+					row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS, row.ReleaseCause,
+					row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag}
+				cell, _ := excelize.CoordinatesToCellName(1, index+2)
+				_ = stream.SetRow(cell, values)
+			}
 		}
 	} else if dataset == "antifraud" {
 		headers := []any{
@@ -1401,20 +1554,31 @@ func (s *Server) requireDeviceCapability(
 	supported func(store.Device) bool,
 	feature string,
 ) bool {
+	_, ok := s.deviceWithCapability(writer, request, deviceID, supported, feature)
+	return ok
+}
+
+func (s *Server) deviceWithCapability(
+	writer http.ResponseWriter,
+	request *http.Request,
+	deviceID uuid.UUID,
+	supported func(store.Device) bool,
+	feature string,
+) (store.Device, bool) {
 	device, err := s.Store.Device(request.Context(), deviceID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(writer, http.StatusNotFound, "device not found")
-		return false
+		return store.Device{}, false
 	}
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "unable to load device")
-		return false
+		return store.Device{}, false
 	}
 	if !supported(device) {
 		writeError(writer, http.StatusConflict, feature+" is not supported by this source template")
-		return false
+		return store.Device{}, false
 	}
-	return true
+	return device, true
 }
 
 func currentSession(request *http.Request) store.Session {

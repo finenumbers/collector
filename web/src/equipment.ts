@@ -1,4 +1,5 @@
 export type SourceCategory = 'equipment' | 'softswitch'
+export type SourceDataset = 'calls' | 'ingest_files'
 
 export type SourceCapabilities = {
   syslog: boolean
@@ -27,6 +28,12 @@ export const fallbackTemplates: EquipmentTemplate[] = [
     category: 'equipment',
     displayName: 'Eltex SMG-1016M (3.410)',
     capabilities: { syslog: true, typedCdr: true, rawCdr: true, antifraud: true, radius: true },
+  },
+  {
+    key: 'satel-rtu-cdr-v1',
+    category: 'softswitch',
+    displayName: 'Satel RTU',
+    capabilities: { syslog: false, typedCdr: true, rawCdr: true, antifraud: false, radius: false },
   },
   {
     key: 'softswitch-cdr-raw-v1',
@@ -70,4 +77,22 @@ export function sourceCapabilities(value: {
 
 export function templatesFor(items: EquipmentTemplate[], category: SourceCategory) {
   return items.filter((item) => item.category === category)
+}
+
+export function sourceDatasets(value: {
+  capabilities?: SourceCapabilities
+  templateKey?: string
+}): SourceDataset[] {
+  const capabilities = sourceCapabilities(value)
+  return [
+    ...(capabilities.typedCdr ? ['calls' as const] : []),
+    ...(capabilities.rawCdr ? ['ingest_files' as const] : []),
+  ]
+}
+
+export function defaultSourceDataset(value: {
+  capabilities?: SourceCapabilities
+  templateKey?: string
+}): SourceDataset {
+  return sourceDatasets(value)[0] || 'ingest_files'
 }

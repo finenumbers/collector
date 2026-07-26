@@ -49,19 +49,31 @@ flowchart LR
 `devices` остаётся общей таблицей источников и сохраняет все существующие FK. Поля
 `source_category` и `template_key` выбирают неизменяемый каталог шаблонов из кода:
 оборудование Eltex использует Syslog, typed CDR, raw archive и AntiFraud/RADIUS;
-`softswitch-cdr-raw-v1` использует только FTP и raw archive. Поле `firmware` сохранено
-для совместимости, но выбор pipeline выполняется только по `template_key`.
+`softswitch-cdr-raw-v1` использует только FTP и raw archive, а
+`satel-rtu-cdr-v1` — отдельный header-driven typed CDR pipeline без Syslog,
+RADIUS и AntiFraud. Поле `firmware` сохранено для совместимости, но выбор
+pipeline выполняется только по `template_key`.
 
 Raw-only файл проходит SHA-256 dedup, PostgreSQL ledger и MinIO, получает статус
 `archived`, после чего локальная копия удаляется. Decode, parser, ClickHouse и
 correlation для такого источника не запускаются. Исходник скачивается потоково через
 authenticated device-scoped API с записью в audit log.
 
+Satel RTU сначала также архивируется в MinIO, затем разбирается по именам 120 vendor
+полей в отдельную ClickHouse projection. Stable row key строится из
+`device_id + cdr_id`; наличие `connect_time`, а не vendor success flag, определяет
+answered outcome. При переводе raw-only источника на Satel RTU ledger ставит уже
+архивированные объекты в durable versioned replay, который повторно читает immutable
+MinIO object без повторной загрузки пользователем.
+
 ## Границы надёжности
 
 UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в ingress process. После этого datagram удаляется из ingress spool только после ACK основного Collector, а из app spool — только после JetStream acknowledgement. Один `event_id` проходит через оба spool; повторная передача безопасно перезаписывает BoltDB key, а `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.
 
-CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256` не импортируется повторно. Строка дедуплицируется по полному Eltex sequence number, но source file/row остаются в provenance.
+CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256`
+не импортируется повторно. Eltex-строка дедуплицируется по полному sequence number,
+Satel RTU — по vendor `cdr_id`; source file/row, parser template/version и raw field map
+остаются в provenance.
 
 Parser version `smg-3.410-v13` разделяет envelope (включая `CONFIG` без wall-clock),
 component-first classification и typed attributes, а фрагменты
@@ -86,6 +98,9 @@ timezone этого устройства. Оба потока переводят
 raw wall clock, source timezone и offset сохраняются отдельно, а UI показывает время SMG.
 Смена timezone создаёт shadow revision. После snapshot replay выполняется ограниченный
 cutover с фиксированным watermark, затем ClickHouse публикует новый read model.
+Satel RTU использует ту же IANA-семантику, но не зависит от Syslog read model:
+timezone активируется сразу, а сохранённые raw fields позволяют переинтерпретировать
+vendor timestamps в versioned time projection.
 
 Batch RADIUS assembler переносит Acct-Session-Id из любого fragment и ограничивает
 повторное использование call context временным occurrence. Новые Syslog/CDR факты

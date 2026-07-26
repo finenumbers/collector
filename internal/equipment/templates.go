@@ -12,6 +12,8 @@ const (
 	TemplateEltex3410       = "eltex-smg-1016m-3.410"
 	TemplateEltex3232       = "eltex-smg-1016m-3.23.2"
 	TemplateSoftswitchRawV1 = "softswitch-cdr-raw-v1"
+	TemplateSatelRTUCDRV1   = "satel-rtu-cdr-v1"
+	SatelRTUParserVersion   = "satel-rtu-cdr-v1"
 )
 
 type Capabilities struct {
@@ -49,6 +51,13 @@ var registry = map[string]Template{
 		DisplayName: "Софтсвитч — CDR без разбора",
 		Capabilities: Capabilities{
 			RawCDR: true,
+		},
+	},
+	TemplateSatelRTUCDRV1: {
+		Key: TemplateSatelRTUCDRV1, Category: CategorySoftswitch,
+		DisplayName: "Satel RTU",
+		Capabilities: Capabilities{
+			TypedCDR: true, RawCDR: true,
 		},
 	},
 }

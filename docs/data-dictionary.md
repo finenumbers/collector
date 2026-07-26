@@ -10,13 +10,15 @@ Collector поддерживает две схемы обработки прош
 `devices.source_category` принимает `equipment` или `softswitch`.
 `devices.template_key` является authoritative parser/archive contract; доступные
 шаблоны публикует `GET /api/equipment-templates`. Для оборудования используются
-`eltex-smg-1016m-3.410` и `eltex-smg-1016m-3.23.2`; временный
-`softswitch-cdr-raw-v1` архивирует файл без интерпретации.
+`eltex-smg-1016m-3.410` и `eltex-smg-1016m-3.23.2`;
+`softswitch-cdr-raw-v1` архивирует файл без интерпретации, а
+`satel-rtu-cdr-v1` (`Satel RTU`) включает отдельный typed CDR parser.
 
 `ingest_files` хранит device-scoped SHA-256, исходное имя, размер, MinIO object key,
-времена и состояние. `archived` означает, что raw-only объект надёжно записан в MinIO
-и не передавался в аналитический pipeline. Список и скачивание всегда проверяют
-одновременно `device_id` и `file_id`.
+времена, состояние и применённые parser template/version. `archived` означает, что
+raw-only объект надёжно записан в MinIO и не передавался в аналитический pipeline.
+При выборе typed template архивированные объекты ставятся в durable replay; список и
+скачивание всегда проверяют одновременно `device_id` и `file_id`.
 
 ## Время
 
@@ -74,6 +76,27 @@ quarantine. Исходная пара `имя → значение` всегда
 - SIP Call-ID относится к конкретному плечу и может меняться на B2BUA;
 - CIC/E1 быстро переиспользуются и не являются самостоятельными ключами;
 - NAI — Nature of Address Indicator: `0 spare`, `1 subscriber`, `2 unknown`, `3 national`, `4 international`.
+
+### Satel RTU
+
+Файл — UTF-8 CSV с разделителем `;`, quoting и строкой из 120 именованных колонок.
+Парсер сопоставляет значения по header name, поэтому перестановка и добавление полей
+не меняют схему. Duplicate/missing required header карантинирует файл; ошибка отдельной
+строки сохраняется в ledger, но не блокирует вставку остальных строк. Полный
+`raw_fields Map(String,String)` хранит исходные vendor значения.
+
+`satel_rtu_cdr` не смешивается с Eltex `cdr_records`. Projection содержит provenance,
+`cdr_id`, setup/connect/disconnect и term timestamps, ANI/DNIS/billing numbers,
+src/dst/dial-plan routes, signaling/media endpoints, protocol/transport, conference и
+call IDs, codecs, disconnect metadata, PDD/SCD, byte/packet/loss/jitter counters, LNP
+поля и record type. Canonical timestamps хранятся в UTC вместе с source timezone,
+offset и timezone revision.
+
+Outcome определяется только фактом корректного `connect_time`: строка answered при
+наличии connect и failed при его отсутствии. `disconnect_code_success` сохраняется как
+vendor metadata и не определяет успешность — например, SIP 487 может иметь значение
+`1`, хотя разговор не состоялся. Talk duration вычисляется как
+`disconnect_time - connect_time`; vendor `elapsed_time` хранится отдельно.
 
 ## Syslog envelope
 

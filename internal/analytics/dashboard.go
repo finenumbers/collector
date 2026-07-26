@@ -68,6 +68,36 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		}
 	}
 
+	rows, err = c.Conn.Query(ctx, `SELECT device_id,count(),countIf(outcome!='answered'),
+		ifNull(avgIf(duration_ms,outcome='answered'),0),max(ingested_at)
+		FROM collector.satel_rtu_cdr FINAL
+		WHERE ingested_at>=now()-toIntervalSecond(?)
+		GROUP BY device_id`, seconds)
+	if err != nil {
+		result.Diagnostics = append(result.Diagnostics, "satel_rtu_cdr: "+err.Error())
+	} else {
+		for rows.Next() {
+			var id uuid.UUID
+			var latest time.Time
+			item := DashboardDevice{}
+			if scanErr := rows.Scan(&id, &item.Calls, &item.FailedCalls,
+				&item.AverageTalkMS, &latest); scanErr != nil {
+				result.Diagnostics = append(result.Diagnostics, "satel_rtu_cdr: "+scanErr.Error())
+				break
+			}
+			target := device(id)
+			target.Calls += item.Calls
+			target.FailedCalls += item.FailedCalls
+			if target.Calls == item.Calls {
+				target.AverageTalkMS = item.AverageTalkMS
+			}
+			target.LatestCDRAt = &latest
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			result.Diagnostics = append(result.Diagnostics, "satel_rtu_cdr: "+closeErr.Error())
+		}
+	}
+
 	rows, err = c.Conn.Query(ctx, `SELECT i.device_id,countIf(i.category='alarms'),
 		countIf(i.category='unknown'),max(r.received_at)
 		FROM collector.syslog_interpretations AS i FINAL

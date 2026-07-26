@@ -46,8 +46,8 @@ button { color: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .auth-panel { width: 380px; padding: 28px; border: 1px solid var(--line); background: var(--panel); }
-.product-mark { display: flex; align-items: center; height: 52px; }
-.product-mark img { display: block; width: min(100%, 290px); height: 52px; object-fit: contain; object-position: left center; }
+.product-mark { display: flex; align-items: center; height: 52px; background: transparent; }
+.product-mark img { display: block; width: min(100%, 290px); height: 52px; object-fit: contain; object-position: left center; background: transparent; }
 .auth-panel h1 { margin: 22px 0 8px; font-size: 21px; }
 .auth-panel p { color: var(--muted); line-height: 1.5; font-size: 13px; margin: 0 0 20px; }
 label { display: flex; flex-direction: column; gap: 6px; color: #475467; font-size: 12px; margin-bottom: 13px; }
@@ -71,7 +71,7 @@ button:disabled { opacity: .55; cursor: wait; }
   background: #f8fafc; border-right: 1px solid var(--line); }
 .brand { height: 48px; display: flex; align-items: center; padding: 4px 12px;
   border-bottom: 1px solid var(--line); width: 100%; text-align: left; border-radius: 0; }
-.brand img { display: block; width: 100%; height: 38px; object-fit: contain; object-position: left center; }
+.brand img { display: block; width: 100%; height: 38px; object-fit: contain; object-position: left center; background: transparent; }
 .dashboard-nav { display: flex; align-items: center; gap: 8px; min-height: var(--control-height);
   margin: 7px; padding: 0 8px; color: #475467; text-align: left; }
 .dashboard-nav:hover { background: #eef2f7; }
@@ -120,6 +120,10 @@ main { min-width: 0; display: flex; flex-direction: column; background: var(--bg
 .page-heading h3 { margin: 0 0 4px; font-size: 17px; }
 .page-heading p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .dashboard-kpis { display: grid; grid-template-columns: repeat(4, minmax(145px, 1fr)); gap: 8px; }
+.dashboard-category-heading { display: flex; align-items: baseline; gap: 9px; margin: 16px 0 7px; }
+.dashboard-category-heading:first-of-type { margin-top: 0; }
+.dashboard-category-heading h4 { margin: 0; font-size: 13px; }
+.dashboard-category-heading span { color: var(--muted); font-size: 10px; }
 .dashboard-kpi { min-height: 86px; padding: 12px; border: 1px solid var(--line); background: var(--panel); }
 .dashboard-kpi small, .dashboard-kpi strong, .dashboard-kpi span { display: block; }
 .dashboard-kpi small { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
@@ -194,6 +198,7 @@ tbody tr { cursor: pointer; }
 .parse-status.archived { color: #146c43; background: #e3f5eb; }
 .parse-status.incomplete, .parse-status.fragment { color: #975a00; background: #fff2d6; }
 .ingest-files-table { min-width: 920px; }
+.satel-cdr-table { min-width: 1540px; }
 .download-link { display: inline-flex; align-items: center; justify-content: center;
   color: var(--text); text-decoration: none; white-space: nowrap; }
 .decision { display: inline-block; padding: 2px 5px; border-radius: 2px; background: #eef2f7; color: #475467; white-space: nowrap; }

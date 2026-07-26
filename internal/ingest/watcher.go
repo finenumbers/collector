@@ -28,12 +28,18 @@ type CDRWatcher struct {
 	Root      string
 	Store     *store.Store
 	Analytics CDRAnalytics
-	Archive   *archive.Archive
+	Archive   CDRArchive
 	MinAge    time.Duration
+}
+
+type CDRArchive interface {
+	Put(context.Context, string, io.Reader, int64, string) error
+	OpenObject(context.Context, string) (archive.Object, error)
 }
 
 type CDRAnalytics interface {
 	InsertCDRBatch(context.Context, []analytics.CDRRecord) error
+	InsertSatelRTUBatch(context.Context, []analytics.SatelRTURecord) error
 }
 
 func (w *CDRWatcher) Run(ctx context.Context) error {
@@ -55,6 +61,9 @@ func (w *CDRWatcher) Run(ctx context.Context) error {
 }
 
 func (w *CDRWatcher) scan(ctx context.Context) error {
+	if err := w.drainIngestReplays(ctx, 100); err != nil {
+		slog.Error("CDR archive replay failed", "error", err)
+	}
 	entries, err := os.ReadDir(w.Root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -149,7 +158,10 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 			_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", 0, 0, err.Error())
 			return err
 		}
-		if err := w.Store.CompleteIngestFile(ctx, fileID, "archived", 0, 0, ""); err != nil {
+		if err := w.Store.CompleteIngestFileWithParser(
+			ctx, fileID, "archived", 0, 0, "",
+			template.Key, "raw-archive-v1",
+		); err != nil {
 			return err
 		}
 		return os.Remove(path)
@@ -168,31 +180,160 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		)
 		return fmt.Errorf("invalid active device timezone %q: %w", device.ActiveTimezone, err)
 	}
-	result, err := (CDRParser{
-		DeviceID: device.ID, FileID: fileID, Location: location,
-		TimezoneRevision:   uint64(device.ActiveTimezoneRevision),
-		ExpectedHeader:     CDRProfileForFirmware(device.Firmware),
-		ExpectedDeviceSign: device.DeviceSign,
-	}).Parse(bytes.NewReader(decoded))
-	if err != nil {
-		_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, err.Error())
-		// Keep the file for retry after device_sign / column profile corrections.
-		return fmt.Errorf("CDR parse failed: %w", err)
+	var rows, valid uint64
+	var parseErrors []error
+	switch template.Key {
+	case equipment.TemplateSatelRTUCDRV1:
+		result, parseErr := (SatelRTUCDRParser{
+			DeviceID: device.ID, FileID: fileID, Location: location,
+			TimezoneRevision: uint64(device.ActiveTimezoneRevision),
+		}).Parse(bytes.NewReader(decoded))
+		if parseErr != nil {
+			_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, parseErr.Error())
+			return fmt.Errorf("Satel RTU CDR parse failed: %w", parseErr)
+		}
+		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
+		err = insertSatelRTUForTemplate(ctx, template, w.Analytics, result.Records)
+	default:
+		result, parseErr := (CDRParser{
+			DeviceID: device.ID, FileID: fileID, Location: location,
+			TimezoneRevision:   uint64(device.ActiveTimezoneRevision),
+			ExpectedHeader:     CDRProfileForFirmware(device.Firmware),
+			ExpectedDeviceSign: device.DeviceSign,
+		}).Parse(bytes.NewReader(decoded))
+		if parseErr != nil {
+			_ = w.Store.CompleteIngestFile(ctx, fileID, "quarantined", 0, 0, parseErr.Error())
+			// Keep the file for retry after device_sign / column profile corrections.
+			return fmt.Errorf("CDR parse failed: %w", parseErr)
+		}
+		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
+		err = insertCDRForTemplate(ctx, template, w.Analytics, result.Records)
 	}
-	if err := insertCDRForTemplate(ctx, template, w.Analytics, result.Records); err != nil {
-		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", result.Rows, uint64(len(result.Records)), err.Error())
+	if err != nil {
+		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", rows, valid, err.Error())
 		return err
 	}
 	status := "processed"
 	message := ""
-	if len(result.Errors) > 0 {
+	if len(parseErrors) > 0 {
 		status = "quarantined"
-		message = summarizeErrors(result.Errors)
+		message = summarizeErrors(parseErrors)
 	}
-	if err := w.Store.CompleteIngestFile(ctx, fileID, status, result.Rows, uint64(len(result.Records)), message); err != nil {
+	parserVersion := "eltex-cdr-v1"
+	if template.Key == equipment.TemplateSatelRTUCDRV1 {
+		parserVersion = analytics.SatelRTUParserVersion
+	}
+	if err := w.Store.CompleteIngestFileWithParser(
+		ctx, fileID, status, rows, valid, message, template.Key, parserVersion,
+	); err != nil {
 		return err
 	}
 	return os.Remove(path)
+}
+
+func (w *CDRWatcher) drainIngestReplays(ctx context.Context, limit int) error {
+	if w.Store == nil || w.Archive == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	for range limit {
+		claim, err := w.Store.ClaimNextIngestReplay(ctx)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := w.processIngestReplay(ctx, claim); err != nil {
+			if retryErr := w.Store.RetryIngestReplay(ctx, claim.ID, err); retryErr != nil {
+				return fmt.Errorf("replay failed: %v; queue retry failed: %w", err, retryErr)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *CDRWatcher) processIngestReplay(
+	ctx context.Context, claim store.IngestReplayClaim,
+) error {
+	if claim.ReplayTemplate != equipment.TemplateSatelRTUCDRV1 ||
+		claim.ReplayVersion != analytics.SatelRTUParserVersion {
+		return fmt.Errorf(
+			"unsupported CDR replay target %q version %q",
+			claim.ReplayTemplate, claim.ReplayVersion,
+		)
+	}
+	release := w.Store.LockDeviceWrites(claim.DeviceID)
+	defer release()
+	device, err := w.Store.Device(ctx, claim.DeviceID)
+	if err != nil {
+		return err
+	}
+	if device.PurgeState != "active" {
+		return store.ErrDeviceDeleting
+	}
+	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 {
+		return fmt.Errorf("device template is %q, expected Satel RTU", device.TemplateKey)
+	}
+	object, err := w.Archive.OpenObject(ctx, claim.ObjectKey)
+	if err != nil {
+		return fmt.Errorf("open archived CDR: %w", err)
+	}
+	defer object.Reader.Close()
+	content, err := io.ReadAll(object.Reader)
+	if err != nil {
+		return fmt.Errorf("read archived CDR: %w", err)
+	}
+	decoded, err := decodeCDR(content)
+	if err != nil {
+		return w.completeTerminalReplay(
+			ctx, claim, 0, 0, fmt.Errorf("CDR decode failed: %w", err),
+		)
+	}
+	location, err := time.LoadLocation(device.ActiveTimezone)
+	if err != nil {
+		return fmt.Errorf("invalid active device timezone %q: %w", device.ActiveTimezone, err)
+	}
+	result, parseErr := (SatelRTUCDRParser{
+		DeviceID: device.ID, FileID: claim.ID, Location: location,
+		TimezoneRevision: uint64(device.ActiveTimezoneRevision),
+	}).Parse(bytes.NewReader(decoded))
+	if parseErr != nil {
+		return w.completeTerminalReplay(ctx, claim, 0, 0, parseErr)
+	}
+	if w.Analytics == nil {
+		return errors.New("CDR analytics is unavailable")
+	}
+	if err := w.Analytics.InsertSatelRTUBatch(ctx, result.Records); err != nil {
+		return err
+	}
+	status, message := "processed", ""
+	if len(result.Errors) > 0 {
+		status, message = "quarantined", summarizeErrors(result.Errors)
+	}
+	return w.Store.CompleteIngestReplay(
+		ctx, claim.ID, status, result.Rows, uint64(len(result.Records)), message,
+		equipment.TemplateSatelRTUCDRV1, analytics.SatelRTUParserVersion,
+	)
+}
+
+func (w *CDRWatcher) completeTerminalReplay(
+	ctx context.Context,
+	claim store.IngestReplayClaim,
+	rows, valid uint64,
+	replayErr error,
+) error {
+	message := ""
+	if replayErr != nil {
+		message = replayErr.Error()
+	}
+	return w.Store.CompleteIngestReplay(
+		ctx, claim.ID, "quarantined", rows, valid, message,
+		equipment.TemplateSatelRTUCDRV1, analytics.SatelRTUParserVersion,
+	)
 }
 
 func insertCDRForTemplate(
@@ -205,6 +346,21 @@ func insertCDRForTemplate(
 		return errors.New("CDR analytics is unavailable")
 	}
 	return client.InsertCDRBatch(ctx, records)
+}
+
+func insertSatelRTUForTemplate(
+	ctx context.Context,
+	template equipment.Template,
+	client CDRAnalytics,
+	records []analytics.SatelRTURecord,
+) error {
+	if template.Key != equipment.TemplateSatelRTUCDRV1 {
+		return fmt.Errorf("template %q is not a Satel RTU template", template.Key)
+	}
+	if client == nil {
+		return errors.New("CDR analytics is unavailable")
+	}
+	return client.InsertSatelRTUBatch(ctx, records)
 }
 
 func decodeCDR(content []byte) ([]byte, error) {

@@ -10,6 +10,7 @@ import {
   retentionDescription, retentionLabel,
 } from './settings'
 import { antifraudOutcome, cdrOutcome, outcomeLabel } from './outcomes'
+import { readModelNotice } from './readModelNotice'
 import {
   defaultSourceDataset, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
   sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
@@ -44,6 +45,7 @@ type DashboardDevice = {
   model: string
   firmware: string
   timezone: string
+  activeTimezone: string
   enabled: boolean
   metrics: {
     calls: number
@@ -55,7 +57,14 @@ type DashboardDevice = {
     antifraudRejected: number
   }
   freshness: { latestSyslogAt?: string; latestCdrAt?: string }
-  revision: { aligned: boolean; status: string }
+  revision: {
+    configured: number
+    active: number
+    building: number
+    aligned: boolean
+    status: string
+    reason?: 'initial_build' | 'timezone_change' | string
+  }
   sourceCategory?: SourceCategory
   templateKey?: string
   capabilities?: SourceCapabilities
@@ -186,9 +195,11 @@ type SyslogDiagnostics = {
   correlationComposite: number
   correlationAmbiguous: number
   activeRevision: number
+  activeRevisionTimezone: string
   buildingRevision: number
   revisionTimezone: string
   revisionStatus: string
+  revisionReason?: 'initial_build' | 'timezone_change' | string
   replayProcessed: number
   replayTotal: number
   cdrReplayProcessed: number
@@ -728,10 +739,11 @@ function DashboardPage({ devices, onSelectDevice }: {
       <div className="panel-heading"><div><h4>Оборудование</h4><span>Метрики Eltex за выбранный интервал</span></div></div>
       <table><thead><tr><th>Оборудование</th><th>Шаблон / timezone</th><th>Статус</th>
         <th>Вызовы</th><th>Неуспешные</th><th>AntiFraud / reject</th><th>Аварии</th>
-        <th>Unknown</th><th>Последний Syslog</th><th>Revision</th></tr></thead>
+        <th>Unknown</th><th>Последний приём Syslog</th><th>Revision</th></tr></thead>
         <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
           <td><strong>{row.name}</strong><small>{row.model}</small></td>
-          <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}</td>
+          <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}
+            <small>Активный: {row.activeTimezone || row.timezone || 'UTC'}</small></td>
           <td><span className={row.enabled ? 'healthy' : 'service-error'}>
             {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
           <td className="right">{formatCount(row.metrics.calls)}</td>
@@ -739,7 +751,10 @@ function DashboardPage({ devices, onSelectDevice }: {
           <td className="right">{`${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}`}</td>
           <td className="right">{formatCount(row.metrics.alarms)}</td>
           <td className="right">{formatCount(row.metrics.unknown)}</td>
-          <td className="mono">{formatTime(row.freshness.latestSyslogAt, 'UTC')}</td>
+          <td className="mono">
+            {formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')}
+            <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
+          </td>
           <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
         </tr>)}</tbody></table>
       {equipmentRows.length === 0 && <div className="table-empty">
@@ -830,7 +845,9 @@ function dashboardRows(
       metrics: row.metrics || {
         calls: 0, failedCalls: 0, alarms: 0, unknown: 0, antifraud: 0, antifraudRejected: 0,
       },
-      revision: row.revision || { aligned: true, status: '' },
+      revision: row.revision || {
+        configured: 0, active: 0, building: 0, aligned: true, status: '',
+      },
     }
   }).filter((row) => sourceCategory(row) === category)
 }
@@ -1138,15 +1155,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   }, [hasMore, loadMore])
   const showRadiusEmpty = !loading && rows.length === 0 && dataset === 'radius'
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
+  const revisionNotice = readModelNotice(device, diagnostics)
   return <section className="data-view">
-    {diagnostics?.activeRevision === 0 && <div className="timezone-rebuild">
-      Инициализация оборудования: создаётся первый согласованный read model для Syslog, CDR,
-      RADIUS и AntiFraud. Приём данных продолжается, таблицы появятся после атомарной активации.
-    </div>}
-    {device.timezoneRevision !== device.activeTimezoneRevision && <div className="timezone-rebuild">
-      Часовой пояс {device.timezone} пересобирается в фоне. До атомарного переключения
-      показана активная ревизия {device.activeTimezoneRevision} ({activeDeviceTimezone(device)}).
-    </div>}
+    {revisionNotice && <div className="timezone-rebuild">{revisionNotice}</div>}
     {isSatel && dataset === 'calls' && <SatelPipelineNotice
       templateKey={device.templateKey}
       replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />}
@@ -1251,7 +1262,8 @@ function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
       <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
       <span>Active / building revision: <strong>{value.activeRevision || '—'} / {value.buildingRevision || '—'}</strong></span>
       <span>Read / ingest revision: <strong>{value.activeRevision || '—'} / {value.ingestRevision || '—'} · {value.revisionAligned ? 'aligned' : 'SPLIT'}</strong></span>
-      <span>Revision timezone / status: <strong>{value.revisionTimezone || '—'} / {value.revisionStatus || '—'}</strong></span>
+      <span>Active / building timezone: <strong>{value.activeRevisionTimezone || '—'} / {value.revisionTimezone || '—'}</strong></span>
+      <span>Revision status / reason: <strong>{value.revisionStatus || '—'} / {value.revisionReason || '—'}</strong></span>
       <span>Replay Syslog: <strong>{formatCount(value.replayProcessed)} / {formatCount(value.replayTotal)}</strong></span>
       <span>Replay CDR: <strong>{formatCount(value.cdrReplayProcessed)} / {formatCount(value.cdrReplayTotal)}</strong></span>
       <span>CDR без time fact: <strong>{formatCount(value.missingCdrInterpretations)}</strong></span>

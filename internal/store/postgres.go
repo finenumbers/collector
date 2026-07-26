@@ -9,9 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -144,27 +141,6 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{DB: pool}, nil
-}
-
-func (s *Store) Migrate(ctx context.Context, directory string) error {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return err
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sql" {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(directory, entry.Name()))
-		if err != nil {
-			return err
-		}
-		if _, err := s.DB.Exec(ctx, string(content)); err != nil {
-			return fmt.Errorf("%s: %w", entry.Name(), err)
-		}
-	}
-	return nil
 }
 
 func (s *Store) IsBootstrapped(ctx context.Context) (bool, error) {

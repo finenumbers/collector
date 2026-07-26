@@ -116,9 +116,11 @@ type SyslogDiagnostics struct {
 	CorrelationComposite uint64               `json:"correlationComposite"`
 	CorrelationAmbiguous uint64               `json:"correlationAmbiguous"`
 	ActiveRevision       uint64               `json:"activeRevision"`
+	ActiveTimezone       string               `json:"activeTimezone"`
 	BuildingRevision     uint64               `json:"buildingRevision"`
 	RevisionTimezone     string               `json:"revisionTimezone"`
 	RevisionStatus       string               `json:"revisionStatus"`
+	RevisionReason       string               `json:"revisionReason"`
 	ReplayProcessed      uint64               `json:"replayProcessed"`
 	ReplayTotal          uint64               `json:"replayTotal"`
 	CDRReplayProcessed   uint64               `json:"cdrReplayProcessed"`
@@ -785,12 +787,13 @@ func (c *Client) SyslogDiagnostics(ctx context.Context, deviceID uuid.UUID) (Sys
 		deviceID, SyslogParserVersion).
 		Scan(&result.CorrelationExact, &result.CorrelationComposite,
 			&result.CorrelationAmbiguous)
-	_ = c.Conn.QueryRow(ctx, `SELECT revision,timezone,status,processed,raw_total,
+	_ = c.Conn.QueryRow(ctx, `SELECT revision,timezone,status,reason,processed,raw_total,
 		cdr_processed,cdr_total
 		FROM collector.device_derived_revisions FINAL
 		WHERE device_id=? AND status IN ('building','cutover')
 		ORDER BY revision DESC LIMIT 1`, deviceID).
 		Scan(&result.BuildingRevision, &result.RevisionTimezone, &result.RevisionStatus,
+			&result.RevisionReason,
 			&result.ReplayProcessed, &result.ReplayTotal, &result.CDRReplayProcessed,
 			&result.CDRReplayTotal)
 	return result, nil

@@ -623,6 +623,11 @@ func (c *Client) currentDiagnostics(
 	result := SyslogDiagnostics{
 		Breakdown: make([]SyslogBreakdownRow, 0), ActiveRevision: revision,
 	}
+	activeTimezone, err := c.deviceRevisionTimezone(ctx, deviceID, revision)
+	if err != nil {
+		return result, err
+	}
+	result.ActiveTimezone = activeTimezone
 	rows, err := c.Conn.Query(ctx, `SELECT category,parse_status,count(),max(max_received_at)
 		FROM
 		(
@@ -664,19 +669,17 @@ func (c *Client) currentDiagnostics(
 		result.AppliedMigrations = append(result.AppliedMigrations, version)
 	}
 	migrationRows.Close()
-	_ = c.Conn.QueryRow(ctx, `SELECT revision,timezone,status,processed,raw_total,
+	_ = c.Conn.QueryRow(ctx, `SELECT revision,timezone,status,reason,processed,raw_total,
 		cdr_processed,cdr_total
 		FROM collector.device_derived_revisions FINAL
 		WHERE device_id=? AND status IN ('building','cutover')
 		ORDER BY revision DESC LIMIT 1`, deviceID).
 		Scan(&result.BuildingRevision, &result.RevisionTimezone, &result.RevisionStatus,
+			&result.RevisionReason,
 			&result.ReplayProcessed, &result.ReplayTotal, &result.CDRReplayProcessed,
 			&result.CDRReplayTotal)
 	if result.BuildingRevision == 0 {
-		result.RevisionTimezone, err = c.deviceRevisionTimezone(ctx, deviceID, revision)
-		if err != nil {
-			return result, err
-		}
+		result.RevisionTimezone = result.ActiveTimezone
 		result.RevisionStatus = "active"
 	}
 	if err := c.Conn.QueryRow(ctx, `SELECT

@@ -16,4 +16,4 @@ INNER JOIN
     FROM collector.custom_projection_state
     GROUP BY device_id, bucket_start
 ) AS state USING (device_id, bucket_start, snapshot_id)
-WHERE call.deleted = 0 AND state.marker = 'active';
+WHERE call.deleted = 0 AND state.marker = 'active'

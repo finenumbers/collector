@@ -185,7 +185,7 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		limit = 200
 	}
 	rows, err := c.Conn.Query(ctx, `SELECT c.record_id,
-		coalesce(t.setup_time,c.setup_time,c.ingested_at),
+		coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at),
 		c.duration_ms,c.bill_ani,c.bill_dnis,c.in_ani,c.in_dnis,c.out_ani,c.out_dnis,
 		c.out_leg_call_id,c.src_out_leg_call_id,c.src_in_leg_conf_id,c.in_leg_call_id,c.conf_id,c.cdr_id
 		FROM collector.satel_rtu_cdr AS c FINAL
@@ -195,10 +195,10 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 			ON link.device_id=c.device_id AND link.source_system=? AND link.source_record_id=c.record_id
 			AND link.policy_revision=?
 		WHERE c.device_id=?
-			AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=?
-			AND coalesce(t.setup_time,c.setup_time,c.ingested_at)<?
+			AND coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at)>=?
+			AND coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at)<?
 			AND (link.source_record_id IS NULL OR link.match_status IN ('pending','unmatched'))
-		ORDER BY coalesce(t.setup_time,c.setup_time,c.ingested_at) ASC
+		ORDER BY coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at) ASC
 		LIMIT ?`,
 		voipmonitor.SourceSatel, policyRevision, deviceID, from, to, limit)
 	if err != nil {

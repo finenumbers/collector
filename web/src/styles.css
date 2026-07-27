@@ -251,6 +251,9 @@ tbody tr { cursor: pointer; }
 .parse-status.expected, .parse-status.late { color: #975a00; background: #fff2d6; }
 .parse-status.missing, .parse-status.ambiguous { color: #b42318; background: #feeceb; }
 .parse-status.not_applicable, .parse-status.unmatched { color: #475467; background: #e9edf3; }
+.parse-status.radius-accept { color: #146c43; background: #e3f5eb; }
+.parse-status.radius-reject { color: #b42318; background: #feeceb; }
+.parse-status.radius-no_response { color: #475467; background: #e9edf3; }
 .scroll-sentinel { min-width: 1180px; min-height: 30px; display: grid; place-items: center; color: var(--muted); font-size: 10px; }
 .table-empty { width: min(620px, calc(100% - 40px)); margin: 28px auto; padding: 18px; border: 1px solid var(--line);
   background: #f8fafc; text-align: center; }

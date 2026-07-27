@@ -260,7 +260,7 @@ func (s *Server) renderAntifraudCSVZip(
 ) (exportworker.RenderResult, error) {
 	return renderCSVArchive(job, output, []string{
 		"Call ID", "Начало", "Завершение", "Acct-Session-Id", "H323 Conf ID",
-		"Номер A", "Номер B", "Фазы", "Статус", "Покрытие CDR", "CDR IDs",
+		"Номер A", "Номер B", "Фазы", "Статус", "Lifecycle", "Покрытие CDR", "CDR IDs",
 	}, func(writer *csv.Writer) (int64, error) {
 		var cursor *analytics.AntifraudCallCursor
 		if job.RawHighWatermark != nil {
@@ -286,11 +286,20 @@ func (s *Server) renderAntifraudCSVZip(
 				for _, id := range row.Coverage.LinkedCDRIDs {
 					cdrIDs = append(cdrIDs, id.String())
 				}
+				outcome := row.RadiusOutcome
+				switch outcome {
+				case "accept":
+					outcome = "Accept"
+				case "reject":
+					outcome = "Reject"
+				case "no_response":
+					outcome = "Нет ответа"
+				}
 				if err = writeCSVValues(writer,
 					row.CallID, formatTimeInLocation(&row.FirstSeenAt, location),
 					formatTimeInLocation(&row.LastSeenAt, location), row.AcctSessionID,
 					row.H323ConfID, row.Calling, row.Called, strings.Join(row.Phases, "|"),
-					row.Status, row.Coverage.State, strings.Join(cdrIDs, "|"),
+					outcome, row.Status, row.Coverage.State, strings.Join(cdrIDs, "|"),
 				); err != nil {
 					return total, err
 				}

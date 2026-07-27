@@ -333,6 +333,7 @@ type AntifraudRow = {
   calling: string
   called: string
   status: string
+  radiusOutcome?: string
   phases: string[]
   packetCount: number
   explanationCodes: string[]
@@ -1370,7 +1371,7 @@ function AntifraudTable({ rows, timezone, onSelect }: {
     <td className="mono">{row.called || '—'}</td>
     <td>{row.phases?.join(' → ') || '—'}</td>
     <td><ChainCompletenessBadge value={row.chainCompleteness} /></td>
-    <td><span className={`parse-status ${row.status}`}>{row.status}</span></td>
+    <td><RadiusOutcomeBadge outcome={row.radiusOutcome} lifecycle={row.status} /></td>
     <td className="right">{row.packetCount}</td>
     <td><CoverageBadge coverage={row.coverage} /></td>
     <td className="mono">{row.acctSessionId || '—'}</td>
@@ -1550,6 +1551,18 @@ function ChainCompletenessBadge({ value }: { value?: ChainCompleteness }) {
     ...(value?.notes || []),
   ].join('; ')
   return <span className={`parse-status ${state}`} title={title || undefined}>
+    {labels[state] || state}
+  </span>
+}
+
+function RadiusOutcomeBadge({ outcome, lifecycle }: { outcome?: string; lifecycle?: string }) {
+  const state = outcome || 'no_response'
+  const labels: Record<string, string> = {
+    accept: 'Accept', reject: 'Reject', no_response: 'Нет ответа',
+  }
+  const title = [lifecycle ? `lifecycle: ${lifecycle}` : '', outcome ? `radius: ${outcome}` : '']
+    .filter(Boolean).join('; ')
+  return <span className={`parse-status radius-${state}`} title={title || undefined}>
     {labels[state] || state}
   </span>
 }

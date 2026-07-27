@@ -163,22 +163,28 @@ type AntifraudExchange struct {
 }
 
 type CDRFacts struct {
-	RecordID            uuid.UUID  `json:"recordId"`
-	SetupTime           *time.Time `json:"setupTime,omitempty"`
-	ConnectTime         *time.Time `json:"connectTime,omitempty"`
-	DisconnectTime      *time.Time `json:"disconnectTime,omitempty"`
-	DurationMS          *uint64    `json:"durationMs,omitempty"`
-	ReleaseCause        *uint16    `json:"releaseCause,omitempty"`
-	ReleaseInfo         string     `json:"releaseInfo,omitempty"`
-	IncomingCgPN        string     `json:"incomingCgpn,omitempty"`
-	OutgoingCgPN        string     `json:"outgoingCgpn,omitempty"`
-	IncomingCdPN        string     `json:"incomingCdpn,omitempty"`
-	OutgoingCdPN        string     `json:"outgoingCdpn,omitempty"`
-	IncomingDescription string     `json:"incomingDescription,omitempty"`
-	OutgoingDescription string     `json:"outgoingDescription,omitempty"`
-	RadiusSessionID     string     `json:"radiusSessionId,omitempty"`
-	UniqueTag           string     `json:"uniqueTag,omitempty"`
-	SourceTimezone      string     `json:"sourceTimezone,omitempty"`
+	RecordID               uuid.UUID  `json:"recordId"`
+	SetupTime              *time.Time `json:"setupTime,omitempty"`
+	ConnectTime            *time.Time `json:"connectTime,omitempty"`
+	DisconnectTime         *time.Time `json:"disconnectTime,omitempty"`
+	DurationMS             *uint64    `json:"durationMs,omitempty"`
+	ReleaseCause           *uint16    `json:"releaseCause,omitempty"`
+	ReleaseInfo            string     `json:"releaseInfo,omitempty"`
+	IncomingCgPN           string     `json:"incomingCgpn,omitempty"`
+	OutgoingCgPN           string     `json:"outgoingCgpn,omitempty"`
+	IncomingCdPN           string     `json:"incomingCdpn,omitempty"`
+	OutgoingCdPN           string     `json:"outgoingCdpn,omitempty"`
+	IncomingDescription    string     `json:"incomingDescription,omitempty"`
+	OutgoingDescription    string     `json:"outgoingDescription,omitempty"`
+	RadiusSessionID        string     `json:"radiusSessionId,omitempty"`
+	UniqueTag              string     `json:"uniqueTag,omitempty"`
+	SourceTimezone         string     `json:"sourceTimezone,omitempty"`
+	VoipmonitorCDRID       string     `json:"voipmonitorCdrId,omitempty"`
+	VoipmonitorCallID      string     `json:"voipmonitorCallId,omitempty"`
+	VoipmonitorCardURL     string     `json:"voipmonitorCardUrl,omitempty"`
+	VoipmonitorMatchStatus string     `json:"voipmonitorMatchStatus,omitempty"`
+	VoipmonitorMatchMethod string     `json:"voipmonitorMatchMethod,omitempty"`
+	VoipmonitorMatchScore  uint8      `json:"voipmonitorMatchScore,omitempty"`
 }
 
 type AntifraudCallDetail struct {
@@ -614,7 +620,24 @@ func (c *Client) loadCDRFacts(
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	links, err := c.loadVoipmonitorLinkMap(ctx, deviceID, "eltex_smg", ids)
+	if err != nil {
+		return nil, err
+	}
+	for index := range result {
+		if link, ok := links[result[index].RecordID]; ok {
+			result[index].VoipmonitorCDRID = link.VoipmonitorCDRID
+			result[index].VoipmonitorCallID = link.VoipmonitorCallID
+			result[index].VoipmonitorCardURL = link.VoipmonitorCardURL
+			result[index].VoipmonitorMatchStatus = link.MatchStatus
+			result[index].VoipmonitorMatchMethod = link.MatchMethod
+			result[index].VoipmonitorMatchScore = link.MatchScore
+		}
+	}
+	return result, nil
 }
 
 func safeOrderedAttributes(raw string) []OrderedAttribute {

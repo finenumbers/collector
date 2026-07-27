@@ -131,6 +131,7 @@ type Device = {
   managementIp?: string
   deviceSign: string
   antifraudEnabled: boolean
+  voipmonitorEnabled: boolean
   ftpUsername: string
   ftpHome: string
   generatedPassword?: string
@@ -251,6 +252,12 @@ type CallRow = {
   sequenceNumber?: string
   bootEpoch?: string
   sequence?: number
+  voipmonitorCdrId?: string
+  voipmonitorCallId?: string
+  voipmonitorCardUrl?: string
+  voipmonitorMatchStatus?: string
+  voipmonitorMatchMethod?: string
+  voipmonitorMatchScore?: number
 }
 type SatelCdrRow = {
   recordId: string
@@ -388,6 +395,12 @@ type SatelCdrRow = {
   sourceUtcOffsetMinutes?: number
   setupTimeLocal?: string
   rawFields?: Record<string, unknown>
+  voipmonitorCdrId?: string
+  voipmonitorCallId?: string
+  voipmonitorCardUrl?: string
+  voipmonitorMatchStatus?: string
+  voipmonitorMatchMethod?: string
+  voipmonitorMatchScore?: number
 }
 type CoverageSummary = {
   state: 'matched' | 'expected' | 'late' | 'missing' | 'ambiguous' | 'not_applicable' |
@@ -1500,6 +1513,12 @@ function emptyCell(value: unknown): string {
   return String(value)
 }
 
+function VoipmonitorLink({ url, label }: { url?: string; label?: string }) {
+  if (!url) return '—'
+  return <a href={url} target="_blank" rel="noreferrer"
+    onClick={(event) => event.stopPropagation()}>{label || 'открыть'}</a>
+}
+
 function eltexCallCell(row: CallRow, column: CdrColumnDef, timezone: string): ReactNode {
   switch (column.key) {
     case 'setupTime':
@@ -1516,6 +1535,8 @@ function eltexCallCell(row: CallRow, column: CdrColumnDef, timezone: string): Re
           {outcomeLabel(cdrOutcome(row.releaseCause))}
         </span>{' '}{row.releaseInfo || '—'}
       </>
+    case 'voipmonitorCardUrl':
+      return <VoipmonitorLink url={row.voipmonitorCardUrl} label={row.voipmonitorCdrId} />
     default:
       return emptyCell((row as unknown as Record<string, unknown>)[column.key])
   }
@@ -1585,6 +1606,8 @@ function satelCallCell(row: SatelCdrRow, column: CdrColumnDef, timezone: string)
       return row.disconnectSuccess == null ? '—' : (row.disconnectSuccess ? 'да' : 'нет')
     case 'lastCdr':
       return row.lastCdr == null ? '—' : (row.lastCdr ? 'да' : 'нет')
+    case 'voipmonitorCardUrl':
+      return <VoipmonitorLink url={row.voipmonitorCardUrl} label={row.voipmonitorCdrId} />
     default:
       return emptyCell((row as unknown as Record<string, unknown>)[column.key])
   }
@@ -1628,6 +1651,9 @@ function SatelCallDrawer({ call, timezone, onClose }: {
       <span><small>Разъединение</small><strong>{call.disconnectText || '—'} · {call.disconnectCode ?? '—'}</strong></span>
       <span><small>Инициатор</small><strong>{call.disconnectInitiator || '—'}</strong></span>
       <span><small>Сигнальный узел</small><strong>{call.signalNodeName || call.sigNodeName || '—'}</strong></span>
+      <span><small>VoIPmonitor</small><strong>
+        <VoipmonitorLink url={call.voipmonitorCardUrl} label={call.voipmonitorCdrId} />
+      </strong></span>
     </div>
     <h4>Идентификаторы вызова</h4>
     <div className="call-facts">
@@ -1786,6 +1812,9 @@ function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
         <span><small>Acct-Session-Id</small><strong className="mono">{cdr.radiusSessionId || '—'}</strong></span>
         <span><small>Номер A</small><strong className="mono">{cdr.incomingCgpn || cdr.outgoingCgpn || '—'}</strong></span>
         <span><small>Номер B</small><strong className="mono">{cdr.incomingCdpn || cdr.outgoingCdpn || '—'}</strong></span>
+        <span><small>VoIPmonitor</small><strong>
+          <VoipmonitorLink url={cdr.voipmonitorCardUrl} label={cdr.voipmonitorCdrId} />
+        </strong></span>
       </div></>}
       {coverage && <div className="call-facts">
         <span><small>Покрытие AntiFraud</small><strong><CoverageBadge coverage={coverage} /></strong></span>
@@ -1915,9 +1944,17 @@ function antifraudSlimJSON(value: AntifraudCallDetail, cdr?: CallRow) {
 }
 
 function AntiFraudCallBody({ value, cdr }: { value: AntifraudCallDetail; cdr?: CallRow }) {
+  const linked = linkedCDRForTranscript(value, cdr)
+  const vmURL = cdr?.voipmonitorCardUrl || linked?.voipmonitorCardUrl || value.linkedCdrs?.[0]?.voipmonitorCardUrl
+  const vmLabel = cdr?.voipmonitorCdrId || linked?.voipmonitorCdrId || value.linkedCdrs?.[0]?.voipmonitorCdrId
   return <section aria-label="Полный цикл AntiFraud">
     <h4>Цепочка AntiFraud</h4>
     <pre className="raw-payload">{antifraudTranscript(value, cdr)}</pre>
+    {(vmURL || vmLabel) && <div className="call-facts">
+      <span><small>VoIPmonitor</small><strong>
+        <VoipmonitorLink url={vmURL} label={vmLabel} />
+      </strong></span>
+    </div>}
     <h4>AntiFraud JSON</h4>
     <pre className="raw-payload">{JSON.stringify(antifraudSlimJSON(value, cdr), null, 2)}</pre>
   </section>
@@ -1987,7 +2024,7 @@ function CreateDeviceDialog({ category, templates, onClose, onCreated }: {
     model: isSoftswitch ? '' : 'SMG-1016M',
     firmware: defaultTemplate.key.endsWith('3.410') ? '3.410' : isSoftswitch ? '' : '3.23.2',
     timezone: 'Asia/Novosibirsk', managementIp: '', syslogSourceIp: '', deviceSign: '',
-    antifraudEnabled: !isSoftswitch,
+    antifraudEnabled: !isSoftswitch, voipmonitorEnabled: false,
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -2006,6 +2043,7 @@ function CreateDeviceDialog({ category, templates, onClose, onCreated }: {
         ? {
           name: form.name, templateKey: form.templateKey,
           sourceCategory: form.sourceCategory, timezone: form.timezone,
+          voipmonitorEnabled: form.voipmonitorEnabled,
         }
         : form
       const device = await api<Device>('/devices', {
@@ -2038,7 +2076,12 @@ function CreateDeviceDialog({ category, templates, onClose, onCreated }: {
             value={form.syslogSourceIp} onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
           <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
             onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
+          <label className="checkbox-row"><input type="checkbox" checked={form.voipmonitorEnabled}
+            onChange={(e) => update('voipmonitorEnabled', e.target.checked)} /> Корреляция VoIPmonitor</label>
         </>}
+        {isSoftswitch && <label className="checkbox-row"><input type="checkbox"
+          checked={form.voipmonitorEnabled}
+          onChange={(e) => update('voipmonitorEnabled', e.target.checked)} /> Корреляция VoIPmonitor</label>}
       </div>
       {error && <div className="form-error">{error}</div>}
       <div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>Отмена</button>
@@ -2068,7 +2111,7 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
     timezone: device.timezone,
     managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp || '',
     deviceSign: device.deviceSign, antifraudEnabled: device.antifraudEnabled,
-    enabled: device.enabled,
+    voipmonitorEnabled: device.voipmonitorEnabled, enabled: device.enabled,
   })
   const [error, setError] = useState(device.purgeError || '')
   const [busy, setBusy] = useState(false)
@@ -2097,7 +2140,8 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
       const payload = isSoftswitch
         ? {
           name: form.name, templateKey: form.templateKey,
-          sourceCategory: form.sourceCategory, timezone: form.timezone, enabled: form.enabled,
+          sourceCategory: form.sourceCategory, timezone: form.timezone,
+          voipmonitorEnabled: form.voipmonitorEnabled, enabled: form.enabled,
         }
         : form
       onSaved(await api<Device>(`/devices/${device.id}`, {
@@ -2178,7 +2222,12 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
             onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
           <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
             onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
+          <label className="checkbox-row"><input type="checkbox" checked={form.voipmonitorEnabled}
+            onChange={(e) => update('voipmonitorEnabled', e.target.checked)} /> Корреляция VoIPmonitor</label>
         </>}
+        {isSoftswitch && <label className="checkbox-row"><input type="checkbox"
+          checked={form.voipmonitorEnabled}
+          onChange={(e) => update('voipmonitorEnabled', e.target.checked)} /> Корреляция VoIPmonitor</label>}
         <label className="checkbox-row"><input type="checkbox" checked={form.enabled}
           onChange={(e) => update('enabled', e.target.checked)} /> Приём данных включён</label>
       </div>

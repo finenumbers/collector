@@ -69,6 +69,12 @@ type CDRCoverageAnalytics interface {
 	) error
 }
 
+type VoipmonitorDirtyEnqueuer interface {
+	EnqueueVoipmonitorDirtyBuckets(
+		ctx context.Context, deviceID uuid.UUID, policyRevision uint64, buckets []time.Time, reason string,
+	) error
+}
+
 func (w *CDRWatcher) Run(ctx context.Context) error {
 	if w.MinAge == 0 {
 		w.MinAge = 30 * time.Second
@@ -219,6 +225,9 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 		}
 		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
 		err = insertSatelRTUForTemplate(ctx, template, w.Analytics, result.Records)
+		if err == nil {
+			err = w.enqueueVoipmonitorBuckets(ctx, device.ID, satelRecordBuckets(result.Records))
+		}
 	default:
 		result, parseErr := (CDRParser{
 			DeviceID: device.ID, FileID: fileID, Location: location,
@@ -249,6 +258,9 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 					)
 				}
 			}
+		}
+		if err == nil {
+			err = w.enqueueVoipmonitorBuckets(ctx, device.ID, cdrRecordBuckets(result.Records))
 		}
 	}
 	if err != nil {
@@ -493,12 +505,59 @@ func cdrRecordBuckets(records []analytics.CDRRecord) []time.Time {
 		}
 		unique[eventTime.UTC().Truncate(time.Hour)] = struct{}{}
 	}
+	return sortedHourBuckets(unique)
+}
+
+func satelRecordBuckets(records []analytics.SatelRTURecord) []time.Time {
+	unique := make(map[time.Time]struct{})
+	for _, record := range records {
+		eventTime := record.IngestedAt
+		for _, candidate := range []*time.Time{
+			record.SetupTime, record.ConnectTime, record.DisconnectTime,
+		} {
+			if candidate != nil {
+				eventTime = *candidate
+				break
+			}
+		}
+		unique[eventTime.UTC().Truncate(time.Hour)] = struct{}{}
+	}
+	return sortedHourBuckets(unique)
+}
+
+func sortedHourBuckets(unique map[time.Time]struct{}) []time.Time {
 	result := make([]time.Time, 0, len(unique))
 	for bucket := range unique {
 		result = append(result, bucket)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Before(result[j]) })
 	return result
+}
+
+func (w *CDRWatcher) enqueueVoipmonitorBuckets(
+	ctx context.Context, deviceID uuid.UUID, buckets []time.Time,
+) error {
+	if w.Store == nil || len(buckets) == 0 {
+		return nil
+	}
+	enabled, revision, err := w.Store.VoipmonitorPolicy(ctx, deviceID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !enabled {
+		return nil
+	}
+	if enqueuer, ok := w.Analytics.(VoipmonitorDirtyEnqueuer); ok {
+		if err := enqueuer.EnqueueVoipmonitorDirtyBuckets(
+			ctx, deviceID, revision, buckets, "ingest",
+		); err != nil {
+			return err
+		}
+	}
+	return w.Store.EnqueueVoipmonitorBuckets(ctx, deviceID, revision, buckets)
 }
 
 func insertSatelRTUForTemplate(

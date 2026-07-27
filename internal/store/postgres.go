@@ -117,6 +117,7 @@ type Device struct {
 	SyslogSourceIP         string                 `json:"syslogSourceIp"`
 	DeviceSign             string                 `json:"deviceSign"`
 	AntifraudEnabled       bool                   `json:"antifraudEnabled"`
+	VoipmonitorEnabled     bool                   `json:"voipmonitorEnabled"`
 	FTPUsername            string                 `json:"ftpUsername"`
 	FTPHome                string                 `json:"ftpHome"`
 	Enabled                bool                   `json:"enabled"`
@@ -149,22 +150,24 @@ type NewDevice struct {
 	Firmware         string `json:"firmware"`
 	Timezone         string `json:"timezone"`
 	ManagementIP     string `json:"managementIp"`
-	SyslogSourceIP   string `json:"syslogSourceIp"`
-	DeviceSign       string `json:"deviceSign"`
-	AntifraudEnabled bool   `json:"antifraudEnabled"`
+	SyslogSourceIP     string `json:"syslogSourceIp"`
+	DeviceSign         string `json:"deviceSign"`
+	AntifraudEnabled   bool   `json:"antifraudEnabled"`
+	VoipmonitorEnabled bool   `json:"voipmonitorEnabled"`
 }
 
 type DeviceUpdate struct {
-	Name             string `json:"name"`
-	SourceCategory   string `json:"sourceCategory"`
-	TemplateKey      string `json:"templateKey"`
-	Firmware         string `json:"firmware"`
-	Timezone         string `json:"timezone"`
-	ManagementIP     string `json:"managementIp"`
-	SyslogSourceIP   string `json:"syslogSourceIp"`
-	DeviceSign       string `json:"deviceSign"`
-	AntifraudEnabled bool   `json:"antifraudEnabled"`
-	Enabled          bool   `json:"enabled"`
+	Name               string `json:"name"`
+	SourceCategory     string `json:"sourceCategory"`
+	TemplateKey        string `json:"templateKey"`
+	Firmware           string `json:"firmware"`
+	Timezone           string `json:"timezone"`
+	ManagementIP       string `json:"managementIp"`
+	SyslogSourceIP     string `json:"syslogSourceIp"`
+	DeviceSign         string `json:"deviceSign"`
+	AntifraudEnabled   bool   `json:"antifraudEnabled"`
+	VoipmonitorEnabled bool   `json:"voipmonitorEnabled"`
+	Enabled            bool   `json:"enabled"`
 }
 
 type Session struct {
@@ -584,8 +587,9 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 	rows, err := s.DB.Query(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,
-		ftp_username,ftp_home,enabled,purge_state,purge_error,detection_status,detection_template,
-		detection_fingerprint,detection_error,detection_checked_at,detection_last_file_at,created_at
+		COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,enabled,purge_state,purge_error,
+		detection_status,detection_template,detection_fingerprint,detection_error,detection_checked_at,
+		detection_last_file_at,created_at
 		FROM devices WHERE ($1='' OR source_category=$1) ORDER BY name`, category)
 	if err != nil {
 		return nil, err
@@ -598,7 +602,7 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 			&device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-			&device.AntifraudEnabled, &device.FTPUsername,
+			&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
 			&device.FTPHome, &device.Enabled, &device.PurgeState,
 			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -659,14 +663,15 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	err := s.DB.QueryRow(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,
-		ftp_username,ftp_home,enabled,purge_state,purge_error,detection_status,detection_template,
-		detection_fingerprint,detection_error,detection_checked_at,detection_last_file_at,created_at
+		COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,enabled,purge_state,purge_error,
+		detection_status,detection_template,detection_fingerprint,detection_error,detection_checked_at,
+		detection_last_file_at,created_at
 		FROM devices WHERE id=$1`, id).
 		Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
 			&device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-			&device.AntifraudEnabled, &device.FTPUsername,
+			&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
 			&device.FTPHome, &device.Enabled, &device.PurgeState,
 			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -1117,22 +1122,22 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	err = tx.QueryRow(ctx, `INSERT INTO devices
 		(id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,management_ip,syslog_source_ip,device_sign,
-		 antifraud_enabled,ftp_username,ftp_home)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$7,1,1,$7,NULLIF($8,'')::inet,NULLIF($9,'')::inet,$10,$11,$12,$13)
+		 antifraud_enabled,voipmonitor_enabled,ftp_username,ftp_home)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$7,1,1,$7,NULLIF($8,'')::inet,NULLIF($9,'')::inet,$10,$11,$12,$13,$14)
 		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
-		 COALESCE(device_sign,''),antifraud_enabled,ftp_username,ftp_home,
+		 COALESCE(device_sign,''),antifraud_enabled,COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,
 		 enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
 		 detection_error,detection_checked_at,detection_last_file_at,created_at`,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Model, input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign, input.AntifraudEnabled,
-		ftpUsername, ftpHome,
+		input.VoipmonitorEnabled, ftpUsername, ftpHome,
 	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
 		&device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-		&device.AntifraudEnabled, &device.FTPUsername,
+		&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
 		&device.FTPHome, &device.Enabled, &device.PurgeState,
 		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -1162,6 +1167,12 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO custom_reconciliation_jobs
 			(device_id,policy_revision,kind) VALUES($1,1,'discover')`, id); err != nil {
+			return Device{}, err
+		}
+	}
+	if device.VoipmonitorEnabled {
+		if _, err := tx.Exec(ctx, `INSERT INTO voipmonitor_match_jobs
+			(device_id,policy_revision,kind,generation) VALUES($1,1,'discover',1)`, id); err != nil {
 			return Device{}, err
 		}
 	}
@@ -1254,8 +1265,10 @@ func (s *Store) UpdateDevice(
 		return Device{}, err
 	}
 	var persistedAntifraudEnabled bool
-	if err := tx.QueryRow(ctx, `SELECT antifraud_enabled FROM devices WHERE id=$1 FOR UPDATE`, id).
-		Scan(&persistedAntifraudEnabled); err != nil {
+	var persistedVoipmonitorEnabled bool
+	if err := tx.QueryRow(ctx, `SELECT antifraud_enabled,COALESCE(voipmonitor_enabled,false)
+		FROM devices WHERE id=$1 FOR UPDATE`, id).
+		Scan(&persistedAntifraudEnabled, &persistedVoipmonitorEnabled); err != nil {
 		return Device{}, err
 	}
 	var device Device
@@ -1263,32 +1276,35 @@ func (s *Store) UpdateDevice(
 		name=$2,source_category=$3,template_key=$4,firmware=$5,
 		timezone_revision=CASE WHEN timezone IS DISTINCT FROM $6 THEN timezone_revision+1
 			ELSE timezone_revision END,
-		active_timezone=CASE WHEN $12 THEN $6 ELSE active_timezone END,
-		active_timezone_revision=CASE WHEN $12 AND timezone IS DISTINCT FROM $6
+		active_timezone=CASE WHEN $13 THEN $6 ELSE active_timezone END,
+		active_timezone_revision=CASE WHEN $13 AND timezone IS DISTINCT FROM $6
 			THEN timezone_revision+1
-			WHEN $12 THEN timezone_revision
+			WHEN $13 THEN timezone_revision
 			ELSE active_timezone_revision END,
 		timezone=$6,cdr_source_timezone=$6,management_ip=NULLIF($7,'')::inet,
 		syslog_source_ip=NULLIF($8,'')::inet,device_sign=$9,
 		antifraud_policy_revision=CASE WHEN antifraud_enabled IS DISTINCT FROM $10
 			THEN antifraud_policy_revision+1 ELSE antifraud_policy_revision END,
 		antifraud_enabled=$10,
-		enabled=$11
+		voipmonitor_policy_revision=CASE WHEN voipmonitor_enabled IS DISTINCT FROM $11
+			THEN voipmonitor_policy_revision+1 ELSE voipmonitor_policy_revision END,
+		voipmonitor_enabled=$11,
+		enabled=$12
 		WHERE id=$1 AND purge_state='active'
 		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 			active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
-			COALESCE(device_sign,''),antifraud_enabled,ftp_username,ftp_home,
+			COALESCE(device_sign,''),antifraud_enabled,COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,
 			enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
 			detection_error,detection_checked_at,detection_last_file_at,created_at`,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
-		input.AntifraudEnabled, input.Enabled, activateTimezoneImmediately,
+		input.AntifraudEnabled, input.VoipmonitorEnabled, input.Enabled, activateTimezoneImmediately,
 	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
 		&device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-		&device.AntifraudEnabled, &device.FTPUsername,
+		&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
 		&device.FTPHome, &device.Enabled, &device.PurgeState,
 		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -1351,6 +1367,33 @@ func (s *Store) UpdateDevice(
 		if device.AntifraudEnabled {
 			if _, err := tx.Exec(ctx, `INSERT INTO custom_reconciliation_jobs
 				(device_id,policy_revision,kind) VALUES($1,$2,'discover')`,
+				id, revision); err != nil {
+				return Device{}, err
+			}
+		}
+	}
+	if persistedVoipmonitorEnabled != device.VoipmonitorEnabled {
+		var revision uint64
+		if err := tx.QueryRow(ctx,
+			`SELECT voipmonitor_policy_revision FROM devices WHERE id=$1`, id,
+		).Scan(&revision); err != nil {
+			return Device{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE voipmonitor_match_jobs
+			SET status='cancelled',completed_at=now(),lease_expires_at=NULL,
+				worker_id=NULL,updated_at=now()
+			WHERE device_id=$1 AND status IN ('pending','running')`, id); err != nil {
+			return Device{}, err
+		}
+		if device.VoipmonitorEnabled {
+			if _, err := tx.Exec(ctx, `INSERT INTO voipmonitor_match_jobs
+				(device_id,policy_revision,kind,generation) VALUES($1,$2,'discover',1)
+				ON CONFLICT (device_id,policy_revision,kind,
+					(COALESCE(bucket_start, '-infinity'::timestamptz)))
+				DO UPDATE SET
+					generation=voipmonitor_match_jobs.generation+1,
+					status='pending',next_attempt_at=now(),completed_at=NULL,
+					last_error=NULL,updated_at=now()`,
 				id, revision); err != nil {
 				return Device{}, err
 			}

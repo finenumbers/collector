@@ -25,6 +25,7 @@ import (
 	"collector/internal/retention"
 	"collector/internal/spool"
 	"collector/internal/store"
+	"collector/internal/voipmonitor"
 
 	"github.com/nats-io/nats.go"
 )
@@ -248,6 +249,30 @@ func main() {
 		go func() {
 			if err := reconciliationWorker.Run(ctx); err != nil &&
 				!errors.Is(err, context.Canceled) {
+				errs <- err
+			}
+		}()
+	}
+	if runMaintenance && cfg.VoipmonitorEnabled {
+		vmWorker := &voipmonitor.Worker{
+			Store: warehouse, Queue: control,
+			Matcher: &voipmonitor.Matcher{
+				Client: &voipmonitor.Client{
+					BaseURL: cfg.VoipmonitorAPIURL, User: cfg.VoipmonitorUser,
+					Password: cfg.VoipmonitorPassword,
+				},
+				GUIBase:  cfg.VoipmonitorGUIURL,
+				CardTpl:  cfg.VoipmonitorCardURLTemplate,
+				TimeSkew: cfg.VoipmonitorTimeSkew,
+				MinScore: cfg.VoipmonitorMinScore,
+			},
+			Sleep:    cfg.VoipmonitorWorkerSleep,
+			Lease:    cfg.VoipmonitorLease,
+			Lookback: cfg.CustomProjectionLookback,
+			WorkerID: fmt.Sprintf("%s-%d-voipmonitor", hostname, os.Getpid()),
+		}
+		go func() {
+			if err := vmWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				errs <- err
 			}
 		}()

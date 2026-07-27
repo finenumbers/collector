@@ -60,6 +60,7 @@ export const ELTEX_CDR_COLUMNS: CdrColumnDef[] = [
   { key: 'sourceUtcOffsetMinutes', header: 'UTC offset', align: 'right' },
   { key: 'setupTimeLocal', header: 'Установка local', mono: true },
   { key: 'recordId', header: 'Record ID', mono: true },
+  { key: 'voipmonitorCardUrl', header: 'VoIPmonitor' },
 ]
 
 /** Canonical full Satel typed CDR columns (no rawFields). */
@@ -187,6 +188,7 @@ export const SATEL_CDR_COLUMNS: CdrColumnDef[] = [
   { key: 'sourceUtcOffsetMinutes', header: 'UTC offset', align: 'right' },
   { key: 'setupTimeLocal', header: 'Установка local', mono: true },
   { key: 'recordId', header: 'Record ID', mono: true },
+  { key: 'voipmonitorCardUrl', header: 'VoIPmonitor' },
 ]
 
 export const ELTEX_SUMMARY_KEYS = [
@@ -198,6 +200,7 @@ export const ELTEX_SUMMARY_KEYS = [
   'outgoingDescription',
   'durationMs',
   'releaseInfo',
+  'voipmonitorCardUrl',
 ]
 
 export const SATEL_SUMMARY_KEYS = [
@@ -210,6 +213,7 @@ export const SATEL_SUMMARY_KEYS = [
   'dpName',
   'durationMs',
   'disconnectText',
+  'voipmonitorCardUrl',
 ]
 
 export const CDR_PRESETS: CdrPreset[] = [

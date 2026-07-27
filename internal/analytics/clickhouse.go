@@ -85,6 +85,12 @@ type CallRow struct {
 	SetupTimeLocal                string     `json:"setupTimeLocal"`
 	SourceTimezone                string     `json:"sourceTimezone"`
 	SourceUTCOffsetMinutes        int16      `json:"sourceUtcOffsetMinutes,omitempty"`
+	VoipmonitorCDRID              string     `json:"voipmonitorCdrId,omitempty"`
+	VoipmonitorCallID             string     `json:"voipmonitorCallId,omitempty"`
+	VoipmonitorCardURL            string     `json:"voipmonitorCardUrl,omitempty"`
+	VoipmonitorMatchStatus        string     `json:"voipmonitorMatchStatus,omitempty"`
+	VoipmonitorMatchMethod        string     `json:"voipmonitorMatchMethod,omitempty"`
+	VoipmonitorMatchScore         uint8      `json:"voipmonitorMatchScore,omitempty"`
 	SortTime                      time.Time  `json:"-"`
 }
 
@@ -517,6 +523,9 @@ func (c *Client) ListCallsPageRange(
 	hasMore := uint64(len(result)) > limit
 	if hasMore {
 		result = result[:limit]
+	}
+	if err := c.AttachVoipmonitorToCallRows(ctx, deviceID, result); err != nil {
+		return CallPage{}, err
 	}
 	return CallPage{Items: result, HasMore: hasMore}, nil
 }

@@ -250,8 +250,14 @@ type SatelRTUCallRow struct {
 	ParserVersion           string            `json:"parserVersion"`
 	SourceTimezone          string            `json:"sourceTimezone"`
 	SourceUTCOffsetMinutes  int16             `json:"sourceUtcOffsetMinutes"`
-	SetupTimeLocal          string            `json:"setupTimeLocal"`
-	SortTime                time.Time         `json:"-"`
+	SetupTimeLocal           string            `json:"setupTimeLocal"`
+	VoipmonitorCDRID         string            `json:"voipmonitorCdrId,omitempty"`
+	VoipmonitorCallID        string            `json:"voipmonitorCallId,omitempty"`
+	VoipmonitorCardURL       string            `json:"voipmonitorCardUrl,omitempty"`
+	VoipmonitorMatchStatus   string            `json:"voipmonitorMatchStatus,omitempty"`
+	VoipmonitorMatchMethod   string            `json:"voipmonitorMatchMethod,omitempty"`
+	VoipmonitorMatchScore    uint8             `json:"voipmonitorMatchScore,omitempty"`
+	SortTime                 time.Time         `json:"-"`
 }
 
 type SatelRTUCallPage struct {
@@ -592,6 +598,9 @@ func (c *Client) listSatelRTUCallsPage(
 	hasMore := uint64(len(items)) > limit
 	if hasMore {
 		items = items[:limit]
+	}
+	if err := c.AttachVoipmonitorToSatelRows(ctx, deviceID, items); err != nil {
+		return SatelRTUCallPage{}, err
 	}
 	return SatelRTUCallPage{Items: items, HasMore: hasMore}, nil
 }

@@ -28,6 +28,7 @@ describe('CDR column presets', () => {
       'outgoingDescription',
       'durationMs',
       'releaseInfo',
+      'voipmonitorCardUrl',
     ])
   })
 
@@ -44,6 +45,7 @@ describe('CDR column presets', () => {
       'dpName',
       'durationMs',
       'disconnectText',
+      'voipmonitorCardUrl',
     ])
   })
 

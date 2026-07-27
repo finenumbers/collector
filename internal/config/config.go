@@ -52,6 +52,17 @@ type Config struct {
 	CoverageMissingTerminal        time.Duration
 	CoverageRetryHorizon           time.Duration
 	CoverageWorkerSleep            time.Duration
+	VoipmonitorEnabled             bool
+	VoipmonitorAPIURL              string
+	VoipmonitorUser                string
+	VoipmonitorPassword            string
+	VoipmonitorGUIURL              string
+	VoipmonitorCardURLTemplate     string
+	VoipmonitorTimeSkew            time.Duration
+	VoipmonitorWorkerSleep         time.Duration
+	VoipmonitorLease               time.Duration
+	VoipmonitorMinScore            int
+	VoipmonitorRateLimitPerSec     int
 	ClickHouseAdmissionCapacity    int
 	ExportPageSize                 int
 }
@@ -102,8 +113,20 @@ func Load() (Config, error) {
 		CoverageMissingTerminal:        envDuration("CDR_COVERAGE_MISSING_TERMINAL", 30*time.Minute),
 		CoverageRetryHorizon:           envDuration("CDR_COVERAGE_RETRY_HORIZON", 7*24*time.Hour),
 		CoverageWorkerSleep:            envDuration("CDR_COVERAGE_WORKER_SLEEP", 5*time.Second),
-		ClickHouseAdmissionCapacity:    envInt("CLICKHOUSE_ADMISSION_CAPACITY", 8),
-		ExportPageSize:                 envInt("EXPORT_PAGE_SIZE", 1000),
+		VoipmonitorEnabled:             envBool("VOIPMONITOR_ENABLED", false),
+		VoipmonitorAPIURL:              env("VOIPMONITOR_API_URL", ""),
+		VoipmonitorUser:                env("VOIPMONITOR_USER", ""),
+		VoipmonitorPassword:            env("VOIPMONITOR_PASSWORD", ""),
+		VoipmonitorGUIURL:              env("VOIPMONITOR_GUI_URL", ""),
+		VoipmonitorCardURLTemplate: env("VOIPMONITOR_CARD_URL_TEMPLATE",
+			`{gui_base}/admin.php?cdr_filter={fcallid:"{voipmonitor_call_id}"}`),
+		VoipmonitorTimeSkew:        envDuration("VOIPMONITOR_TIME_SKEW", 5*time.Second),
+		VoipmonitorWorkerSleep:     envDuration("VOIPMONITOR_WORKER_SLEEP", 5*time.Second),
+		VoipmonitorLease:           envDuration("VOIPMONITOR_LEASE", 2*time.Minute),
+		VoipmonitorMinScore:        envInt("VOIPMONITOR_MIN_SCORE", 60),
+		VoipmonitorRateLimitPerSec: envInt("VOIPMONITOR_RATE_LIMIT_PER_SEC", 5),
+		ClickHouseAdmissionCapacity: envInt("CLICKHOUSE_ADMISSION_CAPACITY", 8),
+		ExportPageSize:              envInt("EXPORT_PAGE_SIZE", 1000),
 	}
 	switch cfg.Role {
 	case "app", "ingress", "api-ingest", "export", "maintenance":

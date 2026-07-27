@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,20 +35,54 @@ type CoverageSummary struct {
 	UpdatedAt       *time.Time     `json:"updatedAt,omitempty"`
 }
 
+type ChainCompleteness struct {
+	State             string   `json:"state"`
+	MissingStages     []string `json:"missingStages,omitempty"`
+	MissingResponses  []string `json:"missingResponses,omitempty"`
+	Notes             []string `json:"notes,omitempty"`
+}
+
+type CallParticipants struct {
+	CallingNumber string `json:"callingNumber,omitempty"`
+	CalledNumber  string `json:"calledNumber,omitempty"`
+}
+
+type CallAccounting struct {
+	SetupTime      *time.Time `json:"setupTime,omitempty"`
+	ConnectTime    *time.Time `json:"connectTime,omitempty"`
+	DisconnectTime *time.Time `json:"disconnectTime,omitempty"`
+	DisconnectCause string    `json:"disconnectCause,omitempty"`
+	SessionTimeSec *int64     `json:"sessionTimeSec,omitempty"`
+	DelayTimeSec   *int64     `json:"delayTimeSec,omitempty"`
+}
+
+type TimelineEvent struct {
+	TS              time.Time  `json:"ts"`
+	Phase           string     `json:"phase"`
+	RadiusType      string     `json:"radiusType"`
+	XpgkRequestType string     `json:"xpgkRequestType,omitempty"`
+	AcctStatusType  string     `json:"acctStatusType,omitempty"`
+	Decision        string     `json:"decision,omitempty"`
+	Summary         string     `json:"summary"`
+	PacketID        uuid.UUID  `json:"packetId"`
+}
+
 type AntifraudCallRow struct {
-	CallID           uuid.UUID       `json:"callId"`
-	FirstSeenAt      time.Time       `json:"firstSeenAt"`
-	LastSeenAt       time.Time       `json:"lastSeenAt"`
-	AcctSessionID    string          `json:"acctSessionId"`
-	H323ConfID       string          `json:"h323ConfId"`
-	Calling          string          `json:"calling"`
-	Called           string          `json:"called"`
-	Status           string          `json:"status"`
-	Phases           []string        `json:"phases"`
-	PacketCount      uint64          `json:"packetCount"`
-	ExplanationCodes []string        `json:"explanationCodes"`
-	Coverage         CoverageSummary `json:"coverage"`
-	SortTime         time.Time       `json:"-"`
+	CallID             uuid.UUID          `json:"callId"`
+	FirstSeenAt        time.Time          `json:"firstSeenAt"`
+	LastSeenAt         time.Time          `json:"lastSeenAt"`
+	AcctSessionID      string             `json:"acctSessionId"`
+	H323ConfID         string             `json:"h323ConfId"`
+	Calling            string             `json:"calling"`
+	Called             string             `json:"called"`
+	Status             string             `json:"status"`
+	Phases             []string           `json:"phases"`
+	PacketCount        uint64             `json:"packetCount"`
+	ExplanationCodes   []string           `json:"explanationCodes"`
+	Coverage           CoverageSummary    `json:"coverage"`
+	ChainCompleteness  ChainCompleteness  `json:"chainCompleteness"`
+	SortTime           time.Time          `json:"-"`
+	storedCoverageState string            `json:"-"`
 }
 
 type AntifraudCallCursor struct {
@@ -128,6 +163,10 @@ type AntifraudCallDetail struct {
 	AntifraudCallRow
 	SnapshotID             uuid.UUID           `json:"-"`
 	ContractKey            string              `json:"-"`
+	Participants           CallParticipants    `json:"participants"`
+	FinalDecision          string              `json:"finalDecision,omitempty"`
+	Timeline               []TimelineEvent     `json:"timeline"`
+	Accounting             CallAccounting      `json:"accounting"`
 	AccountingStart        *time.Time          `json:"accountingStart,omitempty"`
 	AccountingStop         *time.Time          `json:"accountingStop,omitempty"`
 	SessionDurationSeconds *int64              `json:"sessionDurationSeconds,omitempty"`
@@ -135,6 +174,7 @@ type AntifraudCallDetail struct {
 	Unmatched              any                 `json:"unmatched,omitempty"`
 	OrphanPacketIDs        []uuid.UUID         `json:"orphanPacketIds"`
 	Packets                []AntifraudPacket   `json:"packets"`
+	RawPackets             []AntifraudPacket   `json:"rawPackets"`
 	Exchanges              []AntifraudExchange `json:"exchanges"`
 	LinkedCDRs             []CDRFacts          `json:"linkedCdrs"`
 	Truncated              bool                `json:"truncated"`
@@ -164,8 +204,9 @@ func (c *Client) ListAntifraudCallsPage(
 		limit = 100
 	}
 	query := `SELECT call.call_id,call.first_seen_at,call.last_seen_at,call.acct_session_id,
-		call.h323_conf_id,call.calling,call.called,call.status,call.explanation_codes,
-		ifNull(packet_summary.phases,[]),ifNull(packet_summary.packet_count,0),
+		call.h323_conf_id,call.calling,call.called,call.status,call.coverage_state,call.explanation_codes,
+		ifNull(packet_summary.families,[]),ifNull(packet_summary.packet_count,0),
+		ifNull(packet_summary.unpaired,0),ifNull(packet_summary.fallback,0),
 		ifNull(assignment.method,''),ifNull(assignment.reason,''),assignment.delta_ms,
 		ifNull(assignment.ambiguous,0),ifNull(assignment.ambiguity_reason,''),
 		ifNull(assignment.evidence,'{}'),ifNull(assignment.cdr_ids,[])
@@ -178,7 +219,9 @@ func (c *Client) ListAntifraudCallsPage(
 		) assignment ON assignment.device_id=call.device_id AND assignment.call_id=call.call_id
 		LEFT JOIN (
 			SELECT links.device_id,links.snapshot_id,links.call_id,
-				groupUniqArray(packet.phase) phases,count() packet_count
+				groupUniqArray(packet.family) families,count() packet_count,
+				countIf(packet.direction='request' AND packet.status IN ('pending','orphan','ambiguous')) unpaired,
+				countIf(packet.decision='unavailable_fallback') fallback
 			FROM collector.custom_antifraud_call_packets_current links
 			INNER JOIN collector.custom_radius_packets_current packet
 				ON packet.device_id=links.device_id AND packet.snapshot_id=links.snapshot_id
@@ -214,13 +257,17 @@ func (c *Client) ListAntifraudCallsPage(
 	}
 	defer rows.Close()
 	items := make([]AntifraudCallRow, 0, maxPage+1)
+	now := time.Now().UTC()
 	for rows.Next() {
 		var item AntifraudCallRow
 		var evidence string
+		var families []string
+		var unpaired, fallback uint64
 		if err := rows.Scan(
 			&item.CallID, &item.FirstSeenAt, &item.LastSeenAt, &item.AcctSessionID,
 			&item.H323ConfID, &item.Calling, &item.Called, &item.Status,
-			&item.ExplanationCodes, &item.Phases, &item.PacketCount,
+			&item.storedCoverageState, &item.ExplanationCodes, &families, &item.PacketCount,
+			&unpaired, &fallback,
 			&item.Coverage.Method, &item.Coverage.Reason, &item.Coverage.DeltaMS,
 			&item.Coverage.Ambiguous, &item.Coverage.AmbiguityReason, &evidence,
 			&item.Coverage.LinkedCDRIDs,
@@ -228,10 +275,10 @@ func (c *Client) ListAntifraudCallsPage(
 			return AntifraudCallPage{}, err
 		}
 		item.SortTime = item.FirstSeenAt
-		item.Coverage.State = "unmatched"
-		if len(item.Coverage.LinkedCDRIDs) > 0 {
-			item.Coverage.State = "matched"
-		}
+		item.Phases = orderedFamilies(families)
+		item.ChainCompleteness = chainCompletenessFromSummary(item.Phases, unpaired, fallback, item.Status)
+		item.Coverage.State = deriveAFCoverageState(len(item.Coverage.LinkedCDRIDs) > 0,
+			item.Coverage.Ambiguous, item.FirstSeenAt, now)
 		item.Coverage.Evidence = safeJSONObject(evidence)
 		items = append(items, item)
 	}
@@ -256,14 +303,14 @@ func (c *Client) AntifraudCallDetail(
 	var detail AntifraudCallDetail
 	var attributes, unmatched string
 	err = c.Conn.QueryRow(ctx, `SELECT snapshot_id,contract_key,call_id,first_seen_at,last_seen_at,acct_session_id,
-		h323_conf_id,calling,called,status,explanation_codes,accounting_start,accounting_stop,
+		h323_conf_id,calling,called,status,coverage_state,explanation_codes,accounting_start,accounting_stop,
 		session_duration_seconds,ordered_attributes_json,unmatched_provenance_json,orphan_packet_ids
 		FROM collector.custom_antifraud_calls_current WHERE device_id=? AND call_id=? LIMIT 1`,
 		deviceID, callID).Scan(
 		&detail.SnapshotID, &detail.ContractKey, &detail.CallID, &detail.FirstSeenAt,
 		&detail.LastSeenAt, &detail.AcctSessionID,
 		&detail.H323ConfID, &detail.Calling, &detail.Called, &detail.Status,
-		&detail.ExplanationCodes, &detail.AccountingStart, &detail.AccountingStop,
+		&detail.storedCoverageState, &detail.ExplanationCodes, &detail.AccountingStart, &detail.AccountingStop,
 		&detail.SessionDurationSeconds, &attributes, &unmatched, &detail.OrphanPacketIDs,
 	)
 	if err != nil {
@@ -281,12 +328,15 @@ func (c *Client) AntifraudCallDetail(
 	if err := c.loadCallCoverage(ctx, deviceID, callID, &detail.Coverage); err != nil {
 		return detail, err
 	}
+	detail.Coverage.State = deriveAFCoverageState(len(detail.Coverage.LinkedCDRIDs) > 0,
+		detail.Coverage.Ambiguous, detail.FirstSeenAt, time.Now().UTC())
 	if len(detail.Coverage.LinkedCDRIDs) > 0 {
 		detail.LinkedCDRs, err = c.loadCDRFacts(ctx, deviceID, detail.Coverage.LinkedCDRIDs)
 		if err != nil {
 			return detail, err
 		}
 	}
+	enrichAntifraudDetail(&detail)
 	boundCallDetail(&detail)
 	return detail, nil
 }
@@ -372,11 +422,11 @@ func (c *Client) loadAntifraudPackets(
 		detail.Truncated = true
 		detail.Warnings = append(detail.Warnings, "packet list truncated at 500 items")
 	}
-	phaseSet := map[string]struct{}{}
+	families := make([]string, 0, len(detail.Packets))
 	packetIDs := make([]uuid.UUID, 0, len(detail.Packets))
 	for index := range detail.Packets {
 		packet := &detail.Packets[index]
-		phaseSet[packet.Phase] = struct{}{}
+		families = append(families, packet.Family)
 		packetIDs = append(packetIDs, packet.PacketID)
 	}
 	members, membersTruncated, err := c.loadPacketMembers(ctx, deviceID, packetIDs)
@@ -390,9 +440,7 @@ func (c *Client) loadAntifraudPackets(
 	for index := range detail.Packets {
 		detail.Packets[index].Members = members[detail.Packets[index].PacketID]
 	}
-	for phase := range phaseSet {
-		detail.Phases = append(detail.Phases, phase)
-	}
+	detail.Phases = orderedFamilies(families)
 	return nil
 }
 
@@ -443,10 +491,6 @@ func (c *Client) loadCallCoverage(
 	)
 	if err != nil {
 		return err
-	}
-	coverage.State = "unmatched"
-	if len(coverage.LinkedCDRIDs) > 0 {
-		coverage.State = "matched"
 	}
 	coverage.Evidence = safeJSONObject(evidence)
 	return nil
@@ -681,4 +725,231 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func orderedFamilies(families []string) []string {
+	order := []string{"indication", "verification", "accounting"}
+	seen := map[string]struct{}{}
+	for _, family := range families {
+		family = strings.ToLower(strings.TrimSpace(family))
+		if family == "" || family == "unknown" {
+			continue
+		}
+		seen[family] = struct{}{}
+	}
+	result := make([]string, 0, len(order))
+	for _, family := range order {
+		if _, ok := seen[family]; ok {
+			result = append(result, family)
+		}
+	}
+	return result
+}
+
+func deriveAFCoverageState(matched, ambiguous bool, firstSeen, now time.Time) string {
+	if matched {
+		return "matched"
+	}
+	if ambiguous {
+		return "ambiguous"
+	}
+	age := now.Sub(firstSeen)
+	switch {
+	case age < 5*time.Minute:
+		return "awaiting_cdr"
+	case age < 10*time.Minute:
+		return "expected"
+	case age < 30*time.Minute:
+		return "late"
+	default:
+		return "missing"
+	}
+}
+
+func chainCompletenessFromSummary(
+	phases []string, unpaired, fallback uint64, status string,
+) ChainCompleteness {
+	has := map[string]bool{}
+	for _, phase := range phases {
+		has[phase] = true
+	}
+	missing := make([]string, 0, 3)
+	for _, stage := range []string{"indication", "verification", "accounting"} {
+		if !has[stage] {
+			missing = append(missing, stage)
+		}
+	}
+	completeness := ChainCompleteness{MissingStages: missing}
+	switch {
+	case len(missing) == 0 && unpaired == 0 && fallback == 0:
+		completeness.State = "complete"
+	case len(phases) == 0 || (len(phases) == 1 && unpaired > 0):
+		completeness.State = "minimal"
+	default:
+		completeness.State = "partial"
+	}
+	if unpaired > 0 {
+		completeness.MissingResponses = append(completeness.MissingResponses, "unpaired_requests")
+		completeness.Notes = append(completeness.Notes, "есть запросы без ответа")
+	}
+	if fallback > 0 || status == "unavailable_fallback" {
+		completeness.Notes = append(completeness.Notes, "сработал unavailable_fallback")
+	}
+	return completeness
+}
+
+func enrichAntifraudDetail(detail *AntifraudCallDetail) {
+	detail.Participants = CallParticipants{
+		CallingNumber: detail.Calling, CalledNumber: detail.Called,
+	}
+	detail.Accounting = CallAccounting{
+		SetupTime: detail.AccountingStart, DisconnectTime: detail.AccountingStop,
+		SessionTimeSec: detail.SessionDurationSeconds,
+	}
+	detail.FinalDecision = finalDecisionFrom(detail)
+	detail.Timeline = buildTimeline(detail.Packets)
+	detail.RawPackets = detail.Packets
+	var unpaired, fallback uint64
+	for _, packet := range detail.Packets {
+		if packet.Direction == "request" &&
+			(packet.Status == "pending" || packet.Status == "orphan" || packet.Status == "ambiguous") {
+			unpaired++
+		}
+		if packet.Decision == "unavailable_fallback" {
+			fallback++
+		}
+		if cause := attributeString(packet.Attributes, "acct-terminate-cause"); cause != "" {
+			detail.Accounting.DisconnectCause = cause
+		}
+		if delay := attributeInt64(packet.Attributes, "acct-delay-time"); delay != nil {
+			detail.Accounting.DelayTimeSec = delay
+		}
+	}
+	detail.ChainCompleteness = chainCompletenessFromSummary(detail.Phases, unpaired, fallback, detail.Status)
+}
+
+func finalDecisionFrom(detail *AntifraudCallDetail) string {
+	switch detail.Status {
+	case "blocked":
+		return "denied"
+	case "verified", "completed":
+		return "allowed"
+	case "unavailable_fallback":
+		return "unavailable"
+	case "ambiguous_indeterminate":
+		return "indeterminate"
+	default:
+		for _, packet := range detail.Packets {
+			switch packet.Decision {
+			case "deny":
+				return "denied"
+			case "allow", "info_only":
+				return "allowed"
+			case "unavailable_fallback":
+				return "unavailable"
+			}
+		}
+		return "pending"
+	}
+}
+
+func buildTimeline(packets []AntifraudPacket) []TimelineEvent {
+	events := make([]TimelineEvent, 0, len(packets))
+	requestPhase := map[uuid.UUID]string{}
+	for _, packet := range packets {
+		if packet.Direction == "request" {
+			requestPhase[packet.PacketID] = timelinePhase(packet)
+		}
+	}
+	for _, packet := range packets {
+		phase := timelinePhase(packet)
+		if packet.Direction == "response" && packet.RequestID != nil {
+			if parent, ok := requestPhase[*packet.RequestID]; ok && parent != "" {
+				phase = parent
+			}
+		}
+		events = append(events, TimelineEvent{
+			TS: packet.FirstSeenAt, Phase: phase, RadiusType: packet.RadiusType,
+			XpgkRequestType: attributeString(packet.Attributes, "xpgk-request-type"),
+			AcctStatusType:  attributeString(packet.Attributes, "acct-status-type"),
+			Decision:        packet.Decision, Summary: timelineSummary(packet, phase),
+			PacketID: packet.PacketID,
+		})
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].TS.Equal(events[j].TS) {
+			return events[i].PacketID.String() < events[j].PacketID.String()
+		}
+		return events[i].TS.Before(events[j].TS)
+	})
+	return events
+}
+
+func timelinePhase(packet AntifraudPacket) string {
+	switch strings.ToLower(packet.Family) {
+	case "indication", "verification", "accounting":
+		return strings.ToLower(packet.Family)
+	default:
+		if strings.HasPrefix(strings.ToLower(packet.RadiusType), "accounting") {
+			return "accounting"
+		}
+		return "unknown"
+	}
+}
+
+func timelineSummary(packet AntifraudPacket, phase string) string {
+	requestType := attributeString(packet.Attributes, "xpgk-request-type")
+	switch {
+	case packet.Direction == "request" && phase == "indication":
+		return "Outgoing call registration sent to AntiFraud (" + orDash(requestType) + ")."
+	case packet.Direction == "response" && phase == "indication":
+		return "AntiFraud accepted the information; call is allowed to continue."
+	case packet.Direction == "request" && phase == "verification":
+		return "Call verification request sent (" + orDash(requestType) + ")."
+	case packet.Direction == "response" && phase == "verification" && packet.Decision == "deny":
+		return "Verification denied the call."
+	case packet.Direction == "response" && phase == "verification":
+		return "Verification succeeded; call continues."
+	case packet.Direction == "request" && phase == "accounting":
+		return "Accounting record sent (" + orDash(attributeString(packet.Attributes, "acct-status-type")) + ")."
+	case packet.Direction == "response" && phase == "accounting":
+		return "Accounting record acknowledged."
+	default:
+		return packet.RadiusType + " · " + packet.Status
+	}
+}
+
+func orDash(value string) string {
+	if value == "" {
+		return "n/a"
+	}
+	return value
+}
+
+func attributeString(attributes []OrderedAttribute, name string) string {
+	want := strings.ToLower(name)
+	for _, attribute := range attributes {
+		if strings.ToLower(attribute.Name) == want {
+			switch typed := attribute.Value.(type) {
+			case string:
+				return typed
+			default:
+				encoded, _ := json.Marshal(typed)
+				return strings.Trim(string(encoded), `"`)
+			}
+		}
+	}
+	return ""
+}
+
+func attributeInt64(attributes []OrderedAttribute, name string) *int64 {
+	raw := strings.TrimSpace(attributeString(attributes, name))
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &value
 }

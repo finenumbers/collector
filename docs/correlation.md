@@ -33,10 +33,19 @@ Attribute-dump строки (`Acct-Session-Id`, `Eltex-AVPair`, `xpgk-request-ty
 device_id + normalize(Acct-Session-Id)
 ```
 
-Нормализация удаляет whitespace и приводит регистр. Matching сначала проверяет exact
-normalized `Acct-Session-Id` CDR ↔ Custom call. Если exact ID недоступен, допускается
-unique H323 значение из реального поля CDR (`h323-conf-id` / эквивалент). Номера и
-время — только supporting evidence, никогда не выбирают кандидата сами.
+Нормализация удаляет **все** whitespace и приводит регистр (одинаково в CDR,
+Custom AF keys и reconciliation). Matching сначала проверяет exact normalized
+`Acct-Session-Id` CDR ↔ Custom call. Если exact ID недоступен, допускается
+unique H323 значение из реального поля CDR (`h323-conf-id` / эквивалент).
+
+Номера A/B и время — **вторичная проверка** уже найденного primary-кандидата:
+при расхождении assign запрещён (`number_mismatch` / `time_mismatch`). Номера и
+время никогда не выбирают кандидата сами. Разные `Acct-Session-Id` никогда не
+склеиваются в один Call.
+
+Покрытие со стороны AF-call: `awaiting_cdr` → `expected` → `late` → `missing`,
+либо `matched` / `ambiguous`. Неполная RADIUS-цепочка помечается
+`chainCompleteness` (`complete` / `partial` / `minimal`).
 
 `device_id` обязателен: RFC не гарантирует глобальную уникальность идентификаторов
 между NAS/reboot. Любое множество из нескольких exact-кандидатов остаётся

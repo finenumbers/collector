@@ -100,3 +100,70 @@ func TestPolicyRevisionMismatchNeverMatches(t *testing.T) {
 		t.Fatalf("missing-state aging deadline=%v", result.NextDeadline)
 	}
 }
+
+func TestCompactSessionMatchesSpacedEltexID(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	spaced := "11000307 6a62aaa9 c9f5297a 4f6a3001"
+	compact := "110003076a62aaa9c9f5297a4f6a3001"
+	result := Reconcile(Config{}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, IngestedAt: now,
+		AcctSessionID: compact, Calling: "79251100001", Called: "79251100002",
+		Enabled: true, PolicyRevision: 1,
+	}}, []Call{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, AcctSessionID: spaced,
+		Calling: "79251100001", Called: "79251100002", PolicyRevision: 1,
+	}})
+	if len(result.Assignments) != 1 || result.Assignments[0].Method != "acct_session_id" {
+		t.Fatalf("compact/spaced session did not match: %+v", result.Assignments)
+	}
+	if result.Calls[0].State != StateMatched {
+		t.Fatalf("AF coverage=%q, want matched", result.Calls[0].State)
+	}
+}
+
+func TestSecondaryNumberMismatchRejectsPrimaryHit(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	result := Reconcile(Config{}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, IngestedAt: now,
+		AcctSessionID: "session-1", Calling: "100", Called: "200",
+		Enabled: true, PolicyRevision: 1,
+	}}, []Call{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, AcctSessionID: "session-1",
+		Calling: "111", Called: "222", PolicyRevision: 1,
+	}})
+	if len(result.Assignments) != 0 {
+		t.Fatal("number mismatch must not assign")
+	}
+	if result.Coverage[0].Reason != "number_mismatch" {
+		t.Fatalf("reason=%q", result.Coverage[0].Reason)
+	}
+}
+
+func TestSecondaryTimeMismatchRejectsPrimaryHit(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	result := Reconcile(Config{TimeMatchWindow: time.Hour}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now.Add(-3 * time.Hour),
+		IngestedAt: now, AcctSessionID: "session-1", Enabled: true, PolicyRevision: 1,
+	}}, []Call{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, AcctSessionID: "session-1",
+		PolicyRevision: 1,
+	}})
+	if len(result.Assignments) != 0 || result.Coverage[0].Reason != "time_mismatch" {
+		t.Fatalf("time mismatch not enforced: %+v", result)
+	}
+}
+
+func TestCallCoverageAgesWithoutCDR(t *testing.T) {
+	device := uuid.New()
+	event := time.Now().UTC().Add(-20 * time.Minute)
+	result := Reconcile(Config{
+		ExpectedGrace: 5 * time.Minute, LateThreshold: 10 * time.Minute,
+		MissingTerminal: 30 * time.Minute,
+	}, time.Now().UTC(), nil, []Call{{
+		ID: uuid.New(), DeviceID: device, EventTime: event, AcctSessionID: "orphan",
+		PolicyRevision: 1,
+	}})
+	if result.Calls[0].State != StateLate {
+		t.Fatalf("AF coverage=%q, want late", result.Calls[0].State)
+	}
+}

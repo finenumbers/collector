@@ -546,8 +546,11 @@ func TestAttributeDumpWithSessionFormsIndicationCall(t *testing.T) {
 		t.Fatalf("calls=%d, want 1 session call: %+v", len(result.Calls), result.Calls)
 	}
 	call := result.Calls[0]
-	if call.Key.AcctSessionID != "0600000f 6a666058 66cb3590 505c7af3" {
+	if call.Key.AcctSessionID != "0600000f6a66605866cb3590505c7af3" {
 		t.Fatalf("session key=%q", call.Key.AcctSessionID)
+	}
+	if call.Key.AcctSessionIDDisplay == "" {
+		t.Fatal("display session must retain original spacing")
 	}
 	var request *Packet
 	for index := range result.Packets {

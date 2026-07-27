@@ -10,6 +10,8 @@ export type CdrColumnDef = {
 export type CdrPreset = {
   id: string
   label: string
+  /** 'all' = full registry; string[] only when vendor-agnostic (unused for Summary). */
+  columns: 'all' | string[]
 }
 
 /** Canonical full Eltex typed CDR columns (no rawFields / ingest keys). */
@@ -187,8 +189,32 @@ export const SATEL_CDR_COLUMNS: CdrColumnDef[] = [
   { key: 'recordId', header: 'Record ID', mono: true },
 ]
 
+export const ELTEX_SUMMARY_KEYS = [
+  'connectTime',
+  'outgoingCgpn',
+  'outgoingCdpn',
+  'outgoingRedirectingNumber',
+  'incomingDescription',
+  'outgoingDescription',
+  'durationMs',
+  'releaseInfo',
+]
+
+export const SATEL_SUMMARY_KEYS = [
+  'connectTime',
+  'billAni',
+  'billDnis',
+  'outOrigDnis',
+  'srcName',
+  'dstName',
+  'dpName',
+  'durationMs',
+  'disconnectText',
+]
+
 export const CDR_PRESETS: CdrPreset[] = [
-  { id: 'all', label: 'Все данные' },
+  { id: 'summary', label: 'Summary', columns: ELTEX_SUMMARY_KEYS },
+  { id: 'all', label: 'Все данные', columns: 'all' },
 ]
 
 const PRESET_STORAGE_PREFIX = 'collector:cdr-preset:'
@@ -197,15 +223,25 @@ export function cdrPresetStorageKey(deviceId: string): string {
   return `${PRESET_STORAGE_PREFIX}${deviceId}`
 }
 
+function columnsByKeys(all: CdrColumnDef[], keys: string[]): CdrColumnDef[] {
+  const byKey = new Map(all.map((column) => [column.key, column]))
+  return keys.flatMap((key) => {
+    const column = byKey.get(key)
+    return column ? [column] : []
+  })
+}
+
 export function resolvePresetColumns(vendor: CdrVendor, presetId: string): CdrColumnDef[] {
   const all = vendor === 'eltex' ? ELTEX_CDR_COLUMNS : SATEL_CDR_COLUMNS
-  // Future presets can subset/reorder; today only «Все данные».
-  if (presetId === 'all' || !CDR_PRESETS.some((preset) => preset.id === presetId)) {
-    return all
+  const known = CDR_PRESETS.some((preset) => preset.id === presetId)
+  const id = known ? presetId : 'summary'
+  if (id === 'all') return all
+  if (id === 'summary') {
+    return columnsByKeys(all, vendor === 'eltex' ? ELTEX_SUMMARY_KEYS : SATEL_SUMMARY_KEYS)
   }
-  return all
+  return columnsByKeys(all, vendor === 'eltex' ? ELTEX_SUMMARY_KEYS : SATEL_SUMMARY_KEYS)
 }
 
 export function defaultCdrPresetId(): string {
-  return CDR_PRESETS[0]?.id || 'all'
+  return CDR_PRESETS[0]?.id || 'summary'
 }

@@ -1318,12 +1318,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
         {dataset === 'calls' && <label className="cdr-preset">
-          <span>Пресет</span>
           <select value={columnPresetId} onChange={(event) => {
             const next = event.target.value || defaultCdrPresetId()
             window.sessionStorage.setItem(presetStorageKey, next)
             setColumnPresetId(next)
-          }}>
+          }} aria-label="Пресет колонок">
             {CDR_PRESETS.map((preset) =>
               <option key={preset.id} value={preset.id}>{preset.label}</option>)}
           </select>

@@ -1589,7 +1589,7 @@ function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
       {coverage && <div className="call-facts">
         <span><small>Покрытие AntiFraud</small><strong><CoverageBadge coverage={coverage} /></strong></span>
       </div>}
-      {antifraud ? <AntiFraudCallBody value={antifraud} /> :
+      {antifraud ? <AntiFraudCallBody value={antifraud} cdr={cdr} /> :
         coverage?.state !== 'not_applicable' &&
           <p className="warning-text">Пакеты не синтезируются: связанная цепочка AntiFraud отсутствует.</p>}
     </>}
@@ -1602,7 +1602,31 @@ function attributeDisplay(attributes: OrderedAttribute[] | undefined, name: stri
   return typeof found.value === 'string' ? found.value : String(found.value)
 }
 
-function antifraudTranscript(value: AntifraudCallDetail): string {
+function linkedCDRForTranscript(value: AntifraudCallDetail, cdr?: CallRow): CallRow | undefined {
+  if (cdr?.recordId) return cdr
+  return value.linkedCdrs?.find((item) => item.recordId)
+}
+
+function transcriptDurationSec(value: AntifraudCallDetail, cdr?: CallRow): number | undefined {
+  const fromAF = value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds
+  if (fromAF != null) return fromAF
+  const linked = linkedCDRForTranscript(value, cdr)
+  if (linked?.durationMs == null) return undefined
+  return Math.round(linked.durationMs / 1000)
+}
+
+function transcriptCause(value: AntifraudCallDetail, cdr?: CallRow): string {
+  if (value.accounting?.disconnectCause) return value.accounting.disconnectCause
+  const linked = linkedCDRForTranscript(value, cdr)
+  if (linked?.releaseCause == null && !linked?.releaseInfo) return '—'
+  const parts = [
+    linked?.releaseCause != null ? String(linked.releaseCause) : '',
+    linked?.releaseInfo || '',
+  ].filter(Boolean)
+  return parts.join(' ') || '—'
+}
+
+function antifraudTranscript(value: AntifraudCallDetail, cdr?: CallRow): string {
   const calling = value.participants?.callingNumber || value.calling || '—'
   const called = value.participants?.calledNumber || value.called || '—'
   const callLabel = value.h323ConfId || value.acctSessionId || value.callId
@@ -1618,8 +1642,8 @@ function antifraudTranscript(value: AntifraudCallDetail): string {
       lines.push(head)
     })
   }
-  const duration = value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds
-  const cause = value.accounting?.disconnectCause || '—'
+  const duration = transcriptDurationSec(value, cdr)
+  const cause = transcriptCause(value, cdr)
   const completeness = value.chainCompleteness
   if (completeness?.state && completeness.state !== 'complete') {
     const missing = completeness.missingStages?.length
@@ -1631,8 +1655,10 @@ function antifraudTranscript(value: AntifraudCallDetail): string {
   return lines.join('\n')
 }
 
-function antifraudSlimJSON(value: AntifraudCallDetail) {
+function antifraudSlimJSON(value: AntifraudCallDetail, cdr?: CallRow) {
   const packets = value.rawPackets?.length ? value.rawPackets : value.packets
+  const duration = transcriptDurationSec(value, cdr)
+  const cause = transcriptCause(value, cdr)
   return {
     callId: value.callId,
     acctSessionId: value.acctSessionId,
@@ -1658,8 +1684,8 @@ function antifraudSlimJSON(value: AntifraudCallDetail) {
       setupTime: value.accounting?.setupTime || value.accountingStart,
       connectTime: value.accounting?.connectTime,
       disconnectTime: value.accounting?.disconnectTime || value.accountingStop,
-      disconnectCause: value.accounting?.disconnectCause,
-      sessionTimeSec: value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds,
+      disconnectCause: cause === '—' ? value.accounting?.disconnectCause : cause,
+      sessionTimeSec: duration,
     },
     rawPackets: (packets || []).map((packet) => ({
       packetId: packet.packetId,
@@ -1675,12 +1701,12 @@ function antifraudSlimJSON(value: AntifraudCallDetail) {
   }
 }
 
-function AntiFraudCallBody({ value }: { value: AntifraudCallDetail }) {
+function AntiFraudCallBody({ value, cdr }: { value: AntifraudCallDetail; cdr?: CallRow }) {
   return <section aria-label="Полный цикл AntiFraud">
     <h4>Цепочка AntiFraud</h4>
-    <pre className="raw-payload">{antifraudTranscript(value)}</pre>
+    <pre className="raw-payload">{antifraudTranscript(value, cdr)}</pre>
     <h4>AntiFraud JSON</h4>
-    <pre className="raw-payload">{JSON.stringify(antifraudSlimJSON(value), null, 2)}</pre>
+    <pre className="raw-payload">{JSON.stringify(antifraudSlimJSON(value, cdr), null, 2)}</pre>
   </section>
 }
 

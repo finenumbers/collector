@@ -1,5 +1,5 @@
 export type ExportNavigationDataset =
-  'calls' | 'syslog' | 'syslog_all' | 'antifraud'
+  'calls' | 'syslog' | 'antifraud'
 
 export type ExportTarget = {
   dataset: 'calls' | 'syslog' | 'antifraud'
@@ -190,14 +190,4 @@ export function formatExportBytes(bytes: number): string {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} КБ`
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} МБ`
   return `${(bytes / 1024 ** 3).toFixed(1)} ГБ`
-}
-
-export function exportURL(
-  deviceID: string,
-  navigationDataset: ExportNavigationDataset,
-  query: string,
-): string {
-  const target = exportTarget(navigationDataset)
-  const parameters = new URLSearchParams({ dataset: target.dataset, q: query })
-  return `/api/devices/${deviceID}/export.xlsx?${parameters.toString()}`
 }

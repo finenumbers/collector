@@ -253,7 +253,7 @@ func TestParseExportDateUsesDeviceTimezoneAndExclusiveEnd(t *testing.T) {
 }
 
 func TestDeviceDateRangeUsesActiveTimezoneAndDST(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/events?date=2026-03-29", nil)
+	request := httptest.NewRequest(http.MethodGet, "/syslog-messages?date=2026-03-29", nil)
 	response := httptest.NewRecorder()
 	timeRange, ok := deviceDateRange(response, request, store.Device{
 		Timezone: "UTC", ActiveTimezone: "Europe/Berlin",
@@ -270,7 +270,7 @@ func TestDeviceDateRangeUsesActiveTimezoneAndDST(t *testing.T) {
 }
 
 func TestDeviceDateRangeRejectsInvalidDate(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/events?date=2026-02-30", nil)
+	request := httptest.NewRequest(http.MethodGet, "/syslog-messages?date=2026-02-30", nil)
 	response := httptest.NewRecorder()
 	if _, ok := deviceDateRange(response, request, store.Device{ActiveTimezone: "UTC"}); ok {
 		t.Fatal("invalid date was accepted")

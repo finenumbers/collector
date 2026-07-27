@@ -3,24 +3,22 @@ export type Role = 'admin' | 'analyst' | 'viewer'
 export type FirmwareScheme = '3.23.2' | '3.410'
 
 export type RetentionPolicyClass =
-  'syslog' | 'cdr' | 'softswitch_cdr' | 'derived' | 'raw_cdr_archive'
+  'syslog' | 'cdr' | 'softswitch_cdr' | 'raw_cdr_archive'
 
 export function retentionLabel(value: RetentionPolicyClass): string {
   return {
     syslog: 'Syslog и события',
     cdr: 'CDR оборудования',
     softswitch_cdr: 'CDR софтсвитчей',
-    derived: 'AntiFraud и производная аналитика',
     raw_cdr_archive: 'Raw CDR архив всех источников',
   }[value]
 }
 
 export function retentionDescription(value: RetentionPolicyClass): string {
   return {
-    syslog: 'Исходные Syslog datagram и их parser facts.',
+    syslog: 'Исходные Syslog datagram в syslog_messages.',
     cdr: 'Нормализованные CDR оборудования и timezone interpretations.',
     softswitch_cdr: 'Нормализованные CDR софтсвитчей и timezone interpretations.',
-    derived: 'RADIUS lifecycle, AntiFraud и корреляция.',
     raw_cdr_archive: 'Неизменённые исходные CDR-файлы всех источников в объектном хранилище.',
   }[value]
 }

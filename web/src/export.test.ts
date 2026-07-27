@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   canCancelExport, canDownloadExport, createExportRequest, type ExportJob, exportDownloadURL,
   exportETASeconds, exportJobsURL, exportJobDisposition, exportJobURL, exportProgress,
-  exportStatusLabel, exportStorageKey, exportTarget, exportURL, formatExportBytes,
+  exportStatusLabel, exportStorageKey, exportTarget, formatExportBytes,
   formatExportDuration, isExportActive, localDateInTimezone, pollDelay, restoreExportTracking,
-  serializeExportTracking, type ExportJobStatus, type ExportNavigationDataset,
+  serializeExportTracking, type ExportJobStatus,
 } from './export'
 
 const job = (overrides: Partial<ExportJob> = {}): ExportJob => ({
@@ -25,15 +25,8 @@ describe('export navigation mapping', () => {
     ['calls', { dataset: 'calls' }],
     ['antifraud', { dataset: 'antifraud' }],
     ['syslog', { dataset: 'syslog' }],
-    ['syslog_all', { dataset: 'syslog' }],
   ] as const)('maps %s to its backend export target', (dataset, expected) => {
     expect(exportTarget(dataset)).toEqual(expected)
-  })
-
-  it('omits category for calls and safely encodes search values', () => {
-    const url = exportURL('device-id', 'calls' satisfies ExportNavigationDataset, '+7 999&x')
-    expect(url).toBe('/api/devices/device-id/export.xlsx?dataset=calls&q=%2B7+999%26x')
-    expect(url).not.toContain('category=')
   })
 })
 

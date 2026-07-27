@@ -34,9 +34,8 @@ AntiFraud columns. The Custom worker reads this immutable table and owns a
 separate marker-selected projection.
 
 `GET /api/devices/{deviceID}/syslog-messages` returns the same flat fields.
-The old `/events` path is a temporary alias. Both reject a `category` query
-parameter. Search applies only to payload, with device/date predicates and
-bound query arguments.
+The endpoint rejects a `category` query parameter. Search applies only to
+payload, with device/date predicates and bound query arguments.
 
 ## CDR
 

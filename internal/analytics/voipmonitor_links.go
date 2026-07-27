@@ -134,7 +134,7 @@ func (c *Client) LoadVoipmonitorEltexCandidates(
 		WHERE c.device_id=?
 			AND coalesce(t.setup_time,c.setup_time,c.ingested_at)>=?
 			AND coalesce(t.setup_time,c.setup_time,c.ingested_at)<?
-			AND (link.source_record_id IS NULL OR link.match_status IN ('pending','unmatched'))
+			AND (link.match_status='' OR link.match_status IN ('pending','unmatched'))
 		ORDER BY coalesce(t.setup_time,c.setup_time,c.ingested_at) ASC
 		LIMIT ?`,
 		voipmonitor.SourceEltex, policyRevision, deviceID, from, to, limit)
@@ -197,7 +197,7 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		WHERE c.device_id=?
 			AND coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at)>=?
 			AND coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at)<?
-			AND (link.source_record_id IS NULL OR link.match_status IN ('pending','unmatched'))
+			AND (link.match_status='' OR link.match_status IN ('pending','unmatched'))
 		ORDER BY coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at) ASC
 		LIMIT ?`,
 		voipmonitor.SourceSatel, policyRevision, deviceID, from, to, limit)

@@ -86,9 +86,19 @@ func (c *Client) LoadCustomRadiusEvents(
 	if limit <= 0 || limit > 100_000 {
 		limit = 20_000
 	}
+	// Restrict to RADIUS-shaped payloads. Dense SMG hours can exceed MaxEvents
+	// when every Syslog line in the hour is loaded.
 	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,toString(source_ip),
 		source_port,transport,payload FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?
+		  AND (
+			positionCaseInsensitiveUTF8(payload,'RADIUS')>0
+			OR positionCaseInsensitiveUTF8(payload,'Antifraud')>0
+			OR positionCaseInsensitiveUTF8(payload,'Access-')>0
+			OR positionCaseInsensitiveUTF8(payload,'Accounting-')>0
+			OR positionCaseInsensitiveUTF8(payload,'Accs-')>0
+			OR positionCaseInsensitiveUTF8(payload,'Proc Reply')>0
+		  )
 		ORDER BY received_at,event_id LIMIT ?`, deviceID, from, to, limit+1)
 	if err != nil {
 		return nil, err
@@ -246,9 +256,9 @@ func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojecti
 			customContractKey(packet.CallKey), packet.CallKey.AcctSessionID, packet.CallKey.H323ConfID,
 			string(packet.Family), packet.RadiusType, string(packet.Direction), string(packet.Phase),
 			string(packet.Decision), string(packet.Confidence), string(packet.Status),
-			boolByte(packet.IsAntifraud), packet.RequestID, packet.ResponseID, string(attributes),
-			string(provenance), explanationCodes(packet.Explanations), string(warnings),
-			orphanReason, ambiguityReason, uint8(0),
+			boolByte(packet.IsAntifraud), chUUIDPtr(packet.RequestID), chUUIDPtr(packet.ResponseID),
+			string(attributes), string(provenance), explanationCodes(packet.Explanations),
+			string(warnings), orphanReason, ambiguityReason, uint8(0),
 		}})
 		for index, member := range packet.Provenance {
 			members = append(members, memberRow{args: []any{
@@ -278,8 +288,9 @@ func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojecti
 				snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 				snapshot.ProjectionSeq, packet.ID, customContractKey(packet.CallKey),
 				packet.CallKey.AcctSessionID, packet.CallKey.H323ConfID, packet.ID,
-				packet.ResponseID, packet.AttemptIDs, string(packet.Status), string(packet.Decision),
-				explanationCodes(packet.Explanations), packet.FirstSeenAt, uint8(0),
+				chUUIDPtr(packet.ResponseID), packet.AttemptIDs, string(packet.Status),
+				string(packet.Decision), explanationCodes(packet.Explanations), packet.FirstSeenAt,
+				uint8(0),
 			}})
 		}
 	}
@@ -367,8 +378,9 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 			snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 			snapshot.ProjectionSeq, call.ID, customContractKey(call.Key),
 			call.Key.AcctSessionID, call.Key.H323ConfID, call.Participants.Calling,
-			call.Participants.Called, string(call.Status), "awaiting_cdr", call.Accounting.StartTime,
-			call.Accounting.StopTime, call.Accounting.SessionDuration, string(attributes),
+			call.Participants.Called, string(call.Status), "awaiting_cdr",
+			chTimePtr(call.Accounting.StartTime), chTimePtr(call.Accounting.StopTime),
+			call.Accounting.SessionDuration, string(attributes),
 			string(unmatched), call.Orphans, explanationCodes(call.Explanations), first, last, uint8(0),
 		}})
 		for index, packet := range call.Packets {
@@ -427,8 +439,8 @@ func (c *Client) ActivateCustomProjectionSnapshot(
 		marker,watermark_received_at,watermark_event_id,row_count,activated_at,deleted)
 		VALUES(?,?,?,?,?,?,'active',?,?,?,?,0)`,
 		snapshot.DeviceID, snapshot.BucketStart, snapshot.PolicyRevision, snapshot.ProjectionSeq,
-		snapshot.ID, previous, nullableTime(snapshot.WatermarkTime), nullableUUID(snapshot.WatermarkID),
-		rowCount, time.Now().UTC()); err != nil {
+		snapshot.ID, chUUIDPtr(previous), chTime(snapshot.WatermarkTime),
+		chUUID(snapshot.WatermarkID), rowCount, time.Now().UTC()); err != nil {
 		return err
 	}
 	if len(snapshot.Result.Calls) != 0 {
@@ -645,20 +657,6 @@ func boolByte(value bool) uint8 {
 		return 1
 	}
 	return 0
-}
-
-func nullableTime(value time.Time) *time.Time {
-	if value.IsZero() {
-		return nil
-	}
-	return &value
-}
-
-func nullableUUID(value uuid.UUID) *uuid.UUID {
-	if value == uuid.Nil {
-		return nil
-	}
-	return &value
 }
 
 func normalizeIdentity(value string) string {

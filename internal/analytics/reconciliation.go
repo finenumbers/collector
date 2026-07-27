@@ -170,7 +170,7 @@ func (c *Client) WriteReconciliationResult(
 					bucket.DeviceID, monthDate(coverage.ExpectedAt), coverage.CDRID,
 					bucket.PolicyRevision, reconciliation.Version, seq, string(coverage.State),
 					coverage.ExpectedAt, coverage.GraceExpiresAt, coverage.MissingAt,
-					coverage.RetryUntil, callID, method, coverage.Reason, delta, evidence,
+					coverage.RetryUntil, chUUIDPtr(callID), method, coverage.Reason, delta, evidence,
 					boolByte(coverage.Ambiguous), coverage.AmbiguityReason, now, uint8(0),
 				); err != nil {
 					return err

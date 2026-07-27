@@ -202,7 +202,15 @@ func (w *Worker) runLoop(ctx context.Context, cfg Config) error {
 			}
 			continue
 		}
-		if err := w.process(ctx, cfg, job); err != nil {
+		err = func() (processErr error) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					processErr = fmt.Errorf("projection panic: %v", recovered)
+				}
+			}()
+			return w.process(ctx, cfg, job)
+		}()
+		if err != nil {
 			w.Metrics.Failures.Add(1)
 			if failErr := w.Queue.FailCustomProjectionJob(ctx, job, err, cfg.Sleep); failErr != nil {
 				return fmt.Errorf("projection failed: %v; queue failure: %w", err, failErr)

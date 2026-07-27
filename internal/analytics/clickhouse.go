@@ -102,15 +102,19 @@ type CDRRecord struct {
 
 func Open(addr, database, username, password string) (*Client, error) {
 	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr:        []string{addr},
-		Auth:        clickhouse.Auth{Database: database, Username: username, Password: password},
-		DialTimeout: 10 * time.Second,
-		Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
+		Addr: []string{addr},
+		Auth: clickhouse.Auth{Database: database, Username: username, Password: password},
+		// DialTimeout also bounds pool acquisition wait when MaxOpenConns is saturated.
+		DialTimeout:     30 * time.Second,
+		MaxOpenConns:    32,
+		MaxIdleConns:    16,
+		ConnMaxLifetime: time.Hour,
+		Compression:     &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
 	})
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := conn.Ping(ctx); err != nil {
 		return nil, err

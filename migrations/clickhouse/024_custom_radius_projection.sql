@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS collector.custom_antifraud_calls
     accounting_start Nullable(DateTime64(6, 'UTC')),
     accounting_stop Nullable(DateTime64(6, 'UTC')),
     session_duration_seconds Nullable(Int64),
+    disconnect_cause_q850 Nullable(Int64) DEFAULT NULL,
+    delay_time_sec Nullable(Int64) DEFAULT NULL,
     ordered_attributes_json String,
     unmatched_provenance_json String,
     orphan_packet_ids Array(UUID),

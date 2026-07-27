@@ -183,6 +183,7 @@ func buildCall(identity string, indexes []int, packets []Packet) Call {
 			call.Orphans = append(call.Orphans, packet.ID)
 		}
 		applyAccounting(&call.Accounting, packet)
+		applyRouting(&call.Routing, packet)
 	}
 	for indicator := range indicatorSet {
 		call.Indicators = append(call.Indicators, indicator)
@@ -196,6 +197,7 @@ func buildCall(identity string, indexes []int, packets []Packet) Call {
 		call.Key.AcctSessionID = call.AcctSessionIDs[0]
 	}
 	call.Status = overallStatus(call.Packets)
+	finalizeCallOutcome(&call)
 	call.Explanations = append(call.Explanations, statusExplanation(call.Status))
 	return call
 }
@@ -229,6 +231,8 @@ func applyAccounting(accounting *Accounting, packet Packet) {
 	if value := firstAttributeValue(packet.Attributes, "event-timestamp"); value != "" {
 		if parsed, ok := parseAttributeTime(value); ok {
 			eventTime = parsed
+			copy := parsed
+			accounting.EventTimestamp = &copy
 		}
 	}
 	switch packet.Phase {
@@ -247,6 +251,149 @@ func applyAccounting(accounting *Accounting, packet Packet) {
 			accounting.SessionDuration = &seconds
 		}
 	}
+	if value := firstAttributeValue(packet.Attributes, "acct-delay-time"); value != "" {
+		if seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && seconds >= 0 {
+			accounting.DelayTimeSec = &seconds
+		}
+	}
+	if value := firstAttributeValue(packet.Attributes, "h323-setup-time"); value != "" {
+		if parsed, ok := parseAttributeTime(value); ok {
+			copy := parsed
+			accounting.SetupTime = &copy
+		}
+	}
+	if value := firstAttributeValue(packet.Attributes, "h323-connect-time"); value != "" {
+		if parsed, ok := parseAttributeTime(value); ok {
+			copy := parsed
+			accounting.ConnectTime = &copy
+		}
+	}
+	if value := firstAttributeValue(packet.Attributes, "h323-disconnect-time"); value != "" {
+		if parsed, ok := parseAttributeTime(value); ok {
+			copy := parsed
+			accounting.DisconnectTime = &copy
+		}
+	}
+	if value := firstAttributeValue(packet.Attributes, "h323-disconnect-cause"); value != "" {
+		if cause := parseQ850Cause(value); cause != nil {
+			accounting.DisconnectCauseQ850 = cause
+		}
+	}
+}
+
+func applyRouting(routing *Routing, packet Packet) {
+	set := func(dst *string, names ...string) {
+		if *dst != "" {
+			return
+		}
+		for _, name := range names {
+			if value := firstAttributeValue(packet.Attributes, name); value != "" {
+				*dst = value
+				return
+			}
+		}
+	}
+	set(&routing.OriginatingIP, "xpgk-origination-gateway-ip")
+	set(&routing.TerminationIP, "xpgk-termination-gateway-ip")
+	set(&routing.SrcNumberIn, "xpgk-src-number-in")
+	set(&routing.DstNumberIn, "xpgk-dst-number-in")
+	set(&routing.SrcNumberOut, "xpgk-src-number-out")
+	set(&routing.DstNumberOut, "xpgk-dst-number-out")
+	set(&routing.RedirectNumber, "h323-redirect-number")
+	set(&routing.RemoteID, "h323-remote-id")
+	set(&routing.OutTrunkgroupLabel, "out-trunkgroup-label")
+	set(&routing.InTrunkgroupLabel, "in-trunkgroup-label")
+	set(&routing.CallOrigin, "h323-call-origin")
+	set(&routing.CallType, "h323-call-type")
+	set(&routing.NASPort, "nas-port")
+	set(&routing.NASPortType, "nas-port-type")
+	set(&routing.FramedIPAddress, "framed-ip-address")
+}
+
+func finalizeCallOutcome(call *Call) {
+	call.VerificationResult = "absent"
+	var hasCheck bool
+	var sawAccept, sawReject, sawUnavailable, sawAmbiguous bool
+	for _, packet := range call.Packets {
+		requestType := firstAttributeValue(packet.Attributes, "xpgk-request-type")
+		isVerification := packet.Family == FamilyVerification || requestType == "check_call"
+		isIndication := packet.Family == FamilyIndication ||
+			requestType == "number" || requestType == "save_call"
+		if isIndication && packet.Direction == DirectionRequest &&
+			(packet.Status == PacketPaired || packet.Decision == DecisionInfoOnly) {
+			if packet.ResponseID != nil || packet.Status == PacketPaired {
+				call.IndicationAcked = true
+			}
+		}
+		if isIndication && packet.Direction == DirectionResponse &&
+			(packet.RadiusType == "access-accept" || packet.RadiusType == "access-response" ||
+				packet.Decision == DecisionInfoOnly) {
+			call.IndicationAcked = true
+		}
+		if packet.Family == FamilyAccounting && packet.Direction == DirectionRequest &&
+			packet.Status == PacketPaired {
+			call.AccountingAcked = true
+		}
+		if packet.Family == FamilyAccounting && packet.Direction == DirectionResponse {
+			call.AccountingAcked = true
+		}
+		if !isVerification {
+			continue
+		}
+		hasCheck = true
+		if packet.Status == PacketAmbiguous {
+			sawAmbiguous = true
+		}
+		switch packet.Decision {
+		case DecisionDeny:
+			sawReject = true
+		case DecisionAllow:
+			sawAccept = true
+		case DecisionUnavailableFallback:
+			sawUnavailable = true
+		}
+		if packet.Direction == DirectionRequest &&
+			(packet.Status == PacketPending || packet.Decision == DecisionUnavailableFallback) {
+			sawUnavailable = true
+		}
+	}
+	switch {
+	case !hasCheck:
+		call.VerificationResult = "absent"
+		call.FinalDecision = "not_applicable"
+	case sawReject:
+		call.VerificationResult = "reject"
+		call.FinalDecision = "blocked"
+	case sawUnavailable && !sawAccept:
+		call.VerificationResult = "no_response"
+		call.FinalDecision = "unavailable"
+	case sawAccept:
+		call.VerificationResult = "accept"
+		call.FinalDecision = "allowed"
+	case sawAmbiguous:
+		call.VerificationResult = "no_response"
+		call.FinalDecision = "unknown"
+	default:
+		call.VerificationResult = "no_response"
+		call.FinalDecision = "unknown"
+	}
+}
+
+func parseQ850Cause(value string) *int64 {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	base := 10
+	if strings.HasPrefix(strings.ToLower(trimmed), "0x") {
+		trimmed = trimmed[2:]
+		base = 16
+	}
+	parsed, err := strconv.ParseInt(trimmed, base, 64)
+	if err != nil || parsed < 0 {
+		return nil
+	}
+	return &parsed
 }
 
 func parseAttributeTime(value string) (time.Time, bool) {

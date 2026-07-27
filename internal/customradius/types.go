@@ -165,26 +165,56 @@ type PacketPhase struct {
 }
 
 type Accounting struct {
-	StartTime       *time.Time `json:"startTime,omitempty"`
-	StopTime        *time.Time `json:"stopTime,omitempty"`
-	TerminateCause  string     `json:"terminateCause,omitempty"`
-	SessionDuration *int64     `json:"sessionDurationSeconds,omitempty"`
+	StartTime            *time.Time `json:"startTime,omitempty"`
+	StopTime             *time.Time `json:"stopTime,omitempty"`
+	SetupTime            *time.Time `json:"setupTime,omitempty"`
+	ConnectTime          *time.Time `json:"connectTime,omitempty"`
+	DisconnectTime       *time.Time `json:"disconnectTime,omitempty"`
+	EventTimestamp       *time.Time `json:"eventTimestamp,omitempty"`
+	TerminateCause       string     `json:"terminateCause,omitempty"`
+	DisconnectCauseQ850  *int64     `json:"disconnectCauseQ850,omitempty"`
+	SessionDuration      *int64     `json:"sessionDurationSeconds,omitempty"`
+	DelayTimeSec         *int64     `json:"delayTimeSec,omitempty"`
+}
+
+// Routing holds optional Custom Eltex AVP context for a logical call.
+type Routing struct {
+	OriginatingIP      string `json:"originatingIp,omitempty"`
+	TerminationIP      string `json:"terminationIp,omitempty"`
+	SrcNumberIn        string `json:"srcNumberIn,omitempty"`
+	DstNumberIn        string `json:"dstNumberIn,omitempty"`
+	SrcNumberOut       string `json:"srcNumberOut,omitempty"`
+	DstNumberOut       string `json:"dstNumberOut,omitempty"`
+	RedirectNumber     string `json:"redirectNumber,omitempty"`
+	RemoteID           string `json:"remoteId,omitempty"`
+	OutTrunkgroupLabel string `json:"outTrunkgroupLabel,omitempty"`
+	InTrunkgroupLabel  string `json:"inTrunkgroupLabel,omitempty"`
+	CallOrigin         string `json:"callOrigin,omitempty"`
+	CallType           string `json:"callType,omitempty"`
+	NASPort            string `json:"nasPort,omitempty"`
+	NASPortType        string `json:"nasPortType,omitempty"`
+	FramedIPAddress    string `json:"framedIpAddress,omitempty"`
 }
 
 type Call struct {
-	ID             uuid.UUID         `json:"id"`
-	Key            CallKey           `json:"key"`
-	AcctSessionIDs []string          `json:"acctSessionIds,omitempty"`
-	Participants   Participants      `json:"participants"`
-	Indicators     []string          `json:"indicators"`
-	Phases         []PacketPhase     `json:"phases"`
-	Attributes     []Attribute       `json:"attributes"`
-	Accounting     Accounting        `json:"accounting"`
-	Packets        []Packet          `json:"packets"`
-	Unmatched      []EventProvenance `json:"unmatched"`
-	Orphans        []uuid.UUID       `json:"orphans"`
-	Explanations   []Explanation     `json:"explanations"`
-	Status         CallStatus        `json:"status"`
+	ID                  uuid.UUID         `json:"id"`
+	Key                 CallKey           `json:"key"`
+	AcctSessionIDs      []string          `json:"acctSessionIds,omitempty"`
+	Participants        Participants      `json:"participants"`
+	Indicators          []string          `json:"indicators"`
+	Phases              []PacketPhase     `json:"phases"`
+	Attributes          []Attribute       `json:"attributes"`
+	Accounting          Accounting        `json:"accounting"`
+	Routing             Routing           `json:"routing,omitempty"`
+	IndicationAcked     bool              `json:"indicationAcked"`
+	VerificationResult  string            `json:"verificationResult,omitempty"`
+	AccountingAcked     bool              `json:"accountingAcked"`
+	FinalDecision       string            `json:"finalDecision,omitempty"`
+	Packets             []Packet          `json:"packets"`
+	Unmatched           []EventProvenance `json:"unmatched"`
+	Orphans             []uuid.UUID       `json:"orphans"`
+	Explanations        []Explanation     `json:"explanations"`
+	Status              CallStatus        `json:"status"`
 }
 
 type UnmatchedFact struct {

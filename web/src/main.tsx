@@ -327,6 +327,7 @@ type AntifraudRow = {
   firstSeenAt: string
   lastSeenAt: string
   acctSessionId: string
+  acctSessionIds?: string[]
   h323ConfId: string
   calling: string
   called: string
@@ -1585,97 +1586,101 @@ function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
         <span><small>Номер A</small><strong className="mono">{cdr.incomingCgpn || cdr.outgoingCgpn || '—'}</strong></span>
         <span><small>Номер B</small><strong className="mono">{cdr.incomingCdpn || cdr.outgoingCdpn || '—'}</strong></span>
       </div></>}
-      {coverage && <><h4>Покрытие AntiFraud</h4><div className="call-facts">
-        <span><small>Состояние</small><strong><CoverageBadge coverage={coverage} /></strong></span>
-        <span><small>Метод</small><strong>{coverage.method || '—'}</strong></span>
-        <span><small>Причина</small><strong>{coverage.ambiguityReason || coverage.reason || '—'}</strong></span>
-        <span><small>Delta</small><strong>{coverage.deltaMs == null ? '—' : `${coverage.deltaMs} мс`}</strong></span>
-      </div>
-      {coverage.evidence && <details><summary>Доказательства сопоставления</summary>
-        <pre className="raw-payload">{JSON.stringify(redactDisplayValue(coverage.evidence), null, 2)}</pre></details>}</>}
-      {antifraud ? <AntiFraudCallBody value={antifraud} timezone={timezone} /> :
+      {coverage && <div className="call-facts">
+        <span><small>Покрытие AntiFraud</small><strong><CoverageBadge coverage={coverage} /></strong></span>
+      </div>}
+      {antifraud ? <AntiFraudCallBody value={antifraud} /> :
         coverage?.state !== 'not_applicable' &&
           <p className="warning-text">Пакеты не синтезируются: связанная цепочка AntiFraud отсутствует.</p>}
     </>}
   </div>
 }
 
-function AntiFraudCallBody({ value, timezone }: { value: AntifraudCallDetail; timezone: string }) {
+function attributeDisplay(attributes: OrderedAttribute[] | undefined, name: string): string | undefined {
+  const found = attributes?.find((item) => item.name.toLowerCase() === name.toLowerCase())
+  if (found == null || found.value == null) return undefined
+  return typeof found.value === 'string' ? found.value : String(found.value)
+}
+
+function antifraudTranscript(value: AntifraudCallDetail): string {
   const calling = value.participants?.callingNumber || value.calling || '—'
   const called = value.participants?.calledNumber || value.called || '—'
-  const packets = value.rawPackets?.length ? value.rawPackets : value.packets
+  const callLabel = value.h323ConfId || value.acctSessionId || value.callId
+  const lines = [
+    `CALL ${callLabel} | ${calling} -> ${called} | status=${value.status}`,
+  ]
   const timeline = value.timeline?.length ? value.timeline : []
+  if (!timeline.length) {
+    lines.push('incomplete: нет шагов RADIUS')
+  } else {
+    timeline.forEach((event, index) => {
+      const head = `${index + 1}) ${event.phase}: ${event.summary}`
+      lines.push(head)
+    })
+  }
+  const duration = value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds
+  const cause = value.accounting?.disconnectCause || '—'
   const completeness = value.chainCompleteness
+  if (completeness?.state && completeness.state !== 'complete') {
+    const missing = completeness.missingStages?.length
+      ? `missing ${completeness.missingStages.join(',')}`
+      : completeness.state
+    lines.push(`incomplete: ${missing}`)
+  }
+  lines.push(`Final: ${value.finalDecision || 'pending'}, duration=${duration ?? '—'}s, cause=${cause}`)
+  return lines.join('\n')
+}
+
+function antifraudSlimJSON(value: AntifraudCallDetail) {
+  const packets = value.rawPackets?.length ? value.rawPackets : value.packets
+  return {
+    callId: value.callId,
+    acctSessionId: value.acctSessionId,
+    acctSessionIds: value.acctSessionIds?.length
+      ? value.acctSessionIds
+      : (value.acctSessionId ? [value.acctSessionId] : []),
+    h323ConfId: value.h323ConfId,
+    participants: {
+      callingNumber: value.participants?.callingNumber || value.calling || '',
+      calledNumber: value.participants?.calledNumber || value.called || '',
+    },
+    status: value.status,
+    finalDecision: value.finalDecision,
+    timeline: (value.timeline || []).map((event) => ({
+      ts: event.ts,
+      phase: event.phase,
+      radiusType: event.radiusType,
+      ...(event.xpgkRequestType ? { xpgkRequestType: event.xpgkRequestType } : {}),
+      ...(event.acctStatusType ? { acctStatusType: event.acctStatusType } : {}),
+      summary: event.summary,
+    })),
+    accounting: {
+      setupTime: value.accounting?.setupTime || value.accountingStart,
+      connectTime: value.accounting?.connectTime,
+      disconnectTime: value.accounting?.disconnectTime || value.accountingStop,
+      disconnectCause: value.accounting?.disconnectCause,
+      sessionTimeSec: value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds,
+    },
+    rawPackets: (packets || []).map((packet) => ({
+      packetId: packet.packetId,
+      radiusType: packet.radiusType,
+      ...(attributeDisplay(packet.attributes, 'xpgk-request-type')
+        ? { xpgkRequestType: attributeDisplay(packet.attributes, 'xpgk-request-type') }
+        : {}),
+      ...(attributeDisplay(packet.attributes, 'Acct-Session-Id')
+        ? { acctSessionId: attributeDisplay(packet.attributes, 'Acct-Session-Id') }
+        : {}),
+      attributes: redactDisplayValue(packet.attributes || []),
+    })),
+  }
+}
+
+function AntiFraudCallBody({ value }: { value: AntifraudCallDetail }) {
   return <section aria-label="Полный цикл AntiFraud">
     <h4>Цепочка AntiFraud</h4>
-    <div className="call-facts">
-      <span><small>CALL</small><strong className="mono">{value.acctSessionId || value.callId}</strong></span>
-      <span><small>A → B</small><strong className="mono">{calling} → {called}</strong></span>
-      <span><small>Статус</small><strong>{value.status}</strong></span>
-      <span><small>Final</small><strong>{value.finalDecision || '—'}</strong></span>
-      <span><small>Фазы</small><strong>{value.phases?.join(' → ') || '—'}</strong></span>
-      <span><small>Полнота цепочки</small><strong><ChainCompletenessBadge value={completeness} /></strong></span>
-      <span><small>Покрытие CDR</small><strong><CoverageBadge coverage={value.coverage} /></strong></span>
-      <span><small>H323</small><strong className="mono">{value.h323ConfId || '—'}</strong></span>
-      <span><small>Длительность</small><strong>
-        {value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds ?? '—'}
-        {(value.accounting?.sessionTimeSec != null || value.sessionDurationSeconds != null) ? ' c' : ''}
-      </strong></span>
-      <span><small>Cause</small><strong>{value.accounting?.disconnectCause || '—'}</strong></span>
-    </div>
-    {completeness?.state && completeness.state !== 'complete' && <p className="warning-text" role="status">
-      Цепочка неполная
-      {completeness.missingStages?.length ? `: нет ${completeness.missingStages.join(', ')}` : ''}
-      {completeness.notes?.length ? `. ${completeness.notes.join('; ')}` : '.'}
-    </p>}
-    <div className="timeline">{timeline.map((event, index) =>
-      <div className="timeline-item" key={`${event.packetId}-${index}`}>
-        <div className="call-facts">
-          <span><small>{index + 1}. {event.phase}</small>
-            <strong>{event.radiusType}{event.xpgkRequestType ? ` · ${event.xpgkRequestType}` : ''}
-              {event.acctStatusType ? ` · ${event.acctStatusType}` : ''}</strong></span>
-          <span><small>Время</small><strong className="mono">{formatTime(event.ts, timezone)}</strong></span>
-          <span><small>Решение</small><strong>{event.decision || '—'}</strong></span>
-          <span><small>Смысл</small><strong>{event.summary}</strong></span>
-        </div>
-      </div>)}
-    </div>
-
-    <h4>Пакеты и атрибуты ({packets?.length || 0})</h4>
-    {value.truncated && <p className="warning-text" role="alert">
-      Ответ сокращён: {value.warnings?.join('; ')}</p>}
-    <div className="call-facts">
-      <span><small>Setup</small><strong>{formatTime(value.accounting?.setupTime || value.accountingStart, timezone)}</strong></span>
-      <span><small>Disconnect</small><strong>{formatTime(value.accounting?.disconnectTime || value.accountingStop, timezone)}</strong></span>
-      <span><small>Delay</small><strong>{value.accounting?.delayTimeSec ?? '—'}
-        {value.accounting?.delayTimeSec != null ? ' c' : ''}</strong></span>
-    </div>
-    <details><summary>Атрибуты вызова ({value.attributes?.length || 0})</summary>
-      <pre className="raw-payload">{JSON.stringify(redactDisplayValue(value.attributes || []), null, 2)}</pre></details>
-    <details><summary>Обмены request / response ({value.exchanges?.length || 0})</summary>
-      <pre className="raw-payload">{JSON.stringify(redactDisplayValue(value.exchanges || []), null, 2)}</pre></details>
-    <div className="timeline">{packets?.map((packet) =>
-      <details className="timeline-item" key={packet.packetId}>
-        <summary><span className="mono">{formatTime(packet.firstSeenAt, timezone)}</span>
-          {' '}{packet.family || packet.phase} · {packet.radiusType} · {packet.direction} · {packet.status}
-          {' '}· {packet.decision || 'без решения'}</summary>
-        <div className="call-facts">
-          <span><small>Request / response</small><strong className="mono">
-            {packet.requestId || '—'} / {packet.responseId || '—'}</strong></span>
-          <span><small>Попытки</small><strong>{packet.attemptIds?.length || 0}</strong></span>
-          <span><small>Confidence</small><strong>{packet.confidence || '—'}</strong></span>
-          <span><small>Объяснения</small><strong>{packet.explanationCodes?.join(', ') || '—'}</strong></span>
-          <span><small>Orphan / ambiguity</small><strong>
-            {packet.orphanReason || packet.ambiguityReason || '—'}</strong></span>
-          <span><small>Исходные фрагменты</small><strong>{packet.members?.length || 0}</strong></span>
-        </div>
-        <pre className="raw-payload">{JSON.stringify(redactDisplayValue(packet.attributes || []), null, 2)}</pre>
-      </details>)}</div>
-    {Boolean(value.orphanPacketIds?.length || value.unmatched) && <details>
-      <summary>Непривязанные факты</summary>
-      <pre className="raw-payload">{JSON.stringify(redactDisplayValue({
-        orphanPacketIds: value.orphanPacketIds, unmatched: value.unmatched,
-      }), null, 2)}</pre></details>}
+    <pre className="raw-payload">{antifraudTranscript(value)}</pre>
+    <h4>AntiFraud JSON</h4>
+    <pre className="raw-payload">{JSON.stringify(antifraudSlimJSON(value), null, 2)}</pre>
   </section>
 }
 

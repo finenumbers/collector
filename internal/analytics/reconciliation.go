@@ -113,7 +113,7 @@ func (c *Client) LoadReconciliationEvidence(
 		return nil, nil, err
 	}
 	callRows, err := c.Conn.Query(ctx, `SELECT call_id,device_id,first_seen_at,
-		acct_session_id,h323_conf_id,calling,called,policy_revision
+		acct_session_id,acct_session_ids,h323_conf_id,calling,called,policy_revision
 		FROM collector.custom_antifraud_calls_current
 		WHERE device_id=? AND policy_revision=? AND first_seen_at>=? AND first_seen_at<?
 		  AND call_id NOT IN (
@@ -132,7 +132,7 @@ func (c *Client) LoadReconciliationEvidence(
 		var item reconciliation.Call
 		if err := callRows.Scan(
 			&item.ID, &item.DeviceID, &item.EventTime, &item.AcctSessionID,
-			&item.H323ConfID, &item.Calling, &item.Called, &item.PolicyRevision,
+			&item.AcctSessionIDs, &item.H323ConfID, &item.Calling, &item.Called, &item.PolicyRevision,
 		); err != nil {
 			return nil, nil, err
 		}

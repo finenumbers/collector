@@ -189,14 +189,18 @@ func TestStrictCallIdentity(t *testing.T) {
 		raw(4, 3*time.Second, "Antifraud-Auth-Request [4] Acct-Session-Id=s3 h323-conf-id=unique"),
 		raw(5, 4*time.Second, "Antifraud-Auth-Request [5] h323-conf-id=UNIQUE"),
 	}, testBase.Add(5*time.Second))
-	if len(result.Calls) != 3 {
-		t.Fatalf("calls=%d, want separate s1/s2/s3: %+v", len(result.Calls), result.Calls)
+	// Shared h323 H merges s1+s2+lone-H; unique merges s3+UNIQUE → 2 logical calls.
+	if len(result.Calls) != 2 {
+		t.Fatalf("calls=%d, want 2 logical h323 calls: %+v", len(result.Calls), result.Calls)
 	}
-	if result.Packets[2].Status != PacketAmbiguous {
-		t.Fatalf("multiply mapped H323 packet status=%q", result.Packets[2].Status)
+	var shared *Call
+	for index := range result.Calls {
+		if result.Calls[index].Key.H323ConfID == "h" {
+			shared = &result.Calls[index]
+		}
 	}
-	if result.Packets[4].Status == PacketAmbiguous {
-		t.Fatal("uniquely mapped H323 packet was not reconciled")
+	if shared == nil || len(shared.AcctSessionIDs) != 2 {
+		t.Fatalf("shared h323 call missing session legs: %+v", result.Calls)
 	}
 }
 
@@ -283,8 +287,11 @@ func TestProductionV16RawFixtureAssembly(t *testing.T) {
 	if len(result.Packets) != 4 {
 		t.Fatalf("packets=%d, want four request/reply packets: %+v", len(result.Packets), result.Packets)
 	}
-	if len(result.Calls) != 2 {
-		t.Fatalf("calls=%d, want strict session-a/session-b calls: %+v", len(result.Calls), result.Calls)
+	if len(result.Calls) != 1 {
+		t.Fatalf("calls=%d, want one logical h323 call: %+v", len(result.Calls), result.Calls)
+	}
+	if len(result.Calls[0].AcctSessionIDs) != 2 {
+		t.Fatalf("session legs=%v, want session-a and session-b", result.Calls[0].AcctSessionIDs)
 	}
 	for _, packet := range result.Packets {
 		if packet.Status != PacketPaired || packet.Decision != DecisionInfoOnly {
@@ -296,8 +303,10 @@ func TestProductionV16RawFixtureAssembly(t *testing.T) {
 		*result.Packets[1].ResponseLatencyMillis != 111 {
 		t.Fatalf("production Proc Reply was not status enrichment: %+v", result.Packets[1])
 	}
-	if len(result.Calls[0].Unmatched) != 0 || len(result.Calls[1].Unmatched) != 0 {
-		t.Fatal("shared context-only CDR fact was copied into multiple sessions")
+	// Context-only "RADIUS server rejected" attaches when a unique logical call owns [C…].
+	if len(result.Calls[0].Unmatched) != 1 {
+		t.Fatalf("unmatched facts on logical call=%+v, want the rejected-line provenance",
+			result.Calls[0].Unmatched)
 	}
 }
 

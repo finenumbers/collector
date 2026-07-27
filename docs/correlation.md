@@ -10,13 +10,15 @@ Custom AntiFraud строится только из immutable `collector.syslog_
 worker собирает RADIUS-пакеты и вызовы Custom AntiFraud в staged snapshots, а видимость
 задаёт active marker. Сырые Syslog-строки не изменяются и не удаляются replay.
 
-Разные нормализованные `Acct-Session-Id` всегда означают разные вызовы Custom AntiFraud.
-Один CDR может быть связан только с одним таким вызовом; несколько exact-кандидатов
-остаются `ambiguous`.
+Логический вызов Custom AntiFraud = один нормализованный `h323-conf-id`. Несколько
+`Acct-Session-Id` (ноги) с общим h323 входят в **один** Call / одну строку таблицы /
+одну карточку. Без h323 identity падает на `Acct-Session-Id` (одна session = один Call).
+Один CDR связывается только с одним logical call; несколько exact-кандидатов остаются
+`ambiguous`.
 
 Custom call identity (строго):
-- primary — `normalize(Acct-Session-Id)`;
-- secondary — `h323-conf-id` только как link к уже известной session или lone `h323:…`;
+- primary — `normalize(h323-conf-id)` → logical call `h323:…`;
+- fallback — `normalize(Acct-Session-Id)` → `session:…`, если h323 пуст;
 - `calling`/`called`, SMG lane `[C…]`, `clg`/`cld` — только assembly и validation,
   никогда не образуют Call и не склеивают пакеты в один вызов;
 - нет session и нет h323 → packet остаётся orphan/ambiguous, в Call не кладётся;
@@ -30,18 +32,20 @@ Attribute-dump строки (`Acct-Session-Id`, `Eltex-AVPair`, `xpgk-request-ty
 ## Детерминированное правило
 
 ```text
-device_id + normalize(Acct-Session-Id)
+device_id + normalize(h323-conf-id)   # если h323 есть
+device_id + normalize(Acct-Session-Id) # иначе
 ```
 
 Нормализация удаляет **все** whitespace и приводит регистр (одинаково в CDR,
 Custom AF keys и reconciliation). Matching сначала проверяет exact normalized
-`Acct-Session-Id` CDR ↔ Custom call. Если exact ID недоступен, допускается
-unique H323 значение из реального поля CDR (`h323-conf-id` / эквивалент).
+`Acct-Session-Id` CDR ↔ любая нога logical call (`acct_session_ids`). Если exact ID
+недоступен, допускается unique H323 значение из реального поля CDR
+(`h323-conf-id` / эквивалент) ↔ logical call h323.
 
 Номера A/B и время — **вторичная проверка** уже найденного primary-кандидата:
 при расхождении assign запрещён (`number_mismatch` / `time_mismatch`). Номера и
-время никогда не выбирают кандидата сами. Разные `Acct-Session-Id` никогда не
-склеиваются в один Call.
+время никогда не выбирают кандидата сами. Разные session **без** общего h323
+никогда не склеиваются в один Call.
 
 Покрытие со стороны AF-call: `awaiting_cdr` → `expected` → `late` → `missing`,
 либо `matched` / `ambiguous`. Неполная RADIUS-цепочка помечается

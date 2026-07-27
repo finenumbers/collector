@@ -40,7 +40,9 @@ func (s *Store) CustomAntifraudReady(
 	return ready, err
 }
 
-func (s *Store) SetCustomProjectionGlobalEnabled(ctx context.Context, enabled bool) error {
+func (s *Store) SetCustomProjectionGlobalEnabled(
+	ctx context.Context, enabled bool, lookback time.Duration,
+) error {
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -57,30 +59,98 @@ func (s *Store) SetCustomProjectionGlobalEnabled(ctx context.Context, enabled bo
 		}
 		return tx.Commit(ctx)
 	}
-	// Only create missing jobs or revive cancelled/failed ones. Never reset an
-	// in-flight/completed backfill on every process start — that re-scans all
-	// Syslog and starves ClickHouse after each redeploy.
+	if lookback <= 0 {
+		lookback = 24 * time.Hour
+	}
+	cursorStart := time.Now().UTC().Add(-lookback)
+	// Cancel only historical buckets that would replay days of Syslog.
+	if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
+		SET status='cancelled',lease_expires_at=NULL,worker_id=NULL,
+			completed_at=now(),updated_at=now()
+		WHERE kind='bucket' AND status IN ('pending','running') AND bucket_start < $1`,
+		cursorStart); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE custom_reconciliation_jobs
+		SET status='cancelled',lease_expires_at=NULL,worker_id=NULL,
+			completed_at=now(),updated_at=now()
+		WHERE kind='bucket' AND status IN ('pending','running') AND bucket_start < $1`,
+		cursorStart); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO custom_projection_jobs
-		(device_id,policy_revision,kind,generation)
-		SELECT id,antifraud_policy_revision,'discover',1 FROM devices
+		(device_id,policy_revision,kind,cursor_received_at,cursor_event_id,generation)
+		SELECT id,antifraud_policy_revision,'discover',$1,
+			'00000000-0000-0000-0000-000000000000',1 FROM devices
 		WHERE antifraud_enabled AND enabled AND purge_state='active'
 		ON CONFLICT (device_id,policy_revision,kind,
 			(COALESCE(bucket_start, '-infinity'::timestamptz)))
-		DO UPDATE SET status='pending',generation=custom_projection_jobs.generation+1,
-			projection_seq=nextval('custom_projection_seq'),next_attempt_at=now(),
-			completed_at=NULL,last_error=NULL,updated_at=now()
-		WHERE custom_projection_jobs.status IN ('cancelled','failed')`); err != nil {
+		DO UPDATE SET
+			status=CASE
+				WHEN custom_projection_jobs.status IN ('cancelled','failed') THEN 'pending'
+				ELSE custom_projection_jobs.status
+			END,
+			generation=CASE
+				WHEN custom_projection_jobs.status IN ('cancelled','failed')
+					THEN custom_projection_jobs.generation+1
+				ELSE custom_projection_jobs.generation
+			END,
+			projection_seq=CASE
+				WHEN custom_projection_jobs.status IN ('cancelled','failed')
+					THEN nextval('custom_projection_seq')
+				ELSE custom_projection_jobs.projection_seq
+			END,
+			cursor_received_at=CASE
+				WHEN custom_projection_jobs.cursor_received_at IS NULL
+					OR custom_projection_jobs.cursor_received_at < $1
+					OR custom_projection_jobs.status IN ('cancelled','failed')
+				THEN $1 ELSE custom_projection_jobs.cursor_received_at
+			END,
+			cursor_event_id=CASE
+				WHEN custom_projection_jobs.cursor_received_at IS NULL
+					OR custom_projection_jobs.cursor_received_at < $1
+					OR custom_projection_jobs.status IN ('cancelled','failed')
+				THEN '00000000-0000-0000-0000-000000000000'
+				ELSE custom_projection_jobs.cursor_event_id
+			END,
+			next_attempt_at=LEAST(custom_projection_jobs.next_attempt_at,now()),
+			completed_at=NULL,last_error=NULL,updated_at=now()`,
+		cursorStart); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO custom_reconciliation_jobs
-		(device_id,policy_revision,kind,generation)
-		SELECT id,antifraud_policy_revision,'discover',1 FROM devices
+		(device_id,policy_revision,kind,cursor_event_at,cursor_record_id,generation)
+		SELECT id,antifraud_policy_revision,'discover',$1,
+			'00000000-0000-0000-0000-000000000000',1 FROM devices
 		WHERE antifraud_enabled AND enabled AND purge_state='active'
 		ON CONFLICT (device_id,policy_revision,kind,
 			(COALESCE(bucket_start, '-infinity'::timestamptz)))
-		DO UPDATE SET status='pending',generation=custom_reconciliation_jobs.generation+1,
-			next_attempt_at=now(),completed_at=NULL,last_error=NULL,updated_at=now()
-		WHERE custom_reconciliation_jobs.status IN ('cancelled','failed')`); err != nil {
+		DO UPDATE SET
+			status=CASE
+				WHEN custom_reconciliation_jobs.status IN ('cancelled','failed') THEN 'pending'
+				ELSE custom_reconciliation_jobs.status
+			END,
+			generation=CASE
+				WHEN custom_reconciliation_jobs.status IN ('cancelled','failed')
+					THEN custom_reconciliation_jobs.generation+1
+				ELSE custom_reconciliation_jobs.generation
+			END,
+			cursor_event_at=CASE
+				WHEN custom_reconciliation_jobs.cursor_event_at IS NULL
+					OR custom_reconciliation_jobs.cursor_event_at < $1
+					OR custom_reconciliation_jobs.status IN ('cancelled','failed')
+				THEN $1 ELSE custom_reconciliation_jobs.cursor_event_at
+			END,
+			cursor_record_id=CASE
+				WHEN custom_reconciliation_jobs.cursor_event_at IS NULL
+					OR custom_reconciliation_jobs.cursor_event_at < $1
+					OR custom_reconciliation_jobs.status IN ('cancelled','failed')
+				THEN '00000000-0000-0000-0000-000000000000'
+				ELSE custom_reconciliation_jobs.cursor_record_id
+			END,
+			next_attempt_at=LEAST(custom_reconciliation_jobs.next_attempt_at,now()),
+			completed_at=NULL,last_error=NULL,updated_at=now()`,
+		cursorStart); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

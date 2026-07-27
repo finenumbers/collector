@@ -42,6 +42,7 @@ type Config struct {
 	CustomProjectionMaxMemoryBytes int64
 	CustomProjectionSleep          time.Duration
 	CustomProjectionLease          time.Duration
+	CustomProjectionLookback       time.Duration
 	CustomResponseTimeout          time.Duration
 	CustomPairingHorizon           time.Duration
 	CustomRetryHorizon             time.Duration
@@ -84,13 +85,14 @@ func Load() (Config, error) {
 		SessionTTL:                     12 * time.Hour,
 		SecureCookies:                  envBool("SECURE_COOKIES", false),
 		TrustedProxyCount:              envInt("TRUSTED_PROXY_COUNT", 1),
-		CustomProjectionEnabled:        envBool("CUSTOM_PROJECTION_ENABLED", true),
-		CustomProjectionBatchSize:      envInt("CUSTOM_PROJECTION_BATCH_SIZE", 128),
-		CustomProjectionMaxEvents:      envInt("CUSTOM_PROJECTION_MAX_EVENTS", 20_000),
+		CustomProjectionEnabled:        envBool("CUSTOM_PROJECTION_ENABLED", false),
+		CustomProjectionBatchSize:      envInt("CUSTOM_PROJECTION_BATCH_SIZE", 64),
+		CustomProjectionMaxEvents:      envInt("CUSTOM_PROJECTION_MAX_EVENTS", 5_000),
 		CustomProjectionThreads:        envInt("CUSTOM_PROJECTION_THREADS", 1),
-		CustomProjectionMaxMemoryBytes: envInt64("CUSTOM_PROJECTION_MAX_MEMORY_BYTES", 128<<20),
-		CustomProjectionSleep:          envDuration("CUSTOM_PROJECTION_SLEEP", time.Second),
+		CustomProjectionMaxMemoryBytes: envInt64("CUSTOM_PROJECTION_MAX_MEMORY_BYTES", 64<<20),
+		CustomProjectionSleep:          envDuration("CUSTOM_PROJECTION_SLEEP", 3*time.Second),
 		CustomProjectionLease:          envDuration("CUSTOM_PROJECTION_LEASE", 2*time.Minute),
+		CustomProjectionLookback:       envDuration("CUSTOM_PROJECTION_LOOKBACK", 24*time.Hour),
 		CustomResponseTimeout:          envDuration("CUSTOM_RESPONSE_TIMEOUT", 5*time.Second),
 		CustomPairingHorizon:           envDuration("CUSTOM_PAIRING_HORIZON", 5*time.Minute),
 		CustomRetryHorizon:             envDuration("CUSTOM_RETRY_HORIZON", 7*24*time.Hour),

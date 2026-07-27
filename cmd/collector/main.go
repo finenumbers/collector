@@ -103,7 +103,9 @@ func main() {
 		slog.Error("object archive startup failed", "error", err)
 		os.Exit(1)
 	}
-	if err := control.SetCustomProjectionGlobalEnabled(ctx, cfg.CustomProjectionEnabled); err != nil {
+	if err := control.SetCustomProjectionGlobalEnabled(
+		ctx, cfg.CustomProjectionEnabled, cfg.CustomProjectionLookback,
+	); err != nil {
 		slog.Error("custom projection global gate setup failed", "error", err)
 		os.Exit(1)
 	}

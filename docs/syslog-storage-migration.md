@@ -8,10 +8,27 @@ this cleanup.
 ## Preflight
 
 Stop the application container so no worker can race the copy. Keep
-PostgreSQL and ClickHouse running, then execute:
+PostgreSQL and ClickHouse running. Take an off-host backup before any
+destructive cleanup — copy verification protects against a bad copy, but it
+is not a restore point:
 
 ```bash
 docker compose -f deploy/compose.yml stop collector
+docker compose -f deploy/compose.yml exec -T postgres \
+  pg_dump -Fc -U collector collector > "collector-pg-$(date -u +%Y%m%dT%H%M%SZ).dump"
+docker compose -f deploy/compose.yml exec -T clickhouse \
+  clickhouse-client --user collector --password "$CLICKHOUSE_PASSWORD" \
+  --query "BACKUP TABLE collector.raw_syslog TO Disk('default', 'backups/raw_syslog-$(date -u +%Y%m%dT%H%M%SZ)')"
+```
+
+If your ClickHouse build or storage policy does not support `BACKUP TABLE`,
+take a filesystem/volume snapshot of the ClickHouse data directory instead
+(see [Backup](deployment.md#backup)). Keep the dump and snapshot until the
+new release has served production traffic and retention/purge look healthy.
+
+Then verify the immutable copy:
+
+```bash
 docker compose -f deploy/compose.yml run --rm collector migration-preflight
 ```
 

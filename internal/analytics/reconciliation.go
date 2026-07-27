@@ -10,6 +10,7 @@ import (
 	"collector/internal/reconciliation"
 	"collector/internal/workload"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 )
 
@@ -150,58 +151,55 @@ func (c *Client) WriteReconciliationResult(
 	_ = config
 	now := time.Now().UTC()
 	seq := uint64(now.UnixNano())
-	coverageBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_antifraud_coverage
+	if err := c.withBatch(ctx, `INSERT INTO collector.cdr_antifraud_coverage
 		(device_id,event_month,cdr_id,policy_revision,reconciliation_version,projection_seq,
 		state,expected_at,grace_expires_at,missing_terminal_at,retry_until,matched_call_id,
-		method,reason,delta_ms,matched_evidence_json,ambiguous,ambiguity_reason,updated_at,deleted)`)
-	if err != nil {
+		method,reason,delta_ms,matched_evidence_json,ambiguous,ambiguity_reason,updated_at,deleted)`,
+		func(batch driver.Batch) error {
+			for _, coverage := range result.Coverage {
+				var callID *uuid.UUID
+				method, delta, evidence := "none", (*int64)(nil), "{}"
+				if coverage.Assignment != nil {
+					callID = &coverage.Assignment.CallID
+					method = coverage.Assignment.Method
+					value := coverage.Assignment.Delta.Milliseconds()
+					delta = &value
+					evidence = encodeEvidence(coverage.Assignment.MatchedEvidence)
+				}
+				if err := batch.Append(
+					bucket.DeviceID, monthDate(coverage.ExpectedAt), coverage.CDRID,
+					bucket.PolicyRevision, reconciliation.Version, seq, string(coverage.State),
+					coverage.ExpectedAt, coverage.GraceExpiresAt, coverage.MissingAt,
+					coverage.RetryUntil, callID, method, coverage.Reason, delta, evidence,
+					boolByte(coverage.Ambiguous), coverage.AmbiguityReason, now, uint8(0),
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
 		return err
 	}
-	assignmentBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_antifraud_assignments
+	if err := c.withBatch(ctx, `INSERT INTO collector.cdr_antifraud_assignments
 		(device_id,event_month,assignment_id,cdr_id,call_id,policy_revision,
 		reconciliation_version,projection_seq,method,reason,delta_ms,matched_evidence_json,
-		assigned_at,ambiguous,ambiguity_reason,deleted)`)
-	if err != nil {
-		return err
-	}
-	for _, coverage := range result.Coverage {
-		var callID *uuid.UUID
-		method, delta, evidence := "none", (*int64)(nil), "{}"
-		if coverage.Assignment != nil {
-			callID = &coverage.Assignment.CallID
-			method = coverage.Assignment.Method
-			value := coverage.Assignment.Delta.Milliseconds()
-			delta = &value
-			evidence = encodeEvidence(coverage.Assignment.MatchedEvidence)
+		assigned_at,ambiguous,ambiguity_reason,deleted)`, func(batch driver.Batch) error {
+		for _, assignment := range result.Assignments {
+			delta := assignment.Delta.Milliseconds()
+			assignmentID := uuid.NewHash(
+				sha1.New(), uuid.NameSpaceOID,
+				[]byte(assignment.CDRID.String()+"\x00"+assignment.CallID.String()), 5,
+			)
+			if err := batch.Append(
+				bucket.DeviceID, monthDate(now), assignmentID, assignment.CDRID, assignment.CallID,
+				bucket.PolicyRevision, assignment.Version, seq, assignment.Method, assignment.Reason,
+				&delta, encodeEvidence(assignment.MatchedEvidence), now, uint8(0), "", uint8(0),
+			); err != nil {
+				return err
+			}
 		}
-		if err := coverageBatch.Append(
-			bucket.DeviceID, monthDate(coverage.ExpectedAt), coverage.CDRID,
-			bucket.PolicyRevision, reconciliation.Version, seq, string(coverage.State),
-			coverage.ExpectedAt, coverage.GraceExpiresAt, coverage.MissingAt,
-			coverage.RetryUntil, callID, method, coverage.Reason, delta, evidence,
-			boolByte(coverage.Ambiguous), coverage.AmbiguityReason, now, uint8(0),
-		); err != nil {
-			return err
-		}
-	}
-	for _, assignment := range result.Assignments {
-		delta := assignment.Delta.Milliseconds()
-		assignmentID := uuid.NewHash(
-			sha1.New(), uuid.NameSpaceOID,
-			[]byte(assignment.CDRID.String()+"\x00"+assignment.CallID.String()), 5,
-		)
-		if err := assignmentBatch.Append(
-			bucket.DeviceID, monthDate(now), assignmentID, assignment.CDRID, assignment.CallID,
-			bucket.PolicyRevision, assignment.Version, seq, assignment.Method, assignment.Reason,
-			&delta, encodeEvidence(assignment.MatchedEvidence), now, uint8(0), "", uint8(0),
-		); err != nil {
-			return err
-		}
-	}
-	if err := coverageBatch.Send(); err != nil {
-		return err
-	}
-	if err := assignmentBatch.Send(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 	return c.Conn.Exec(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets

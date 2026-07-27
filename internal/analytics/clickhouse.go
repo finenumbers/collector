@@ -16,6 +16,7 @@ import (
 	"collector/internal/workload"
 
 	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 )
 
@@ -211,7 +212,7 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 		return err
 	}
 	defer release()
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_records
+	if err := c.withBatch(ctx, `INSERT INTO collector.cdr_records
 		(record_id,device_id,file_id,row_number,ingested_at,sequence_number,boot_epoch,sequence,
 		 setup_time,connect_time,disconnect_time,duration_ms,release_cause,release_info,
 		 release_side,incoming_ip,outgoing_ip,incoming_type,outgoing_type,incoming_description,
@@ -221,33 +222,31 @@ func (c *Client) InsertCDRBatch(ctx context.Context, records []CDRRecord) error 
 		 outgoing_e1_channel,incoming_sip_call_id,outgoing_sip_call_id,incoming_ss7_cic,
 		 outgoing_ss7_cic,radius_session_id,radius_session_id_normalized,global_callref,
 		 unique_tag,transfer_mark,rejecting_radius_server,raw_fields,source_timezone,
-		 source_utc_offset_minutes)`)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
-		if err := batch.Append(
-			record.RecordID, record.DeviceID, record.FileID, record.RowNumber, record.IngestedAt,
-			record.SequenceNumber, record.BootEpoch, record.Sequence, record.SetupTime,
-			record.ConnectTime, record.DisconnectTime, record.DurationMS, record.ReleaseCause,
-			record.ReleaseInfo, record.ReleaseSide, record.IncomingIP, record.OutgoingIP,
-			record.IncomingType, record.OutgoingType, record.IncomingDescription,
-			record.OutgoingDescription, record.IncomingCgPN, record.OutgoingCgPN,
-			record.IncomingCdPN, record.OutgoingCdPN, record.IncomingRedirectingNumber,
-			record.OutgoingRedirectingNumber, record.IncomingNumplan, record.OutgoingNumplan,
-			record.CallingNAI, record.CalledNAI, record.IncomingE1Stream,
-			record.IncomingE1Channel, record.OutgoingE1Stream, record.OutgoingE1Channel,
-			record.IncomingSIPCallID, record.OutgoingSIPCallID,
-			record.IncomingSS7CIC, record.OutgoingSS7CIC,
-			record.RadiusSessionID, record.RadiusSessionIDNormalized, record.GlobalCallref,
-			record.UniqueTag, record.TransferMark, record.RejectingRadiusServer,
-			redactStringMap(record.RawFields),
-			record.SourceTimezone, record.SourceUTCOffsetMinutes,
-		); err != nil {
-			return err
+		 source_utc_offset_minutes)`, func(batch driver.Batch) error {
+		for _, record := range records {
+			if err := batch.Append(
+				record.RecordID, record.DeviceID, record.FileID, record.RowNumber, record.IngestedAt,
+				record.SequenceNumber, record.BootEpoch, record.Sequence, record.SetupTime,
+				record.ConnectTime, record.DisconnectTime, record.DurationMS, record.ReleaseCause,
+				record.ReleaseInfo, record.ReleaseSide, record.IncomingIP, record.OutgoingIP,
+				record.IncomingType, record.OutgoingType, record.IncomingDescription,
+				record.OutgoingDescription, record.IncomingCgPN, record.OutgoingCgPN,
+				record.IncomingCdPN, record.OutgoingCdPN, record.IncomingRedirectingNumber,
+				record.OutgoingRedirectingNumber, record.IncomingNumplan, record.OutgoingNumplan,
+				record.CallingNAI, record.CalledNAI, record.IncomingE1Stream,
+				record.IncomingE1Channel, record.OutgoingE1Stream, record.OutgoingE1Channel,
+				record.IncomingSIPCallID, record.OutgoingSIPCallID,
+				record.IncomingSS7CIC, record.OutgoingSS7CIC,
+				record.RadiusSessionID, record.RadiusSessionIDNormalized, record.GlobalCallref,
+				record.UniqueTag, record.TransferMark, record.RejectingRadiusServer,
+				redactStringMap(record.RawFields),
+				record.SourceTimezone, record.SourceUTCOffsetMinutes,
+			); err != nil {
+				return err
+			}
 		}
-	}
-	if err := batch.Send(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 	if err := c.InsertCDRTimeInterpretationsBatch(ctx, records); err != nil {
@@ -267,22 +266,20 @@ func (c *Client) InsertCDRTimeInterpretationsBatch(
 		return err
 	}
 	defer release()
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_time_interpretations
-		(record_id,device_id,interpreted_at,setup_time,connect_time,disconnect_time,
-		 source_timezone,source_utc_offset_minutes)`)
-	if err != nil {
-		return err
-	}
 	now := time.Now().UTC()
-	for _, record := range records {
-		if err := batch.Append(
-			record.RecordID, record.DeviceID, now, record.SetupTime, record.ConnectTime,
-			record.DisconnectTime, record.SourceTimezone, record.SourceUTCOffsetMinutes,
-		); err != nil {
-			return err
+	if err := c.withBatch(ctx, `INSERT INTO collector.cdr_time_interpretations
+		(record_id,device_id,interpreted_at,setup_time,connect_time,disconnect_time,
+		 source_timezone,source_utc_offset_minutes)`, func(batch driver.Batch) error {
+		for _, record := range records {
+			if err := batch.Append(
+				record.RecordID, record.DeviceID, now, record.SetupTime, record.ConnectTime,
+				record.DisconnectTime, record.SourceTimezone, record.SourceUTCOffsetMinutes,
+			); err != nil {
+				return err
+			}
 		}
-	}
-	if err := batch.Send(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 	return c.InsertCDRTimeFactsBatch(ctx, records)
@@ -297,31 +294,30 @@ func (c *Client) InsertCDRTimeFactsBatch(ctx context.Context, records []CDRRecor
 		return err
 	}
 	defer release()
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_time_facts
+	now := time.Now().UTC()
+	return c.withBatch(ctx, `INSERT INTO collector.cdr_time_facts
 		(device_id,timezone_revision,record_id,interpreted_at,setup_wall_clock,
 		 connect_wall_clock,disconnect_wall_clock,setup_time_utc,connect_time_utc,
-		 disconnect_time_utc,source_timezone,source_utc_offset_minutes,time_source)`)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	for _, record := range records {
-		revision := record.TimezoneRevision
-		if revision == 0 {
-			revision = 1
-		}
-		if err := batch.Append(
-			record.DeviceID, revision, record.RecordID, now,
-			firstMapValue(record.RawFields, "setup_time", "setup", "setup-time"),
-			firstMapValue(record.RawFields, "connect_time", "connect", "connect-time"),
-			firstMapValue(record.RawFields, "disconnect_time", "disconnect", "disconnect-time"),
-			record.SetupTime, record.ConnectTime, record.DisconnectTime,
-			record.SourceTimezone, record.SourceUTCOffsetMinutes, "cdr_wall_clock",
-		); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+		 disconnect_time_utc,source_timezone,source_utc_offset_minutes,time_source)`,
+		func(batch driver.Batch) error {
+			for _, record := range records {
+				revision := record.TimezoneRevision
+				if revision == 0 {
+					revision = 1
+				}
+				if err := batch.Append(
+					record.DeviceID, revision, record.RecordID, now,
+					firstMapValue(record.RawFields, "setup_time", "setup", "setup-time"),
+					firstMapValue(record.RawFields, "connect_time", "connect", "connect-time"),
+					firstMapValue(record.RawFields, "disconnect_time", "disconnect", "disconnect-time"),
+					record.SetupTime, record.ConnectTime, record.DisconnectTime,
+					record.SourceTimezone, record.SourceUTCOffsetMinutes, "cdr_wall_clock",
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 }
 
 func firstMapValue(values map[string]string, keys ...string) string {

@@ -8,6 +8,7 @@ import (
 	"collector/internal/reconciliation"
 	"collector/internal/workload"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 )
 
@@ -52,53 +53,51 @@ func (c *Client) InsertCDRBatchWithCoverage(
 	thresholds = thresholds.normalized()
 	now := time.Now().UTC()
 	seq := uint64(now.UnixNano())
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_antifraud_coverage
+	dirty := make(map[dirtyCoverageBucket]struct{})
+	if err := c.withBatch(ctx, `INSERT INTO collector.cdr_antifraud_coverage
 		(device_id,event_month,cdr_id,policy_revision,reconciliation_version,projection_seq,
 		state,expected_at,grace_expires_at,missing_terminal_at,retry_until,method,reason,
-		matched_evidence_json,ambiguous,ambiguity_reason,updated_at,deleted)`)
-	if err != nil {
-		return err
-	}
-	dirty := make(map[dirtyCoverageBucket]struct{})
-	for _, record := range records {
-		eventTime := cdrEventTime(record)
-		state, reason := "expected", "awaiting_custom_call"
-		if !enabled {
-			state, reason = "not_applicable", "device_disabled"
-		}
-		if err := batch.Append(
-			record.DeviceID, monthDate(eventTime), record.RecordID, policyRevision,
-			reconciliation.Version, seq, state, now, eventTime.Add(thresholds.ExpectedGrace),
-			eventTime.Add(thresholds.MissingTerminal), eventTime.Add(thresholds.RetryHorizon),
-			"none", reason, "{}", uint8(0), "", now, uint8(0),
-		); err != nil {
-			return err
-		}
-		if enabled {
-			dirty[dirtyCoverageBucket{
-				deviceID: record.DeviceID, bucket: eventTime.UTC().Truncate(time.Hour),
-			}] = struct{}{}
-		}
-	}
-	if err := batch.Send(); err != nil {
+		matched_evidence_json,ambiguous,ambiguity_reason,updated_at,deleted)`,
+		func(batch driver.Batch) error {
+			for _, record := range records {
+				eventTime := cdrEventTime(record)
+				state, reason := "expected", "awaiting_custom_call"
+				if !enabled {
+					state, reason = "not_applicable", "device_disabled"
+				}
+				if err := batch.Append(
+					record.DeviceID, monthDate(eventTime), record.RecordID, policyRevision,
+					reconciliation.Version, seq, state, now, eventTime.Add(thresholds.ExpectedGrace),
+					eventTime.Add(thresholds.MissingTerminal), eventTime.Add(thresholds.RetryHorizon),
+					"none", reason, "{}", uint8(0), "", now, uint8(0),
+				); err != nil {
+					return err
+				}
+				if enabled {
+					dirty[dirtyCoverageBucket{
+						deviceID: record.DeviceID, bucket: eventTime.UTC().Truncate(time.Hour),
+					}] = struct{}{}
+				}
+			}
+			return nil
+		}); err != nil {
 		return err
 	}
 	if len(dirty) == 0 {
 		return nil
 	}
-	dirtyBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
-		(device_id,bucket_start,policy_revision,projection_seq,reason,enqueued_at,deleted)`)
-	if err != nil {
-		return err
-	}
-	for item := range dirty {
-		if err := dirtyBatch.Append(
-			item.deviceID, item.bucket, policyRevision, seq, "cdr_arrival", now, uint8(0),
-		); err != nil {
-			return err
-		}
-	}
-	return dirtyBatch.Send()
+	return c.withBatch(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
+		(device_id,bucket_start,policy_revision,projection_seq,reason,enqueued_at,deleted)`,
+		func(batch driver.Batch) error {
+			for item := range dirty {
+				if err := batch.Append(
+					item.deviceID, item.bucket, policyRevision, seq, "cdr_arrival", now, uint8(0),
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 }
 
 type dirtyCoverageBucket struct {

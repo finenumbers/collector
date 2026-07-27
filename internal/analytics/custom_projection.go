@@ -124,6 +124,11 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 	if limit <= 0 || limit > 100_000 {
 		limit = 20_000
 	}
+	ctx, release, err := c.queryContext(ctx, workload.CustomReplay)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	// Indexed session-event lookup only. Full-payload substring scans over an
 	// hour of Syslog starve ClickHouse and block ingest.
 	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT message.event_id,message.device_id,
@@ -204,34 +209,22 @@ func (c *Client) WriteCustomProjectionSnapshot(
 }
 
 func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojection.Snapshot) error {
-	packetBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.custom_radius_packets
-		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,packet_id,
-		first_seen_at,last_seen_at,contract_key,acct_session_id,h323_conf_id,family,radius_type,
-		direction,phase,decision,confidence,status,is_antifraud,request_id,response_id,
-		ordered_attributes_json,provenance_json,explanation_codes,warnings_json,
-		orphan_reason,ambiguity_reason,deleted)`)
-	if err != nil {
-		return err
+	type packetRow struct {
+		args []any
 	}
-	memberBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.custom_radius_packet_members
-		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,packet_id,member_order,
-		event_id,received_at,source_ip,source_port,deleted)`)
-	if err != nil {
-		return err
+	type memberRow struct {
+		args []any
 	}
-	exchangeBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.custom_radius_exchanges
-		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,exchange_id,contract_key,
-		acct_session_id,h323_conf_id,request_id,response_id,attempt_ids,status,decision,
-		explanation_codes,occurred_at,deleted)`)
-	if err != nil {
-		return err
+	type exchangeRow struct {
+		args []any
 	}
-	sessionBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.custom_radius_session_events
-		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,identity_kind,
-		identity_value,event_id,received_at,deleted)`)
-	if err != nil {
-		return err
+	type sessionRow struct {
+		args []any
 	}
+	packets := make([]packetRow, 0)
+	members := make([]memberRow, 0)
+	exchanges := make([]exchangeRow, 0)
+	sessions := make([]sessionRow, 0)
 	for _, packet := range snapshot.Result.Packets {
 		if packet.FirstSeenAt.Before(snapshot.BucketStart) ||
 			!packet.FirstSeenAt.Before(snapshot.BucketStart.Add(time.Hour)) {
@@ -247,7 +240,7 @@ func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojecti
 		if packet.Status == customradius.PacketAmbiguous {
 			ambiguityReason = firstExplanationCode(packet.Explanations)
 		}
-		if err := packetBatch.Append(
+		packets = append(packets, packetRow{args: []any{
 			snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 			snapshot.ProjectionSeq, packet.ID, packet.FirstSeenAt, packet.LastSeenAt,
 			customContractKey(packet.CallKey), packet.CallKey.AcctSessionID, packet.CallKey.H323ConfID,
@@ -256,17 +249,13 @@ func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojecti
 			boolByte(packet.IsAntifraud), packet.RequestID, packet.ResponseID, string(attributes),
 			string(provenance), explanationCodes(packet.Explanations), string(warnings),
 			orphanReason, ambiguityReason, uint8(0),
-		); err != nil {
-			return err
-		}
+		}})
 		for index, member := range packet.Provenance {
-			if err := memberBatch.Append(
+			members = append(members, memberRow{args: []any{
 				snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 				snapshot.ProjectionSeq, packet.ID, uint16(index), member.EventID, member.ReceivedAt,
 				net.ParseIP(member.SourceIP), member.SourcePort, uint8(0),
-			); err != nil {
-				return err
-			}
+			}})
 			for _, identity := range []struct {
 				kind  string
 				value string
@@ -277,54 +266,85 @@ func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojecti
 				if identity.value == "" {
 					continue
 				}
-				if err := sessionBatch.Append(
+				sessions = append(sessions, sessionRow{args: []any{
 					snapshot.DeviceID, snapshot.BucketStart, snapshot.ID,
 					snapshot.PolicyRevision, snapshot.ProjectionSeq, identity.kind, identity.value,
 					member.EventID, member.ReceivedAt, uint8(0),
-				); err != nil {
-					return err
-				}
+				}})
 			}
 		}
 		if packet.Direction == customradius.DirectionRequest {
-			if err := exchangeBatch.Append(
+			exchanges = append(exchanges, exchangeRow{args: []any{
 				snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 				snapshot.ProjectionSeq, packet.ID, customContractKey(packet.CallKey),
 				packet.CallKey.AcctSessionID, packet.CallKey.H323ConfID, packet.ID,
 				packet.ResponseID, packet.AttemptIDs, string(packet.Status), string(packet.Decision),
 				explanationCodes(packet.Explanations), packet.FirstSeenAt, uint8(0),
-			); err != nil {
+			}})
+		}
+	}
+	// One PrepareBatch at a time: each open batch holds a pooled connection.
+	if err := c.withBatch(ctx, `INSERT INTO collector.custom_radius_packets
+		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,packet_id,
+		first_seen_at,last_seen_at,contract_key,acct_session_id,h323_conf_id,family,radius_type,
+		direction,phase,decision,confidence,status,is_antifraud,request_id,response_id,
+		ordered_attributes_json,provenance_json,explanation_codes,warnings_json,
+		orphan_reason,ambiguity_reason,deleted)`, func(batch driver.Batch) error {
+		for _, row := range packets {
+			if err := batch.Append(row.args...); err != nil {
 				return err
 			}
 		}
-	}
-	if err := packetBatch.Send(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
-	if err := memberBatch.Send(); err != nil {
+	if err := c.withBatch(ctx, `INSERT INTO collector.custom_radius_packet_members
+		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,packet_id,member_order,
+		event_id,received_at,source_ip,source_port,deleted)`, func(batch driver.Batch) error {
+		for _, row := range members {
+			if err := batch.Append(row.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	if err := sessionBatch.Send(); err != nil {
+	if err := c.withBatch(ctx, `INSERT INTO collector.custom_radius_session_events
+		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,identity_kind,
+		identity_value,event_id,received_at,deleted)`, func(batch driver.Batch) error {
+		for _, row := range sessions {
+			if err := batch.Append(row.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	return exchangeBatch.Send()
+	return c.withBatch(ctx, `INSERT INTO collector.custom_radius_exchanges
+		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,exchange_id,contract_key,
+		acct_session_id,h323_conf_id,request_id,response_id,attempt_ids,status,decision,
+		explanation_codes,occurred_at,deleted)`, func(batch driver.Batch) error {
+		for _, row := range exchanges {
+			if err := batch.Append(row.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection.Snapshot) error {
-	callBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.custom_antifraud_calls
-		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,call_id,contract_key,
-		acct_session_id,h323_conf_id,calling,called,status,coverage_state,accounting_start,accounting_stop,
-		session_duration_seconds,ordered_attributes_json,unmatched_provenance_json,
-		orphan_packet_ids,explanation_codes,first_seen_at,last_seen_at,deleted)`)
-	if err != nil {
-		return err
+	type callRow struct {
+		args []any
 	}
-	linkBatch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.custom_antifraud_call_packets
-		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,call_id,packet_id,
-		packet_order,occurred_at,deleted)`)
-	if err != nil {
-		return err
+	type linkRow struct {
+		args []any
 	}
+	calls := make([]callRow, 0)
+	links := make([]linkRow, 0)
 	for _, call := range snapshot.Result.Calls {
 		if len(call.Packets) == 0 {
 			continue
@@ -343,29 +363,45 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 		}
 		attributes, _ := json.Marshal(redactAttributes(call.Attributes))
 		unmatched, _ := json.Marshal(call.Unmatched)
-		if err := callBatch.Append(
+		calls = append(calls, callRow{args: []any{
 			snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 			snapshot.ProjectionSeq, call.ID, customContractKey(call.Key),
 			call.Key.AcctSessionID, call.Key.H323ConfID, call.Participants.Calling,
 			call.Participants.Called, string(call.Status), "awaiting_cdr", call.Accounting.StartTime,
 			call.Accounting.StopTime, call.Accounting.SessionDuration, string(attributes),
 			string(unmatched), call.Orphans, explanationCodes(call.Explanations), first, last, uint8(0),
-		); err != nil {
-			return err
-		}
+		}})
 		for index, packet := range call.Packets {
-			if err := linkBatch.Append(
+			links = append(links, linkRow{args: []any{
 				snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 				snapshot.ProjectionSeq, call.ID, packet.ID, uint16(index), packet.FirstSeenAt, uint8(0),
-			); err != nil {
+			}})
+		}
+	}
+	if err := c.withBatch(ctx, `INSERT INTO collector.custom_antifraud_calls
+		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,call_id,contract_key,
+		acct_session_id,h323_conf_id,calling,called,status,coverage_state,accounting_start,accounting_stop,
+		session_duration_seconds,ordered_attributes_json,unmatched_provenance_json,
+		orphan_packet_ids,explanation_codes,first_seen_at,last_seen_at,deleted)`, func(batch driver.Batch) error {
+		for _, row := range calls {
+			if err := batch.Append(row.args...); err != nil {
 				return err
 			}
 		}
-	}
-	if err := callBatch.Send(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
-	return linkBatch.Send()
+	return c.withBatch(ctx, `INSERT INTO collector.custom_antifraud_call_packets
+		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,call_id,packet_id,
+		packet_order,occurred_at,deleted)`, func(batch driver.Batch) error {
+		for _, row := range links {
+			if err := batch.Append(row.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (c *Client) ActivateCustomProjectionSnapshot(

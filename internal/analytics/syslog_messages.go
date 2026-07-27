@@ -11,6 +11,7 @@ import (
 	"collector/internal/redact"
 	"collector/internal/workload"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 )
 
@@ -63,25 +64,24 @@ func (c *Client) InsertSyslogMessagesBatch(
 		return err
 	}
 	defer release()
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.syslog_messages
-		(event_id,device_id,received_at,source_ip,source_port,transport,payload,payload_sha256)`)
-	if err != nil {
-		return err
-	}
-	for _, message := range messages {
-		sum := sha256.Sum256(message.Payload)
-		transport := message.Transport
-		if transport == "" {
-			transport = "udp"
-		}
-		if err := batch.Append(
-			message.EventID, message.DeviceID, message.ReceivedAt, message.SourceIP,
-			message.SourcePort, transport, string(message.Payload), hex.EncodeToString(sum[:]),
-		); err != nil {
-			return err
-		}
-	}
-	return batch.Send()
+	return c.withBatch(ctx, `INSERT INTO collector.syslog_messages
+		(event_id,device_id,received_at,source_ip,source_port,transport,payload,payload_sha256)`,
+		func(batch driver.Batch) error {
+			for _, message := range messages {
+				sum := sha256.Sum256(message.Payload)
+				transport := message.Transport
+				if transport == "" {
+					transport = "udp"
+				}
+				if err := batch.Append(
+					message.EventID, message.DeviceID, message.ReceivedAt, message.SourceIP,
+					message.SourcePort, transport, string(message.Payload), hex.EncodeToString(sum[:]),
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 }
 
 func (c *Client) ListSyslogMessagesPage(

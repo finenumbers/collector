@@ -20,33 +20,35 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-type getVoipCallsRequest struct {
-	Task     string         `json:"task"`
-	User     string         `json:"user"`
-	Password string         `json:"password"`
-	Params   map[string]any `json:"params"`
-}
-
 func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMCall, error) {
 	if c == nil || strings.TrimSpace(c.BaseURL) == "" {
 		return nil, fmt.Errorf("voipmonitor API URL is not configured")
 	}
-	endpoint := strings.TrimRight(c.BaseURL, "/") + "/php/api.php"
-	body, err := json.Marshal(getVoipCallsRequest{
-		Task: "getVoipCalls", User: c.User, Password: c.Password, Params: params,
-	})
+	endpoint, err := apiEndpoint(c.BaseURL)
 	if err != nil {
 		return nil, err
 	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	form := url.Values{}
+	form.Set("task", "getVoipCalls")
+	form.Set("user", c.User)
+	form.Set("password", c.Password)
+	form.Set("params", string(paramsJSON))
+
 	httpClient := c.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()),
+	)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -62,6 +64,22 @@ func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMC
 	return parseVoipCallsResponse(payload)
 }
 
+func apiEndpoint(base string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(base), "/")
+	if trimmed == "" {
+		return "", fmt.Errorf("voipmonitor API URL is not configured")
+	}
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasSuffix(lower, "/php/api.php"), strings.HasSuffix(lower, "/api.php"):
+		return trimmed, nil
+	case strings.HasSuffix(lower, "/php"):
+		return trimmed + "/api.php", nil
+	default:
+		return trimmed + "/php/api.php", nil
+	}
+}
+
 func parseVoipCallsResponse(payload []byte) ([]VMCall, error) {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -75,6 +93,9 @@ func parseVoipCallsResponse(payload []byte) ([]VMCall, error) {
 	if err := json.Unmarshal(trimmed, &envelope); err != nil {
 		return nil, fmt.Errorf("decode voipmonitor response: %w", err)
 	}
+	if errMsg := apiErrorMessage(envelope); errMsg != "" {
+		return nil, fmt.Errorf("voipmonitor API: %s", errMsg)
+	}
 	for _, key := range []string{"cdr", "results", "data", "rows"} {
 		if raw, ok := envelope[key]; ok {
 			encoded, _ := json.Marshal(raw)
@@ -85,6 +106,29 @@ func parseVoipCallsResponse(payload []byte) ([]VMCall, error) {
 		}
 	}
 	return mapVMCalls([]map[string]any{envelope}), nil
+}
+
+func apiErrorMessage(envelope map[string]any) string {
+	success, ok := envelope["success"]
+	if !ok {
+		return ""
+	}
+	failed := false
+	switch typed := success.(type) {
+	case bool:
+		failed = !typed
+	case string:
+		failed = !(strings.EqualFold(typed, "true") || typed == "1")
+	default:
+		return ""
+	}
+	if !failed {
+		return ""
+	}
+	if msg := firstString(envelope, "error", "msg", "message"); msg != "" {
+		return msg
+	}
+	return "request failed"
 }
 
 func mapVMCalls(rows []map[string]any) []VMCall {

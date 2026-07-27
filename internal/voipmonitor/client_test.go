@@ -41,6 +41,18 @@ func TestParseVoipCallsResponseErrorEnvelope(t *testing.T) {
 	}
 }
 
+func TestParseVoipCallsResponseNoMatchIsEmpty(t *testing.T) {
+	calls, err := parseVoipCallsResponse([]byte(
+		`{"error":"no match cdr","msg":"no match cdr","success":false}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("calls %#v", calls)
+	}
+}
+
 func TestGetVoipCallsFormEncoded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {

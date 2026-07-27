@@ -93,6 +93,9 @@ func parseVoipCallsResponse(payload []byte) ([]VMCall, error) {
 	if err := json.Unmarshal(trimmed, &envelope); err != nil {
 		return nil, fmt.Errorf("decode voipmonitor response: %w", err)
 	}
+	if isEmptyVoipCallsEnvelope(envelope) {
+		return nil, nil
+	}
 	if errMsg := apiErrorMessage(envelope); errMsg != "" {
 		return nil, fmt.Errorf("voipmonitor API: %s", errMsg)
 	}
@@ -106,6 +109,25 @@ func parseVoipCallsResponse(payload []byte) ([]VMCall, error) {
 		}
 	}
 	return mapVMCalls([]map[string]any{envelope}), nil
+}
+
+func isEmptyVoipCallsEnvelope(envelope map[string]any) bool {
+	msg := strings.ToLower(strings.TrimSpace(firstString(envelope, "error", "msg", "message")))
+	if msg == "" {
+		return false
+	}
+	switch {
+	case strings.Contains(msg, "no match"):
+		return true
+	case strings.Contains(msg, "not found"):
+		return true
+	case strings.Contains(msg, "no cdr"):
+		return true
+	case strings.Contains(msg, "no calls"):
+		return true
+	default:
+		return false
+	}
 }
 
 func apiErrorMessage(envelope map[string]any) string {
@@ -123,6 +145,9 @@ func apiErrorMessage(envelope map[string]any) string {
 		return ""
 	}
 	if !failed {
+		return ""
+	}
+	if isEmptyVoipCallsEnvelope(envelope) {
 		return ""
 	}
 	if msg := firstString(envelope, "error", "msg", "message"); msg != "" {

@@ -132,8 +132,10 @@ IANA timezone выбирается из выпадающего списка в �
 - Основной Collector недоступен: `collector-ingress` продолжает принимать UDP в `ingress.db`; после восстановления handoff автоматически воспроизводит очередь с исходными IP/port.
 - Ingress не стартует с `address already in use`: освободите `${SYSLOG_PORT:-514}/udp` на Docker-хосте; не возвращайте bridge port mapping.
 - ClickHouse недоступен: JetStream удерживает Syslog; CDR-файл остаётся в volume и raw archive/ledger.
-- Upgrade с legacy Syslog storage: остановите app container и выполните
-  `migration-preflight` до cleanup; не продолжайте при `copyVerified=false`.
+- Upgrade с legacy Syslog storage: остановите app container, сделайте
+  `pg_dump` + ClickHouse backup/snapshot immutable Syslog, затем выполните
+  `migration-preflight` до cleanup; не продолжайте при `copyVerified=false`
+  (см. [syslog-storage-migration.md](syslog-storage-migration.md)).
 
 ### Canary CDR ↔ Custom AntiFraud
 

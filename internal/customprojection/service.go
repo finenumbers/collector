@@ -384,9 +384,6 @@ func resultIdentities(result customradius.Result) []string {
 		if packet.CallKey.H323ConfID != "" {
 			unique[packet.CallKey.H323ConfID] = struct{}{}
 		}
-		if packet.CallKey.Context != "" {
-			unique[packet.CallKey.Context] = struct{}{}
-		}
 	}
 	identities := make([]string, 0, len(unique))
 	for identity := range unique {

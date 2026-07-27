@@ -86,8 +86,9 @@ func (c *Client) LoadCustomRadiusEvents(
 	if limit <= 0 || limit > 100_000 {
 		limit = 20_000
 	}
-	// Restrict to RADIUS-shaped payloads. Dense SMG hours can exceed MaxEvents
-	// when every Syslog line in the hour is loaded.
+	// Include RADIUS headers and Custom attribute-dump lines. Eltex often logs
+	// Acct-Session-Id / Eltex-AVPair on a separate line without the word RADIUS;
+	// excluding those dumps leaves packets without session keys.
 	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,toString(source_ip),
 		source_port,transport,payload FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?
@@ -98,6 +99,11 @@ func (c *Client) LoadCustomRadiusEvents(
 			OR positionCaseInsensitiveUTF8(payload,'Accounting-')>0
 			OR positionCaseInsensitiveUTF8(payload,'Accs-')>0
 			OR positionCaseInsensitiveUTF8(payload,'Proc Reply')>0
+			OR positionCaseInsensitiveUTF8(payload,'Acct-Session-Id')>0
+			OR positionCaseInsensitiveUTF8(payload,'Eltex-AVPair')>0
+			OR positionCaseInsensitiveUTF8(payload,'Cisco-AVPair')>0
+			OR positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0
+			OR positionCaseInsensitiveUTF8(payload,'h323-conf-id')>0
 		  )
 		ORDER BY received_at,event_id LIMIT ?`, deviceID, from, to, limit+1)
 	if err != nil {
@@ -272,7 +278,6 @@ func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojecti
 			}{
 				{kind: "acct_session_id", value: packet.CallKey.AcctSessionID},
 				{kind: "h323_conf_id", value: packet.CallKey.H323ConfID},
-				{kind: "call_context", value: packet.CallKey.Context},
 			} {
 				if identity.value == "" {
 					continue
@@ -634,9 +639,6 @@ func customContractKey(key customradius.CallKey) string {
 	}
 	if key.H323ConfID != "" {
 		return "h323:" + key.H323ConfID
-	}
-	if key.Context != "" {
-		return "context:" + key.Context
 	}
 	return ""
 }

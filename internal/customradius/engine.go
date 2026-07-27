@@ -385,20 +385,28 @@ func classifyAndPair(
 		}
 		requestType := attributeValue(packet.Attributes, "xpgk-request-type")
 		explicit := hasExplanation(packet.Explanations, "custom.detect.explicit_header")
+		strong := hasStrongCustomAttributeSet(*packet)
 		switch {
-		case strings.HasPrefix(packet.RadiusType, "access-") &&
-			(explicit || requestType == "number" || requestType == "save_call" || requestType == "check_call"):
+		case requestType == "number" || requestType == "save_call":
 			packet.IsAntifraud = true
-			// Eltex AntiFraud-Auth-Request lines omit xpgk-request-type; treat
-			// explicit AF access as verification so accept/reject map to allow/deny.
-			if packet.Family == FamilyUnknown && (explicit || requestType == "check_call") {
-				packet.Family = FamilyVerification
-			}
-			if requestType == "number" || requestType == "save_call" {
-				packet.Family = FamilyIndication
-			}
+			packet.Family = FamilyIndication
+			packet.Explanations = append(packet.Explanations, explanation(
+				"custom.detect.request_type", "xpgk-request-type identified an indication packet."))
+		case requestType == "check_call":
+			packet.IsAntifraud = true
+			packet.Family = FamilyVerification
+			packet.Explanations = append(packet.Explanations, explanation(
+				"custom.detect.request_type", "xpgk-request-type identified a verification packet."))
 		case packet.Family == FamilyAccounting && hasAccountingCustomEvidence(*packet):
 			packet.IsAntifraud = true
+			packet.Explanations = append(packet.Explanations, explanation(
+				"custom.detect.accounting_attrs", "Accounting carried Custom AntiFraud attributes."))
+		case strings.HasPrefix(packet.RadiusType, "access-") && (explicit || strong):
+			packet.IsAntifraud = true
+			// Without xpgk-request-type do not invent indication/verification.
+			packet.Explanations = append(packet.Explanations, explanation(
+				"custom.classify.missing_request_type",
+				"AntiFraud access lacked xpgk-request-type; family left unclassified."))
 		}
 		if packet.IsAntifraud && packet.CallKey.AcctSessionID != "" {
 			knownSessions[packet.CallKey.AcctSessionID] = struct{}{}
@@ -413,10 +421,6 @@ func classifyAndPair(
 				packet.Explanations = append(packet.Explanations, explanation(
 					"custom.detect.known_session", "Accounting matched an exact known Custom session."))
 			}
-		}
-		if packet.IsAntifraud && len(packet.Explanations) == 0 {
-			packet.Explanations = append(packet.Explanations, explanation(
-				"custom.detect.request_type", "A Custom xpgk request type identified this packet."))
 		}
 	}
 
@@ -621,10 +625,27 @@ func applyDecision(request, response *Packet) {
 }
 
 func hasAccountingCustomEvidence(packet Packet) bool {
+	return hasStrongCustomAttributeSet(packet)
+}
+
+// hasStrongCustomAttributeSet reports Custom AntiFraud attributes beyond a bare
+// ExplicitAF header or clg/cld summary. Generic RADIUS keys alone (session id,
+// calling/called) are not enough — that would invent AF from ordinary Access.
+func hasStrongCustomAttributeSet(packet Packet) bool {
 	for _, attribute := range packet.Attributes {
-		if strings.HasPrefix(attribute.Name, "xpgk-") ||
-			strings.Contains(attribute.Name, "antifraud") ||
-			strings.HasPrefix(attribute.Name, "custom-") {
+		name := attribute.Name
+		switch {
+		case name == "xpgk-request-type",
+			name == "h323-conf-id",
+			name == "h323-call-origin",
+			name == "h323-call-type",
+			name == "h323-remote-id",
+			name == "in-trunkgroup-label",
+			name == "out-trunkgroup-label",
+			strings.HasPrefix(name, "xpgk-"),
+			strings.HasPrefix(name, "h323-"),
+			strings.Contains(name, "antifraud"),
+			strings.HasPrefix(name, "custom-"):
 			return true
 		}
 	}
@@ -678,9 +699,6 @@ func authoritativeIdentity(packet Packet) string {
 	}
 	if packet.CallKey.H323ConfID != "" {
 		return "h323:" + packet.CallKey.H323ConfID
-	}
-	if packet.IsAntifraud && packet.CallKey.Context != "" {
-		return "context:" + packet.CallKey.Context
 	}
 	return ""
 }

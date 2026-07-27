@@ -123,8 +123,8 @@ type CallKey struct {
 	AcctSessionIDDisplay string `json:"acctSessionIdDisplay,omitempty"`
 	H323ConfID           string `json:"h323ConfId,omitempty"`
 	H323ConfIDDisplay    string `json:"h323ConfIdDisplay,omitempty"`
-	// Context is the Eltex SMG call lane ([C…]). Used when RADIUS session
-	// attributes are absent from AntiFraud Auth-Request logs.
+	// Context is the Eltex SMG call lane ([C…]) for assembly/pairing only.
+	// It is never a Call identity key (identity is Acct-Session-Id, then h323).
 	Context        string `json:"context,omitempty"`
 	ContextDisplay string `json:"contextDisplay,omitempty"`
 	Calling        string `json:"calling,omitempty"`

@@ -30,8 +30,10 @@ func (c *Client) DiscoverSyslogBuckets(
 	if limit <= 0 || limit > 10_000 {
 		limit = 128
 	}
+	// No FINAL: event_id is unique per insert, and ORDER BY matches the table key.
+	// FINAL over multi-million syslog_messages starves the shared ClickHouse pool.
 	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT received_at,event_id
-		FROM collector.syslog_messages FINAL
+		FROM collector.syslog_messages
 		WHERE device_id=? AND (received_at>? OR (received_at=? AND event_id>?))
 		ORDER BY received_at,event_id LIMIT ?`,
 		deviceID, cursorTime, cursorTime, cursorID, limit+1)
@@ -85,7 +87,7 @@ func (c *Client) LoadCustomRadiusEvents(
 		limit = 20_000
 	}
 	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,toString(source_ip),
-		source_port,transport,payload FROM collector.syslog_messages FINAL
+		source_port,transport,payload FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?
 		ORDER BY received_at,event_id LIMIT ?`, deviceID, from, to, limit+1)
 	if err != nil {
@@ -124,7 +126,7 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 	}
 	anchorRows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,
 		toString(source_ip),source_port,transport,payload
-		FROM collector.syslog_messages FINAL
+		FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?
 		  AND (
 			event_id IN (
@@ -148,7 +150,7 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 	}
 	neighborRows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,
 		toString(source_ip),source_port,transport,payload
-		FROM collector.syslog_messages FINAL
+		FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?
 		  AND arrayExists(anchor -> abs(dateDiff('millisecond',received_at,anchor))<=?,?)
 		ORDER BY received_at,event_id LIMIT ?`,

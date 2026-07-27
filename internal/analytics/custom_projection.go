@@ -116,7 +116,7 @@ func (c *Client) LoadCustomRadiusEvents(
 
 func (c *Client) LoadCustomRadiusSessionEvents(
 	ctx context.Context, deviceID uuid.UUID, identities []string, from, to time.Time,
-	pairingHorizon time.Duration, limit int,
+	_ time.Duration, limit int,
 ) ([]customradius.RawEvent, error) {
 	if len(identities) == 0 {
 		return nil, nil
@@ -124,45 +124,22 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 	if limit <= 0 || limit > 100_000 {
 		limit = 20_000
 	}
-	anchorRows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,
-		toString(source_ip),source_port,transport,payload
-		FROM collector.syslog_messages
-		WHERE device_id=? AND received_at>=? AND received_at<?
-		  AND (
-			event_id IN (
-				SELECT event_id FROM collector.custom_radius_session_events_current
-				WHERE device_id=? AND identity_value IN ?
-			)
-			OR arrayExists(identity -> positionCaseInsensitive(payload,identity)>0,?)
-		  )
-		ORDER BY received_at,event_id LIMIT ?`,
-		deviceID, from, to, deviceID, identities, identities, limit+1)
+	// Indexed session-event lookup only. Full-payload substring scans over an
+	// hour of Syslog starve ClickHouse and block ingest.
+	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT message.event_id,message.device_id,
+		message.received_at,toString(message.source_ip),message.source_port,
+		message.transport,message.payload
+		FROM collector.custom_radius_session_events_current AS session
+		INNER JOIN collector.syslog_messages AS message
+			ON message.device_id=session.device_id AND message.event_id=session.event_id
+		WHERE session.device_id=? AND session.identity_value IN ?
+		  AND message.received_at>=? AND message.received_at<?
+		ORDER BY message.received_at,message.event_id LIMIT ?`,
+		deviceID, identities, from, to, limit+1)
 	if err != nil {
 		return nil, err
 	}
-	anchors, err := scanCustomRadiusEvents(anchorRows, limit)
-	if err != nil || len(anchors) == 0 {
-		return anchors, err
-	}
-	anchorTimes := make([]time.Time, 0, len(anchors))
-	for _, event := range anchors {
-		anchorTimes = append(anchorTimes, event.ReceivedAt)
-	}
-	neighborRows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,
-		toString(source_ip),source_port,transport,payload
-		FROM collector.syslog_messages
-		WHERE device_id=? AND received_at>=? AND received_at<?
-		  AND arrayExists(anchor -> abs(dateDiff('millisecond',received_at,anchor))<=?,?)
-		ORDER BY received_at,event_id LIMIT ?`,
-		deviceID, from, to, pairingHorizon.Milliseconds(), anchorTimes, limit+1)
-	if err != nil {
-		return nil, err
-	}
-	neighbors, err := scanCustomRadiusEvents(neighborRows, limit)
-	if err != nil {
-		return nil, err
-	}
-	return mergeAnalyticsEvents(anchors, neighbors, limit)
+	return scanCustomRadiusEvents(rows, limit)
 }
 
 func scanCustomRadiusEvents(rows driver.Rows, limit int) ([]customradius.RawEvent, error) {

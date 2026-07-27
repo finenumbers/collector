@@ -16,7 +16,8 @@ import (
 func (c *Client) DiscoverCDRBuckets(
 	ctx context.Context, deviceID uuid.UUID, cursorTime time.Time, cursorID uuid.UUID, limit int,
 ) ([]time.Time, time.Time, uuid.UUID, bool, error) {
-	if limit <= 0 || limit > 5000 {
+	const maxDiscover = 5000
+	if limit <= 0 || limit > maxDiscover {
 		limit = 256
 	}
 	rows, err := c.Conn.Query(ctx, `SELECT record_id,
@@ -35,7 +36,7 @@ func (c *Client) DiscoverCDRBuckets(
 		id uuid.UUID
 		at time.Time
 	}
-	items := make([]item, 0, limit+1)
+	items := make([]item, 0, maxDiscover+1)
 	for rows.Next() {
 		var value item
 		if err := rows.Scan(&value.id, &value.at); err != nil {

@@ -159,7 +159,8 @@ func (c *Client) ListAntifraudCallsPage(
 	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
 		return AntifraudCallPage{}, ErrSearchRequiresRange
 	}
-	if limit == 0 || limit > 1000 {
+	const maxPage = 1000
+	if limit == 0 || limit > maxPage {
 		limit = 100
 	}
 	query := `SELECT call.call_id,call.first_seen_at,call.last_seen_at,call.acct_session_id,
@@ -212,7 +213,7 @@ func (c *Client) ListAntifraudCallsPage(
 		return AntifraudCallPage{}, err
 	}
 	defer rows.Close()
-	items := make([]AntifraudCallRow, 0, limit+1)
+	items := make([]AntifraudCallRow, 0, maxPage+1)
 	for rows.Next() {
 		var item AntifraudCallRow
 		var evidence string

@@ -93,7 +93,8 @@ func (c *Client) ListSyslogMessagesPage(
 		return SyslogMessagePage{}, err
 	}
 	defer release()
-	if limit == 0 || limit > 1000 {
+	const maxPage = 1000
+	if limit == 0 || limit > maxPage {
 		limit = 200
 	}
 	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
@@ -122,7 +123,7 @@ func (c *Client) ListSyslogMessagesPage(
 		return SyslogMessagePage{}, err
 	}
 	defer rows.Close()
-	items := make([]SyslogMessageRow, 0, limit)
+	items := make([]SyslogMessageRow, 0, maxPage+1)
 	for rows.Next() {
 		var row SyslogMessageRow
 		if err := rows.Scan(

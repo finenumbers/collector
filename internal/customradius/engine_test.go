@@ -484,7 +484,9 @@ func TestGoldenIndication(t *testing.T) {
 	}
 }
 
-func TestEltexAntifraudContextAndClgCldAssembleIntoCall(t *testing.T) {
+func TestEltexSummaryWithoutSessionNeverFormsCall(t *testing.T) {
+	// Summary-only Eltex AF lines (clg/cld + [C…]) assemble a packet for
+	// diagnostics but must not invent a Call without Acct-Session-Id/h323.
 	events := []RawEvent{
 		raw(1, 0, "[C02AB7E] Port SIPT:0779. Accs-Request for Antifraud: check TG(i/o): 2(ext)/3(ext), USE_AF 1"),
 		raw(2, time.Millisecond, "[C02AB7E] Port SIPT:0779. RADIUS: Accs-Request [antifraud_out]"),
@@ -496,16 +498,8 @@ func TestEltexAntifraudContextAndClgCldAssembleIntoCall(t *testing.T) {
 		raw(8, 20*time.Millisecond, "[C02AB7E] RADIUS. Proc Reply. Request ID [121] Accs-Reply [accept]. Time [0:070]"),
 	}
 	result := BuildAtCutoff(enabled(), events, testBase.Add(time.Second))
-	if len(result.Calls) != 1 {
-		t.Fatalf("calls=%d packets=%d unmatched=%d, want 1 call: %+v",
-			len(result.Calls), len(result.Packets), len(result.Unmatched), result)
-	}
-	call := result.Calls[0]
-	if call.Key.Context != "c02ab7e" {
-		t.Fatalf("context key=%q, want c02ab7e", call.Key.Context)
-	}
-	if call.Participants.Calling != "73833777762" || call.Participants.Called != "79237008480" {
-		t.Fatalf("participants=%+v", call.Participants)
+	if len(result.Calls) != 0 {
+		t.Fatalf("context/clg alone formed calls=%d: %+v", len(result.Calls), result.Calls)
 	}
 	var request *Packet
 	for index := range result.Packets {
@@ -516,13 +510,54 @@ func TestEltexAntifraudContextAndClgCldAssembleIntoCall(t *testing.T) {
 		}
 	}
 	if request == nil || request.Identifier == nil || *request.Identifier != 121 {
-		t.Fatalf("merged AF request missing identifier 121: %+v", result.Packets)
+		t.Fatalf("assembly should still merge AF request 121: %+v", result.Packets)
 	}
-	if request.CallKey.Calling != "73833777762" {
-		t.Fatalf("merged AF request missing clg: %+v", request)
+	if request.CallKey.Calling != "73833777762" || request.CallKey.Called != "79237008480" {
+		t.Fatalf("clg/cld should remain participants only: %+v", request.CallKey)
 	}
-	if request.Status != PacketPaired || request.Decision != DecisionAllow {
-		t.Fatalf("merged AF request not paired/allow: %+v", request)
+	if request.CallKey.AcctSessionID != "" || request.CallKey.H323ConfID != "" {
+		t.Fatalf("summary fixture unexpectedly gained session/h323: %+v", request.CallKey)
+	}
+	if !hasExplanation(request.Explanations, "custom.classify.missing_request_type") {
+		t.Fatalf("missing xpgk-request-type should leave family unclassified: %+v", request.Explanations)
+	}
+	if request.Family != FamilyUnknown {
+		t.Fatalf("family=%q, want unknown without xpgk-request-type", request.Family)
+	}
+}
+
+func TestNumbersAloneNeverFormCallIdentity(t *testing.T) {
+	result := BuildAtCutoff(enabled(), []RawEvent{
+		raw(1, 0, "[C1] Antifraud-Auth-Request clg <100>, cld <200>"),
+		raw(2, time.Millisecond, "[C1] Antifraud-Auth-Request clg <100>, cld <200>"),
+	}, testBase.Add(time.Second))
+	if len(result.Calls) != 0 {
+		t.Fatalf("calling/called alone formed calls: %+v", result.Calls)
+	}
+}
+
+func TestAttributeDumpWithSessionFormsIndicationCall(t *testing.T) {
+	result := BuildAtCutoff(enabled(), []RawEvent{
+		raw(1, 0, "[C1] RADIUS. -- RADIUS. Accs-Request [068] --"),
+		raw(2, time.Millisecond, "\tAcct-Session-Id = \"0600000f 6a666058 66cb3590 505c7af3\" Eltex-AVPair=\"h323-conf-id=0600000f 6a666058 66cb3590 505c7af3\" Eltex-AVPair=\"xpgk-request-type=number\" Eltex-AVPair=\"xpgk-src-number-in=9586786161\" Eltex-AVPair=\"xpgk-dst-number-in=8435999999\""),
+		raw(3, 100*time.Millisecond, "[C1] RADIUS. Proc Reply. Request ID [068] Accs-Reply [accept]. Time [0:100]"),
+	}, testBase.Add(time.Second))
+	if len(result.Calls) != 1 {
+		t.Fatalf("calls=%d, want 1 session call: %+v", len(result.Calls), result.Calls)
+	}
+	call := result.Calls[0]
+	if call.Key.AcctSessionID != "0600000f 6a666058 66cb3590 505c7af3" {
+		t.Fatalf("session key=%q", call.Key.AcctSessionID)
+	}
+	var request *Packet
+	for index := range result.Packets {
+		if result.Packets[index].Direction == DirectionRequest && result.Packets[index].IsAntifraud {
+			request = &result.Packets[index]
+			break
+		}
+	}
+	if request == nil || request.Family != FamilyIndication {
+		t.Fatalf("dump should classify indication: %+v", request)
 	}
 }
 

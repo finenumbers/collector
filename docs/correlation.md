@@ -14,6 +14,19 @@ worker собирает RADIUS-пакеты и вызовы Custom AntiFraud в 
 Один CDR может быть связан только с одним таким вызовом; несколько exact-кандидатов
 остаются `ambiguous`.
 
+Custom call identity (строго):
+- primary — `normalize(Acct-Session-Id)`;
+- secondary — `h323-conf-id` только как link к уже известной session или lone `h323:…`;
+- `calling`/`called`, SMG lane `[C…]`, `clg`/`cld` — только assembly и validation,
+  никогда не образуют Call и не склеивают пакеты в один вызов;
+- нет session и нет h323 → packet остаётся orphan/ambiguous, в Call не кладётся;
+- семейство indication/verification задаёт только `xpgk-request-type`
+  (`number`/`save_call` / `check_call`); ExplicitAF без типа не форсирует verification.
+
+Attribute-dump строки (`Acct-Session-Id`, `Eltex-AVPair`, `xpgk-request-type`) обязательны
+для полноценной сборки; они загружаются из `syslog_messages` даже без слова `RADIUS`
+в payload.
+
 ## Детерминированное правило
 
 ```text

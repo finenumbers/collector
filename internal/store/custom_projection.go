@@ -57,6 +57,9 @@ func (s *Store) SetCustomProjectionGlobalEnabled(ctx context.Context, enabled bo
 		}
 		return tx.Commit(ctx)
 	}
+	// Only create missing jobs or revive cancelled/failed ones. Never reset an
+	// in-flight/completed backfill on every process start — that re-scans all
+	// Syslog and starves ClickHouse after each redeploy.
 	if _, err := tx.Exec(ctx, `INSERT INTO custom_projection_jobs
 		(device_id,policy_revision,kind,generation)
 		SELECT id,antifraud_policy_revision,'discover',1 FROM devices
@@ -65,7 +68,8 @@ func (s *Store) SetCustomProjectionGlobalEnabled(ctx context.Context, enabled bo
 			(COALESCE(bucket_start, '-infinity'::timestamptz)))
 		DO UPDATE SET status='pending',generation=custom_projection_jobs.generation+1,
 			projection_seq=nextval('custom_projection_seq'),next_attempt_at=now(),
-			completed_at=NULL,updated_at=now()`); err != nil {
+			completed_at=NULL,last_error=NULL,updated_at=now()
+		WHERE custom_projection_jobs.status IN ('cancelled','failed')`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO custom_reconciliation_jobs
@@ -75,7 +79,8 @@ func (s *Store) SetCustomProjectionGlobalEnabled(ctx context.Context, enabled bo
 		ON CONFLICT (device_id,policy_revision,kind,
 			(COALESCE(bucket_start, '-infinity'::timestamptz)))
 		DO UPDATE SET status='pending',generation=custom_reconciliation_jobs.generation+1,
-			next_attempt_at=now(),completed_at=NULL,updated_at=now()`); err != nil {
+			next_attempt_at=now(),completed_at=NULL,last_error=NULL,updated_at=now()
+		WHERE custom_reconciliation_jobs.status IN ('cancelled','failed')`); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

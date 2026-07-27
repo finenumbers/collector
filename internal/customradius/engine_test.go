@@ -484,6 +484,48 @@ func TestGoldenIndication(t *testing.T) {
 	}
 }
 
+func TestEltexAntifraudContextAndClgCldAssembleIntoCall(t *testing.T) {
+	events := []RawEvent{
+		raw(1, 0, "[C02AB7E] Port SIPT:0779. Accs-Request for Antifraud: check TG(i/o): 2(ext)/3(ext), USE_AF 1"),
+		raw(2, time.Millisecond, "[C02AB7E] Port SIPT:0779. RADIUS: Accs-Request [antifraud_out]"),
+		raw(3, 2*time.Millisecond, "[C02AB7E] Port SIPT:0779. RADIUS: Prepare Antifraud-Auth-Request."),
+		raw(4, 3*time.Millisecond, "[C02AB7E] Port SIPT:0779. RADIUS: Antifraud-Auth-Request clg <73833777762>, cld <79237008480>"),
+		raw(5, 4*time.Millisecond, "[C02AB7E] Port SIPT:0779. RADIUS: Request ID [121] process Antifraud-Auth-Request."),
+		raw(6, 5*time.Millisecond, "[C02AB7E] -- RADIUS. Antifraud-Auth-Request [121] --"),
+		raw(7, 6*time.Millisecond, "[C02AB7E] RADIUS: Request ID [121] process reply: ignore for not antifraud verify stage."),
+		raw(8, 20*time.Millisecond, "[C02AB7E] RADIUS. Proc Reply. Request ID [121] Accs-Reply [accept]. Time [0:070]"),
+	}
+	result := BuildAtCutoff(enabled(), events, testBase.Add(time.Second))
+	if len(result.Calls) != 1 {
+		t.Fatalf("calls=%d packets=%d unmatched=%d, want 1 call: %+v",
+			len(result.Calls), len(result.Packets), len(result.Unmatched), result)
+	}
+	call := result.Calls[0]
+	if call.Key.Context != "c02ab7e" {
+		t.Fatalf("context key=%q, want c02ab7e", call.Key.Context)
+	}
+	if call.Participants.Calling != "73833777762" || call.Participants.Called != "79237008480" {
+		t.Fatalf("participants=%+v", call.Participants)
+	}
+	var request *Packet
+	for index := range result.Packets {
+		packet := &result.Packets[index]
+		if packet.Direction == DirectionRequest && packet.IsAntifraud {
+			request = packet
+			break
+		}
+	}
+	if request == nil || request.Identifier == nil || *request.Identifier != 121 {
+		t.Fatalf("merged AF request missing identifier 121: %+v", result.Packets)
+	}
+	if request.CallKey.Calling != "73833777762" {
+		t.Fatalf("merged AF request missing clg: %+v", request)
+	}
+	if request.Status != PacketPaired || request.Decision != DecisionAllow {
+		t.Fatalf("merged AF request not paired/allow: %+v", request)
+	}
+}
+
 func FuzzTokenizerNeverLeaksRecognizedSecrets(f *testing.F) {
 	f.Add(`Password="secret" Cisco-AVPair='xpgk-request-type=number'`)
 	f.Add(`CHAP-Password=abc Authorization=Bearer`)

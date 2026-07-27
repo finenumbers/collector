@@ -128,17 +128,22 @@ func callIdentityForPacket(packet Packet, h323Sessions map[string]map[string]str
 	if packet.CallKey.AcctSessionID != "" {
 		return "session:" + packet.CallKey.AcctSessionID
 	}
-	if packet.CallKey.H323ConfID == "" {
-		return ""
+	if packet.CallKey.H323ConfID != "" {
+		sessions := h323Sessions[packet.CallKey.H323ConfID]
+		if len(sessions) > 1 {
+			return ""
+		}
+		for session := range sessions {
+			return "session:" + session
+		}
+		return "h323:" + packet.CallKey.H323ConfID
 	}
-	sessions := h323Sessions[packet.CallKey.H323ConfID]
-	if len(sessions) > 1 {
-		return ""
+	// Eltex AntiFraud Auth-Request logs often omit Acct-Session-Id and only
+	// expose the SMG call lane [C…] plus clg/cld.
+	if packet.IsAntifraud && packet.CallKey.Context != "" {
+		return "context:" + packet.CallKey.Context
 	}
-	for session := range sessions {
-		return "session:" + session
-	}
-	return "h323:" + packet.CallKey.H323ConfID
+	return ""
 }
 
 func buildCall(identity string, indexes []int, packets []Packet) Call {
@@ -213,6 +218,10 @@ func mergeCallKey(destination *CallKey, source CallKey) {
 	if destination.H323ConfID == "" {
 		destination.H323ConfID = source.H323ConfID
 		destination.H323ConfIDDisplay = source.H323ConfIDDisplay
+	}
+	if destination.Context == "" {
+		destination.Context = source.Context
+		destination.ContextDisplay = source.ContextDisplay
 	}
 	if destination.Calling == "" {
 		destination.Calling = source.Calling

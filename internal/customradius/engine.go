@@ -94,6 +94,10 @@ func assemble(events []decodedEvent, config Config) ([]packetBuilder, []Unmatche
 		envelope := item.envelope
 		switch envelope.Kind {
 		case EnvelopeHeader:
+			if mergeIndex := mergeableBuilder(builders, item); mergeIndex >= 0 {
+				mergeHeaderIntoBuilder(&builders[mergeIndex], item, config)
+				continue
+			}
 			closeSupersededBuilders(builders, item)
 			packet := Packet{
 				RadiusType: envelope.RadiusType, Direction: envelope.Direction,
@@ -133,6 +137,30 @@ func assemble(events []decodedEvent, config Config) ([]packetBuilder, []Unmatche
 				if len(portMatches) == 1 {
 					candidates = portMatches
 				}
+			}
+			if len(candidates) == 0 && envelope.Kind == EnvelopeStatus &&
+				envelope.Direction == DirectionResponse {
+				// Eltex "Proc Reply" is a status line without a prior Access-Accept
+				// header; promote it to a response packet so classifyAndPair can
+				// match the outstanding request by identifier + call context.
+				packet := Packet{
+					RadiusType: envelope.RadiusType, Direction: DirectionResponse,
+					Identifier: envelope.Identifier, Attributes: cloneAttributes(envelope.Attributes),
+					Provenance:  []EventProvenance{envelope.Provenance},
+					Warnings:    append([]Explanation(nil), envelope.Warnings...),
+					CallContext: envelope.CallContext, Component: envelope.Component, Server: envelope.Server,
+					ResponseLatencyMillis: envelope.ResponseLatencyMillis,
+					FirstSeenAt:           item.raw.ReceivedAt, LastSeenAt: item.raw.ReceivedAt,
+					Status: PacketPending, Family: FamilyUnknown, Phase: PhaseUnknown,
+					Confidence: ConfidenceLow,
+				}
+				packet.ID = stableID("packet", eventIDString(item.raw.EventID), packet.RadiusType,
+					identifierString(packet.Identifier))
+				builders = append(builders, packetBuilder{
+					packet: packet, device: item.raw.DeviceID, ip: item.raw.SourceIP,
+					port: item.raw.SourcePort, members: 1, bytes: len(item.raw.Payload),
+				})
+				continue
 			}
 			if len(candidates) != 1 {
 				reason := "no_compatible_anchor"
@@ -198,6 +226,88 @@ func closeSupersededBuilders(builders []packetBuilder, item decodedEvent) {
 	}
 }
 
+// mergeableBuilder finds an open same-lane request that can absorb another AF
+// header (clg/cld line, Request-ID line, banner) instead of superseding it.
+// Fresh retries that repeat the same numeric ID with session attributes stay
+// separate so AttemptIDs remain accurate.
+func mergeableBuilder(builders []packetBuilder, item decodedEvent) int {
+	if item.envelope.Direction != DirectionRequest {
+		return -1
+	}
+	found := -1
+	for index := range builders {
+		builder := &builders[index]
+		if builder.closed || builder.device != item.raw.DeviceID || builder.ip != item.raw.SourceIP {
+			continue
+		}
+		if builder.packet.Direction != DirectionRequest {
+			continue
+		}
+		existingContext := builder.packet.CallContext
+		newContext := item.envelope.CallContext
+		if existingContext == "" || newContext == "" || existingContext != newContext {
+			continue
+		}
+		if builder.packet.Identifier != nil && item.envelope.Identifier != nil &&
+			*builder.packet.Identifier != *item.envelope.Identifier {
+			continue
+		}
+		if builder.packet.Identifier != nil && item.envelope.Identifier != nil &&
+			hasSessionOrRequestTypeAttrs(builder.packet.Attributes) &&
+			hasSessionOrRequestTypeAttrs(item.envelope.Attributes) {
+			continue
+		}
+		if found >= 0 {
+			return -1
+		}
+		found = index
+	}
+	return found
+}
+
+func hasSessionOrRequestTypeAttrs(attributes []Attribute) bool {
+	for _, attribute := range attributes {
+		switch attribute.Name {
+		case "acct-session-id", "h323-conf-id", "xpgk-request-type":
+			return true
+		}
+	}
+	return false
+}
+
+func mergeHeaderIntoBuilder(builder *packetBuilder, item decodedEvent, config Config) {
+	envelope := item.envelope
+	builder.members++
+	builder.bytes += len(item.raw.Payload)
+	builder.packet.LastSeenAt = item.raw.ReceivedAt
+	builder.packet.Provenance = append(builder.packet.Provenance, envelope.Provenance)
+	if len(item.raw.Payload) <= config.MaxBytes {
+		builder.packet.Attributes = append(
+			builder.packet.Attributes, cloneAttributes(envelope.Attributes)...,
+		)
+	}
+	builder.packet.Warnings = append(builder.packet.Warnings, envelope.Warnings...)
+	if envelope.Identifier != nil && builder.packet.Identifier == nil {
+		builder.packet.Identifier = envelope.Identifier
+	}
+	if envelope.ExplicitAF && !hasExplanation(builder.packet.Explanations, "custom.detect.explicit_header") {
+		builder.packet.Explanations = append(builder.packet.Explanations, explanation(
+			"custom.detect.explicit_header", "An explicit Antifraud request header identified this packet."))
+	}
+	if envelope.CallContext != "" && builder.packet.CallContext == "" {
+		builder.packet.CallContext = envelope.CallContext
+	}
+	if envelope.Component != "" && builder.packet.Component == "" {
+		builder.packet.Component = envelope.Component
+	}
+	if envelope.Server != "" && builder.packet.Server == "" {
+		builder.packet.Server = envelope.Server
+	}
+	if envelope.RadiusType != "" {
+		builder.packet.RadiusType = envelope.RadiusType
+	}
+}
+
 func compatibleBuilders(builders []packetBuilder, item decodedEvent, idle time.Duration) []int {
 	candidates := make([]int, 0)
 	for index := range builders {
@@ -233,6 +343,10 @@ func compatibleBuilders(builders []packetBuilder, item decodedEvent, idle time.D
 
 func finalizePacket(packet *Packet) {
 	packet.CallKey = extractCallKey(packet.Attributes)
+	if packet.CallContext != "" {
+		packet.CallKey.Context = normalizeIdentity(packet.CallContext)
+		packet.CallKey.ContextDisplay = packet.CallContext
+	}
 	requestType := attributeValue(packet.Attributes, "xpgk-request-type")
 	switch requestType {
 	case "number", "save_call":
@@ -275,6 +389,14 @@ func classifyAndPair(
 		case strings.HasPrefix(packet.RadiusType, "access-") &&
 			(explicit || requestType == "number" || requestType == "save_call" || requestType == "check_call"):
 			packet.IsAntifraud = true
+			// Eltex AntiFraud-Auth-Request lines omit xpgk-request-type; treat
+			// explicit AF access as verification so accept/reject map to allow/deny.
+			if packet.Family == FamilyUnknown && (explicit || requestType == "check_call") {
+				packet.Family = FamilyVerification
+			}
+			if requestType == "number" || requestType == "save_call" {
+				packet.Family = FamilyIndication
+			}
 		case packet.Family == FamilyAccounting && hasAccountingCustomEvidence(*packet):
 			packet.IsAntifraud = true
 		}
@@ -556,6 +678,9 @@ func authoritativeIdentity(packet Packet) string {
 	}
 	if packet.CallKey.H323ConfID != "" {
 		return "h323:" + packet.CallKey.H323ConfID
+	}
+	if packet.IsAntifraud && packet.CallKey.Context != "" {
+		return "context:" + packet.CallKey.Context
 	}
 	return ""
 }

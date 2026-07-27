@@ -1,7 +1,9 @@
+-- ClickHouse expands SELECT * in views at CREATE time. After 027 added
+-- acct_session_ids to the table, recreate the current view so list/detail
+-- queries can read the new column.
 ALTER TABLE collector.custom_antifraud_calls
     ADD COLUMN IF NOT EXISTS acct_session_ids Array(String) DEFAULT [];
 
--- View column list is fixed at CREATE; refresh so upgrades see acct_session_ids.
 DROP VIEW IF EXISTS collector.custom_antifraud_calls_current;
 
 CREATE VIEW collector.custom_antifraud_calls_current AS

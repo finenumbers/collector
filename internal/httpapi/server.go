@@ -1264,7 +1264,11 @@ func (s *Server) callCard(writer http.ResponseWriter, request *http.Request) {
 		if writeAdmissionError(writer, err) {
 			return
 		}
-		writeError(writer, http.StatusNotFound, "CDR call not found")
+		if err.Error() == "call not found" {
+			writeError(writer, http.StatusNotFound, "CDR call not found")
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "unable to load CDR call card")
 		return
 	}
 	writeJSON(writer, http.StatusOK, card)

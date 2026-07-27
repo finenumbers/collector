@@ -118,8 +118,8 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 27 {
-		t.Fatalf("got %d applied migrations, want 27", applied)
+	if applied != 28 {
+		t.Fatalf("got %d applied migrations, want 28", applied)
 	}
 	rows, err := client.Conn.Query(ctx, `SELECT name FROM system.tables
 		WHERE database='collector' ORDER BY name`)

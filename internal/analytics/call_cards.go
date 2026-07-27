@@ -537,7 +537,11 @@ func (c *Client) CallCard(
 	if callID != nil {
 		detail, detailErr := c.AntifraudCallDetail(ctx, deviceID, *callID)
 		if detailErr != nil {
-			return CallCard{}, detailErr
+			// Keep CDR facts visible when AF detail/schema is temporarily broken.
+			if card.Coverage.Reason == "" {
+				card.Coverage.Reason = "antifraud_detail_unavailable"
+			}
+			return card, nil
 		}
 		card.Antifraud = &detail
 	}

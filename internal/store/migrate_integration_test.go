@@ -2,17 +2,58 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"collector/internal/customprojection"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestClickHouseMigrationLockSerializesInstances(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	firstRelease, err := control.LockClickHouseMigrations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	acquired := make(chan func(), 1)
+	errs := make(chan error, 1)
+	go func() {
+		release, err := control.LockClickHouseMigrations(context.Background())
+		if err != nil {
+			errs <- err
+			return
+		}
+		acquired <- release
+	}()
+	select {
+	case release := <-acquired:
+		release()
+		firstRelease()
+		t.Fatal("second instance acquired ClickHouse migration lock concurrently")
+	case err := <-errs:
+		firstRelease()
+		t.Fatal(err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	firstRelease()
+	select {
+	case release := <-acquired:
+		release()
+	case err := <-errs:
+		t.Fatal(err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("second instance did not acquire released ClickHouse migration lock")
+	}
+}
 
 func TestPostgresMigrateRunsFilesOnce(t *testing.T) {
 	store := isolatedMigrationStore(t)
@@ -151,6 +192,18 @@ func TestPostgresMigrateBaselinesLegacySchemaWithoutRevisionBump(t *testing.T) {
 					t.Fatalf("%s: %v", migrations[index].name, err)
 				}
 			}
+			if _, err := store.DB.Exec(ctx, `UPDATE retention_policies
+				SET active_days=CASE policy_class
+					WHEN 'syslog' THEN 90 WHEN 'cdr' THEN 60 WHEN 'derived' THEN 30
+					ELSE active_days END,
+					pending_days=NULL,effective_at=NULL
+				WHERE policy_class IN ('syslog','cdr','derived')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB.Exec(ctx,
+				`UPDATE devices SET antifraud_enabled=true WHERE name='legacy'`); err != nil {
+				t.Fatal(err)
+			}
 
 			var before int64
 			if err := store.DB.QueryRow(ctx, `SELECT timezone_revision FROM devices WHERE name='legacy'`).
@@ -176,19 +229,83 @@ func TestPostgresMigrateBaselinesLegacySchemaWithoutRevisionBump(t *testing.T) {
 			if ledgerRows != len(migrations) {
 				t.Fatalf("ledger rows=%d, want %d", ledgerRows, len(migrations))
 			}
-			var laterTables bool
+			var cleanupApplied bool
 			if err := store.DB.QueryRow(ctx, `SELECT
-				to_regclass('syslog_parser_rebuild_jobs') IS NOT NULL
+				to_regclass('syslog_parser_rebuild_jobs') IS NULL
+				AND NOT EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_schema=current_schema()
+					  AND table_name='devices' AND column_name='antifraud_mode'
+				)
 				AND EXISTS (
 					SELECT 1 FROM information_schema.columns
 					WHERE table_schema=current_schema()
 					  AND table_name='export_jobs' AND column_name='worker_id'
+				)
+				AND EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_schema=current_schema()
+					  AND table_name='devices' AND column_name='antifraud_policy_revision'
+				)
+				AND to_regclass('custom_projection_jobs') IS NOT NULL
+				AND to_regclass('custom_projection_watermarks') IS NOT NULL
+				AND to_regclass('custom_reconciliation_jobs') IS NOT NULL
+				AND to_regclass('custom_reconciliation_device_leases') IS NOT NULL
+				AND EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_schema=current_schema()
+					  AND table_name='custom_projection_jobs' AND column_name='generation'
 				)`).
-				Scan(&laterTables); err != nil {
+				Scan(&cleanupApplied); err != nil {
 				t.Fatal(err)
 			}
-			if !laterTables {
-				t.Fatal("legacy baseline skipped migration 015 or 016")
+			if !cleanupApplied {
+				t.Fatal("legacy cleanup migration was not applied")
+			}
+			var syslogActive, syslogPending, cdrPending int
+			if err := store.DB.QueryRow(ctx, `SELECT
+				max(active_days) FILTER (WHERE policy_class='syslog'),
+				max(pending_days) FILTER (WHERE policy_class='syslog'),
+				max(pending_days) FILTER (WHERE policy_class='cdr')
+				FROM retention_policies`).
+				Scan(&syslogActive, &syslogPending, &cdrPending); err != nil {
+				t.Fatal(err)
+			}
+			if syslogActive != 30 || syslogPending != 30 || cdrPending != 60 {
+				t.Fatalf("retention reapply state=%d/%d/%d, want 30/30/60",
+					syslogActive, syslogPending, cdrPending)
+			}
+			var discoverPending bool
+			if err := store.DB.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM custom_projection_jobs
+				WHERE kind='discover' AND status='pending'
+			)`).Scan(&discoverPending); err != nil {
+				t.Fatal(err)
+			}
+			if !discoverPending {
+				t.Fatal("durable Custom discovery scan was not scheduled")
+			}
+			var discoverID uuid.UUID
+			if err := store.DB.QueryRow(ctx, `UPDATE custom_projection_jobs
+				SET status='running',attempts=20
+				WHERE id=(SELECT id FROM custom_projection_jobs WHERE kind='discover' LIMIT 1)
+				RETURNING id`).Scan(&discoverID); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.FailCustomProjectionJob(
+				ctx, customprojection.Job{ID: discoverID}, errors.New("temporary enqueue failure"),
+				time.Second,
+			); err != nil {
+				t.Fatal(err)
+			}
+			var discoverStatus string
+			if err := store.DB.QueryRow(ctx,
+				`SELECT status FROM custom_projection_jobs WHERE id=$1`, discoverID).
+				Scan(&discoverStatus); err != nil {
+				t.Fatal(err)
+			}
+			if discoverStatus != "pending" {
+				t.Fatalf("discovery failure became %q, want pending", discoverStatus)
 			}
 		})
 	}

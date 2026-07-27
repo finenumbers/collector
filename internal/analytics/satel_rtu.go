@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"collector/internal/equipment"
+	"collector/internal/workload"
 
 	"github.com/google/uuid"
 )
@@ -264,6 +265,11 @@ func (c *Client) InsertSatelRTUBatch(
 	if len(records) == 0 {
 		return nil
 	}
+	ctx, release, err := c.queryContext(ctx, workload.Ingest)
+	if err != nil {
+		return err
+	}
+	defer release()
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.satel_rtu_cdr
 		(record_id,device_id,file_id,row_number,ingested_at,parser_version,template_key,cdr_id,
 		cdr_date,setup_time,connect_time,disconnect_time,duration_ms,elapsed_time,outcome,
@@ -336,7 +342,7 @@ func (c *Client) InsertSatelRTUBatch(
 			record.SIPRoutingGroup, record.AuthDNIS, record.ExtANI, record.ExtDNIS,
 			record.ExtSigAddress, record.InPartnerID, record.OutPartnerID,
 			record.InEncryption, record.OutEncryption,
-			record.RecordType, record.LastCDR, record.RawFields, record.SourceTimezone,
+			record.RecordType, record.LastCDR, redactStringMap(record.RawFields), record.SourceTimezone,
 			record.SourceUTCOffsetMinutes, record.TimezoneRevision,
 		); err != nil {
 			return err
@@ -380,6 +386,11 @@ func (c *Client) ReinterpretSatelRTUTimes(
 		return fmt.Errorf("invalid Satel RTU timezone %q: %w", timezone, err)
 	}
 	_ = location
+	ctx, release, err := c.queryContext(ctx, workload.CustomReplay)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return c.Conn.Exec(ctx, `INSERT INTO collector.satel_rtu_cdr_time_facts
 		(device_id,timezone_revision,record_id,interpreted_at,cdr_date_utc,setup_time_utc,
 		connect_time_utc,disconnect_time_utc,term_setup_time_utc,term_connect_time_utc,
@@ -417,23 +428,22 @@ func (c *Client) ListSatelRTUCallsPageRange(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
 	timeRange *TimeRange,
 ) (SatelRTUCallPage, error) {
-	revision, err := c.ActiveDeviceRevision(ctx, deviceID)
-	if err != nil {
-		return SatelRTUCallPage{}, err
-	}
-	if revision == 0 {
-		return c.listSatelRTUCallsPage(ctx, deviceID, nil, search, limit, cursor, timeRange)
-	}
-	return c.listSatelRTUCallsPage(
-		ctx, deviceID, &revision, search, limit, cursor, timeRange,
-	)
+	return c.listSatelRTUCallsPage(ctx, deviceID, nil, search, limit, cursor, timeRange)
 }
 
 func (c *Client) listSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, revision *uint64, search string,
 	limit uint64, cursor *CallCursor, timeRange *TimeRange,
 ) (SatelRTUCallPage, error) {
-	if limit == 0 || limit > 50000 {
+	ctx, release, err := c.queryContext(ctx, workload.Interactive)
+	if err != nil {
+		return SatelRTUCallPage{}, err
+	}
+	defer release()
+	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
+		return SatelRTUCallPage{}, ErrSearchRequiresRange
+	}
+	if limit == 0 || limit > 1000 {
 		limit = 200
 	}
 	query := `WITH times AS
@@ -573,6 +583,7 @@ func (c *Client) listSatelRTUCallsPage(
 			return SatelRTUCallPage{}, err
 		}
 		row.SetupTimeLocal = localRFC3339(row.SetupTime, row.SourceTimezone)
+		row.RawFields = redactStringMap(row.RawFields)
 		items = append(items, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -597,10 +608,11 @@ func (c *Client) SatelRTUStats(
 func (c *Client) SatelRTUStatsRange(
 	ctx context.Context, deviceID uuid.UUID, timeRange TimeRange,
 ) (DeviceStats, error) {
-	revision, err := c.ActiveDeviceRevision(ctx, deviceID)
+	ctx, release, err := c.queryContext(ctx, workload.Interactive)
 	if err != nil {
 		return DeviceStats{}, err
 	}
+	defer release()
 	var result DeviceStats
 	query := `WITH times AS
 		(
@@ -609,10 +621,6 @@ func (c *Client) SatelRTUStatsRange(
 			FROM collector.satel_rtu_cdr_time_facts
 			WHERE device_id=?`
 	args := []any{deviceID}
-	if revision != 0 {
-		query += ` AND timezone_revision=?`
-		args = append(args, revision)
-	}
 	query += ` GROUP BY record_id
 		)
 		SELECT count(),countIf(c.outcome!='answered'),
@@ -621,10 +629,6 @@ func (c *Client) SatelRTUStatsRange(
 		LEFT JOIN times AS t ON t.record_id=c.record_id
 		WHERE c.device_id=?`
 	args = append(args, deviceID)
-	if revision != 0 {
-		query += ` AND c.timezone_revision=?`
-		args = append(args, revision)
-	}
 	query += ` AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?
 		AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?`
 	args = append(args, timeRange.From, timeRange.To)
@@ -632,4 +636,15 @@ func (c *Client) SatelRTUStatsRange(
 		&result.Calls24h, &result.FailedCalls24h, &result.AverageTalkMS,
 	)
 	return result, err
+}
+
+func localRFC3339(value *time.Time, timezone string) string {
+	if value == nil {
+		return ""
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		location = time.UTC
+	}
+	return value.In(location).Format(time.RFC3339Nano)
 }

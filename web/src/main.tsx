@@ -1,8 +1,8 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  Activity, AlertTriangle, CirclePlus, Database, FileClock,
-  LogOut, Network, PhoneCall, Radio, Search, Server, Settings, ShieldCheck,
+  Activity, CirclePlus, FileClock,
+  LogOut, PhoneCall, Search, Server, Settings, ShieldCheck,
 } from 'lucide-react'
 import './styles.css'
 import {
@@ -10,16 +10,13 @@ import {
   retentionDescription, retentionLabel,
 } from './settings'
 import {
-  antifraudOutcome, cdrOutcome, decisionLabel, operationTypeLabel, outcomeLabel,
-  terminalReasonLabel,
+  cdrOutcome, outcomeLabel,
 } from './outcomes'
 import { readModelNotice } from './readModelNotice'
+import { redactDisplayText, redactDisplayValue } from './redaction'
 import {
-  AntiFraudSummary, AntiFraudSummaryState, CallAntiFraudSummary,
-} from './antifraudSummary'
-import {
-  defaultSourceDataset, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
-  sourceCategory, SourceCapabilities, SourceCategory, sourceDatasets, templatesFor,
+  defaultSourceDataset, deviceSurfaces, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
+  sourceCategory, SourceCapabilities, SourceCategory, templatesFor,
 } from './equipment'
 import {
   createExportRequest, ExportJob, exportDownloadURL, exportJobsURL, exportJobDisposition,
@@ -53,12 +50,11 @@ type DashboardDevice = {
   timezone: string
   activeTimezone: string
   enabled: boolean
+  antifraudEnabled: boolean
   metrics: {
     calls: number
     failedCalls: number
     averageTalkMs: number
-    alarms: number
-    unknown: number
     antifraud: number
     antifraudRejected: number
   }
@@ -83,8 +79,6 @@ type DashboardSnapshot = {
     calls: number
     failed: number
     averageTalkMs: number
-    alarms: number
-    unknown: number
     antifraud: number
     rejects: number
     incomplete: number
@@ -108,8 +102,6 @@ type DashboardCategoryTotals = {
   calls?: number
   failed?: number
   averageTalkMs?: number
-  alarms?: number
-  unknown?: number
   antifraud?: number
   rejects?: number
   files?: number
@@ -135,7 +127,6 @@ type Device = {
   managementIp?: string
   deviceSign: string
   antifraudEnabled: boolean
-  antifraudMode: string
   ftpUsername: string
   ftpHome: string
   generatedPassword?: string
@@ -149,124 +140,67 @@ type Device = {
 }
 type EventRow = {
   eventId: string
+  deviceId: string
   receivedAt: string
-  eventTime?: string
-  sourceTimezone: string
-  category: string
-  component: string
-  message: string
-  rawPayload: string
-  parseStatus: string
-  attributes: Record<string, string>
+  sourceIp: string
+  sourcePort: number
+  transport: string
+  payload: string
+  payloadSha256: string
+  truncated?: boolean
 }
-type TimelineRow = EventRow & { method: string; confidence: number }
 type DeviceStats = {
-  calls24h: number; failedCalls24h: number; averageTalkMs: number
-  alarms24h: number; radius24h: number; unknown24h: number
-  antifraud24h: number; antifraudRejected24h: number
-  antifraudIncomplete24h: number; unlinkedCalls24h: number
-}
-type SyslogBreakdown = {
-  category: string; parseStatus: string; parserVersion: string; headerFormat: string
-  sourcePort: number; count: number; lastReceivedAt: string
+  calls24h: number
+  failedCalls24h: number
+  averageTalkMs: number
+  syslogMessages24h: number
 }
 type IngestRuntime = {
   acceptedDatagrams: number; rejectedDatagrams: number; spoolWriteErrors: number
   handoffErrors: number; handedOff: number
-}
-type IngressStatus = {
-  updatedAt: string
-  runtime: IngestRuntime
-  spoolDepth: number
-  quarantineDepth: number
-}
-type SyslogDiagnostics = {
-  version: string
-  parserVersion: string
-  runtime: IngestRuntime
-  spoolDepth: number
-  quarantineDepth: number
-  natsStreamMessages: number
-  natsConsumerPending: number
-  breakdown: SyslogBreakdown[]
-  appliedMigrations: string[]
-  rawEvents24h: number
-  classified24h: number
-  reprocessedCurrent: number
-  reprocessRemaining: number
-  antifraudComplete: number
-  antifraudIncomplete: number
-  antifraudOrphan: number
-  correlationExact: number
-  correlationComposite: number
-  correlationAmbiguous: number
-  activeRevision: number
-  activeRevisionTimezone: string
-  buildingRevision: number
-  revisionTimezone: string
-  revisionStatus: string
-  revisionReason?: 'initial_build' | 'timezone_change' | string
-  replayProcessed: number
-  replayTotal: number
-  cdrReplayProcessed: number
-  cdrReplayTotal: number
-  missingCdrInterpretations: number
-  radiusRawFragments: number
-  lifecycleDerived: number
-  antifraudPackets: number
-  antifraudCalls: number
-  antifraudOperations: number
-  operationOutstanding: number
-  operationVerificationAccept: number
-  operationVerificationReject: number
-  operationVerificationFailOpen: number
-  operationInformational: number
-  unlinkedRadiusFragments: number
-  ambiguousSessionCollisions: number
-  unknownEvents: number
-  unknownEnvelopeAndBody: number
-  unknownNoCategoryEvidence: number
-  unknownEmptyMessage: number
-  fragmentAmbiguity: number
-  parserProjectionStatus: string
-  syslogConstructs: number
-  constructMembers: number
-  constructOrphans: number
-  heuristicConstructs: number
-  correlationTotal: number
-  correlationOrphan: number
-  ingestRevision: number
-  revisionAligned: boolean
-  latestRawAt: string
-  latestFactAt: string
-  latestLifecycleAt: string
-  latestAssignmentAt: string
-  pendingDirtyBuckets: number
-  oldestDirtyAt: string
-  correlationStatus: 'idle' | 'processing' | 'ready' | string
-  correlationAssignmentLag: number
-  latestCorrelationRunAt: string
-  lastCorrelationDurationMs: number
-  averageCorrelationDurationMs: number
-  correlationTimeFromTimestamp: number
-  correlationTimeFromEnvelope: number
-  correlationTimeFromReceive: number
-  ingressAvailable: boolean
-  ingress: IngressStatus
-  cdrIngestFiles?: CdrIngestFile[]
 }
 type CdrIngestFile = {
   id: string
   originalName: string
   sha256?: string
   sizeBytes?: number
-  objectKey?: string
   status: string
   rowsTotal: number
   rowsValid: number
   error?: string
   receivedAt: string
   processedAt?: string
+}
+type OperationalDiagnostics = {
+  generatedAt: string
+  customProjectionEnabled: boolean
+  projectionQueue: {
+    depth: number
+    oldestAge: number
+    failed: number
+    backfilling: number
+    lagSeconds: number
+  }
+  reconciliationQueue: {
+    depth: number
+    oldestAge: number
+    failed: number
+  }
+  derived: {
+    projectionLagSeconds: number
+    calls: number
+    packets: number
+    orphans: number
+    ambiguity: number
+    coverage: Record<string, number>
+    coverageSloMet: boolean
+    projectionSloMet: boolean
+  }
+  exports: {
+    queued: number
+    running: number
+    oldestAge: number
+  }
 }
 type CallRow = {
   recordId: string
@@ -361,46 +295,78 @@ type SatelCdrRow = {
   dstMaxJitter?: number
   rawFields?: Record<string, unknown>
 }
+type CoverageSummary = {
+  state: 'matched' | 'expected' | 'late' | 'missing' | 'ambiguous' | 'not_applicable' | 'unmatched'
+  method?: string
+  reason?: string
+  deltaMs?: number
+  ambiguous: boolean
+  ambiguityReason?: string
+  evidence?: Record<string, unknown>
+  linkedCdrIds: string[]
+}
 type AntifraudRow = {
-  transactionId: string
-  firstEventAt: string
-  lastEventAt: string
-  callContext: string
+  callId: string
+  firstSeenAt: string
+  lastSeenAt: string
   acctSessionId: string
-  requestType: string
-  requestCode: string
-  responseCode: string
+  h323ConfId: string
+  calling: string
+  called: string
+  status: string
+  phases: string[]
+  packetCount: number
+  explanationCodes: string[]
+  coverage: CoverageSummary
+}
+type OrderedAttribute = { name: string; value: unknown }
+type AntifraudPacket = {
+  packetId: string
+  firstSeenAt: string
+  lastSeenAt: string
+  family: string
+  radiusType: string
+  direction: string
+  phase: string
   decision: string
-  decisionReason: string
-  serverAddress: string
-  retries: number
-  latencyMs?: number
-  callingStationId: string
-  calledStationId: string
-  srcNumberIn: string
-  dstNumberIn: string
-  srcNumberOut: string
-  dstNumberOut: string
-  inTrunkgroupLabel: string
-  outTrunkgroupLabel: string
-  accountingStatus: string
-  q850Cause?: number
-  completeness: string
-  attributes: Record<string, string>
-  linkedRecordIds: string[]
-  legCount: number
-  cdrSetupTime?: string
-  correlationMethod: string
-  correlationConfidence: number
-  correlationTimeDeltaMs: number
-  ambiguityReason: string
-  cdrSessionId: string
-  correlationState: 'exact' | 'composite' | 'ambiguous' | 'orphan'
-  matchedFields: string[]
-  sourceTimezone: string
-  firstEventLocal: string
-  lastEventLocal: string
-  cdrSetupLocal: string
+  confidence: string
+  status: string
+  requestId?: string
+  responseId?: string
+  attemptIds: string[]
+  attributes: OrderedAttribute[]
+  explanationCodes: string[]
+  warnings?: unknown
+  orphanReason?: string
+  ambiguityReason?: string
+  members: { eventId: string; receivedAt: string; sourceIp: string; sourcePort: number }[]
+}
+type AntifraudCallDetail = AntifraudRow & {
+  accountingStart?: string
+  accountingStop?: string
+  sessionDurationSeconds?: number
+  attributes: OrderedAttribute[]
+  unmatched?: unknown
+  orphanPacketIds: string[]
+  packets: AntifraudPacket[]
+  exchanges: {
+    exchangeId: string
+    requestId: string
+    responseId?: string
+    attemptIds: string[]
+    status: string
+    decision: string
+    explanationCodes: string[]
+    occurredAt: string
+  }[]
+  linkedCdrs: CallRow[]
+  truncated: boolean
+  warnings: string[]
+}
+type CallCardDTO = {
+  cdr: CallRow
+  coverage: CoverageSummary
+  antifraud?: AntifraudCallDetail
 }
 type PageCursor = { before: string; beforeId: string }
 type PageResponse<T> = {
@@ -642,7 +608,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
                 selected.enabled ? 'Приём активен' : 'Приём выключен'}
           </span>
           {sourceCapabilities(selected).antifraud &&
-            <span>{selected.antifraudEnabled ? `АнтиФрод: ${selected.antifraudMode}` : 'Без АнтиФрод'}</span>}
+            <span>{selected.antifraudEnabled ? 'АнтиФрод включён' : 'Без АнтиФрод'}</span>}
           {user.role === 'admin' && selected.purgeState === 'purge_failed' &&
             <button className="danger" onClick={() => setEditingDevice(selected)}>
               Повторить удаление
@@ -692,25 +658,8 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
 
 const navigation: { id: Dataset; label: string; icon: typeof Activity }[] = [
   { id: 'calls', label: 'Вызовы и CDR', icon: PhoneCall },
-  { id: 'syslog_all', label: 'Все Syslog', icon: FileClock },
+  { id: 'syslog', label: 'Сообщения Syslog', icon: FileClock },
   { id: 'antifraud', label: 'АнтиФрод', icon: ShieldCheck },
-  { id: 'alarms', label: 'Аварии', icon: AlertTriangle },
-  { id: 'call_trace', label: 'Обработка вызовов', icon: Activity },
-  { id: 'sip', label: 'SIP', icon: Radio },
-  { id: 'isup', label: 'SS7 / ISUP', icon: Network },
-  { id: 'q931', label: 'Q.931', icon: Network },
-  { id: 'h323', label: 'H.323', icon: Network },
-  { id: 'rtp', label: 'RTP / RTCP', icon: Radio },
-  { id: 'hardware', label: 'Аппаратные модули', icon: Database },
-  { id: 'ivr', label: 'IVR', icon: PhoneCall },
-  { id: 'ip_network', label: 'IP-сеть', icon: Network },
-  { id: 'ip_connections', label: 'IP-соединения', icon: Server },
-  { id: 'ip_modules', label: 'IP-субмодули', icon: Database },
-  { id: 'radius', label: 'RADIUS', icon: ShieldCheck },
-  { id: 'config_history', label: 'Изменения', icon: FileClock },
-  { id: 'auth_log', label: 'Журнал доступа', icon: ShieldCheck },
-  { id: 'system_journal', label: 'Системный журнал', icon: FileClock },
-  { id: 'unknown', label: 'Нераспознанное', icon: AlertTriangle },
 ]
 function DashboardPage({ devices, onSelectDevice }: {
   devices: Device[]
@@ -755,12 +704,9 @@ function DashboardPage({ devices, onSelectDevice }: {
         detail="доля успешных вызовов" />
       <DashboardKPI label="Средний разговор"
         value={formatDurationAverage(equipmentTotals.averageTalkMs)} />
-      <DashboardKPI label="Аварии" value={formatCount(equipmentTotals.alarms)}
-        tone={equipmentTotals.alarms ? 'bad' : 'good'} />
-      <DashboardKPI label="Нераспознано" value={formatCount(equipmentTotals.unknown)}
-        tone={equipmentTotals.unknown ? 'warn' : 'good'} />
-      <DashboardKPI label="AntiFraud" value={formatCount(equipmentTotals.antifraud)}
-        detail={`reject ${formatCount(equipmentTotals.rejects)}`} />
+      {equipmentRows.some((row) => row.antifraudEnabled) &&
+        <DashboardKPI label="AntiFraud" value={formatCount(equipmentTotals.antifraud)}
+          detail={`reject ${formatCount(equipmentTotals.rejects)}`} />}
       <DashboardKPI label="Очередь"
         value={formatCount(snapshot?.system?.natsStreamMessages)}
         detail={`spool ${formatCount(snapshot?.system?.spoolDepth)}`}
@@ -769,8 +715,8 @@ function DashboardPage({ devices, onSelectDevice }: {
     <section className="dashboard-panel fleet-panel">
       <div className="panel-heading"><div><h4>Оборудование</h4><span>Метрики Eltex за выбранный интервал</span></div></div>
       <table><thead><tr><th>Оборудование</th><th>Шаблон / timezone</th><th>Статус</th>
-        <th>Вызовы</th><th>Неуспешные</th><th>AntiFraud / reject</th><th>Аварии</th>
-        <th>Unknown</th><th>Последний приём Syslog</th><th>Revision</th></tr></thead>
+        <th>Вызовы</th><th>Неуспешные</th><th>AntiFraud / reject</th>
+        <th>Последний приём Syslog</th><th>Revision</th></tr></thead>
         <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
           <td><strong>{row.name}</strong><small>{row.model}</small></td>
           <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}
@@ -779,9 +725,8 @@ function DashboardPage({ devices, onSelectDevice }: {
             {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
           <td className="right">{formatCount(row.metrics.calls)}</td>
           <td className="right">{formatCount(row.metrics.failedCalls)}</td>
-          <td className="right">{`${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}`}</td>
-          <td className="right">{formatCount(row.metrics.alarms)}</td>
-          <td className="right">{formatCount(row.metrics.unknown)}</td>
+          <td className="right">{row.antifraudEnabled
+            ? `${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}` : '—'}</td>
           <td className="mono">
             {formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')}
             <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
@@ -873,8 +818,9 @@ function dashboardRows(
       sourceCategory: row.sourceCategory || source?.sourceCategory,
       templateKey: row.templateKey || source?.templateKey,
       capabilities: row.capabilities || source?.capabilities,
+      antifraudEnabled: row.antifraudEnabled ?? source?.antifraudEnabled ?? false,
       metrics: row.metrics || {
-        calls: 0, failedCalls: 0, alarms: 0, unknown: 0, antifraud: 0, antifraudRejected: 0,
+        calls: 0, failedCalls: 0, averageTalkMs: 0, antifraud: 0, antifraudRejected: 0,
       },
       revision: row.revision || {
         configured: 0, active: 0, building: 0, aligned: true, status: '',
@@ -894,21 +840,17 @@ function dashboardCategoryTotals(
   const fallback = rows.reduce((totals, row) => ({
     calls: totals.calls + (sourceCapabilities(row).typedCdr ? row.metrics.calls || 0 : 0),
     failed: totals.failed + (sourceCapabilities(row).typedCdr ? row.metrics.failedCalls || 0 : 0),
-    alarms: totals.alarms + (row.metrics.alarms || 0),
-    unknown: totals.unknown + (row.metrics.unknown || 0),
-    antifraud: totals.antifraud + (row.metrics.antifraud || 0),
-    rejects: totals.rejects + (row.metrics.antifraudRejected || 0),
+    antifraud: totals.antifraud + (row.antifraudEnabled ? row.metrics.antifraud || 0 : 0),
+    rejects: totals.rejects + (row.antifraudEnabled ? row.metrics.antifraudRejected || 0 : 0),
     files: totals.files + (row.fileMetrics?.files || 0),
     bytes: totals.bytes + (row.fileMetrics?.bytes || 0),
-  }), { calls: 0, failed: 0, alarms: 0, unknown: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0 })
+  }), { calls: 0, failed: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0 })
   return {
     activeSources: apiTotals.activeSources ?? sources.filter((source) => source.enabled).length,
     totalSources: apiTotals.totalSources ?? sources.length,
     calls: apiTotals.calls ?? fallback.calls,
     failed: apiTotals.failed ?? fallback.failed,
     averageTalkMs: apiTotals.averageTalkMs ?? 0,
-    alarms: apiTotals.alarms ?? fallback.alarms,
-    unknown: apiTotals.unknown ?? fallback.unknown,
     antifraud: apiTotals.antifraud ?? fallback.antifraud,
     rejects: apiTotals.rejects ?? fallback.rejects,
     files: apiTotals.files ?? fallback.files,
@@ -930,14 +872,8 @@ function DeviceNavigation({ device, active, onChange }: {
   active: Dataset
   onChange: (value: Dataset) => void
 }) {
-  const capabilities = sourceCapabilities(device)
-  const items = sourceCategory(device) === 'softswitch'
-    ? sourceDatasets(device).map(() => navigation[0])
-    : navigation.filter((item) =>
-      (item.id !== 'calls' || capabilities.typedCdr) &&
-      (item.id !== 'antifraud' || capabilities.antifraud) &&
-      (item.id !== 'radius' || capabilities.radius) &&
-      (item.id === 'calls' || item.id === 'antifraud' || item.id === 'radius' || capabilities.syslog))
+  const surfaces = deviceSurfaces(device)
+  const items = navigation.filter((item) => surfaces.includes(item.id as typeof surfaces[number]))
   return <nav className="device-nav">
     {items.map((item) => <button key={item.id} className={active === item.id ? 'active' : ''}
       onClick={() => onChange(item.id)}><item.icon size={14} />{item.label}</button>)}
@@ -1097,6 +1033,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     window.sessionStorage.getItem(dateStorageKey) || localDateInTimezone(timezone))
   const [rows, setRows] = useState<DataRow[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [reload, setReload] = useState(0)
   const [selectedCall, setSelectedCall] = useState<CallRow | null>(null)
   const [selectedSatelCall, setSelectedSatelCall] = useState<SatelCdrRow | null>(null)
   const [selectedAntifraud, setSelectedAntifraud] = useState<AntifraudRow | null>(null)
@@ -1106,7 +1044,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     value: DeviceStats | null
   }>({ date: '', value: null })
   const stats = statsResult.date === date ? statsResult.value : null
-  const [diagnostics, setDiagnostics] = useState<SyslogDiagnostics | null>(null)
   const [cursor, setCursor] = useState<PageCursor | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const tableShellRef = useRef<HTMLDivElement>(null)
@@ -1114,19 +1051,17 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const loadingRef = useRef(false)
   const generationRef = useRef(0)
   const isSatel = device.templateKey === 'satel-rtu-cdr-v1'
-  const hasSyslog = sourceCapabilities(device).syslog
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
-  const category = dataset === 'syslog_all' ? 'all' : dataset
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     const base = dataset === 'calls'
       ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
       : dataset === 'antifraud'
-        ? `/devices/${device.id}/antifraud?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
-        : `/devices/${device.id}/events?category=${encodeURIComponent(category)}&q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
+        ? `/devices/${device.id}/antifraud-calls?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
+        : `/devices/${device.id}/syslog-messages?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [category, dataset, date, device.id, query])
+  }, [dataset, date, device.id, query])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1136,12 +1071,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     api<DeviceStats>(`/devices/${device.id}/stats?date=${date}`)
       .then((value) => { if (active) setStatsResult({ date, value }) })
       .catch(() => { if (active) setStatsResult({ date, value: null }) })
-    if (admin && hasSyslog) {
-      api<SyslogDiagnostics>(`/devices/${device.id}/syslog-diagnostics`)
-        .then(setDiagnostics).catch(() => setDiagnostics(null))
-    }
     return () => { active = false }
-  }, [admin, date, device.id, hasSyslog])
+  }, [date, device.id])
   useEffect(() => {
     const generation = ++generationRef.current
     let active = true
@@ -1150,6 +1081,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setCursor(null)
       setHasMore(false)
       setSelectedEvent(null)
+      setLoadError('')
       if (tableShellRef.current) tableShellRef.current.scrollTop = 0
       setBusy(true)
       api<PageResponse<DataRow>>(pagePath())
@@ -1159,6 +1091,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           setHasMore(more)
           setCursor(nextCursor || null)
         })
+        .catch((reason) => {
+          if (active && generation === generationRef.current) {
+            setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
+          }
+        })
         .finally(() => {
           if (active) setBusy(false)
         })
@@ -1167,7 +1104,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       active = false
       window.clearTimeout(timer)
     }
-  }, [pagePath, setBusy])
+  }, [pagePath, reload, setBusy])
   const loadMore = useCallback(() => {
     if (!cursor || !hasMore || loadingRef.current) return
     const generation = generationRef.current
@@ -1193,22 +1130,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     observer.observe(target)
     return () => observer.disconnect()
   }, [hasMore, loadMore])
-  const showRadiusEmpty = !loading && rows.length === 0 && dataset === 'radius'
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
-  const revisionNotice = readModelNotice(device, diagnostics)
+  const revisionNotice = readModelNotice(device)
   return <section className="data-view">
     {revisionNotice && <div className="timezone-rebuild">{revisionNotice}</div>}
-    {diagnostics?.correlationStatus === 'processing' &&
-      (dataset === 'calls' || dataset === 'antifraud') &&
-      <div className="timezone-rebuild">
-        Корреляция CDR ↔ AntiFraud догоняет активную revision:
-        {' '}{diagnostics.correlationAssignmentLag.toLocaleString('ru-RU')} lifecycle без terminal assignment,
-        buckets в очереди: {diagnostics.pendingDirtyBuckets.toLocaleString('ru-RU')}.
-      </div>}
     {isSatel && dataset === 'calls' && <SatelPipelineNotice
       templateKey={device.templateKey}
       replay={device.replay || { pending: 0, processing: 0, complete: 0, quarantined: 0 }} />}
-    {admin && dataset === 'calls' && diagnostics && <CdrIngestBanner files={diagnostics.cdrIngestFiles || []} />}
+    {admin && dataset === 'calls' && <CdrIngestBannerLoader deviceID={device.id} />}
     <div className="stat-strip">
       <label className="stat-date"><small>Дата · {timezone}</small><input type="date"
         required value={date} onChange={(event) => {
@@ -1221,15 +1150,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       <span><small>Неуспешных</small><strong>{stats ? stats.failedCalls24h.toLocaleString('ru-RU') : '—'}</strong></span>
       <span><small>Средняя длительность</small><strong>{stats ? `${(stats.averageTalkMs / 1000).toFixed(1)} с` : '—'}</strong></span>
       {!isSatel && <>
-        <span><small>Аварий</small><strong>{stats ? stats.alarms24h.toLocaleString('ru-RU') : '—'}</strong></span>
-        <span><small>RADIUS</small><strong>{stats ? stats.radius24h.toLocaleString('ru-RU') : '—'}</strong></span>
-        <span><small>AntiFraud</small><strong>{stats ? stats.antifraud24h.toLocaleString('ru-RU') : '—'}</strong></span>
-        <span><small>Reject</small><strong className={stats?.antifraudRejected24h ? 'warning-text' : ''}>{stats ? stats.antifraudRejected24h.toLocaleString('ru-RU') : '—'}</strong></span>
-        <span><small>Без связи CDR</small><strong className={stats?.unlinkedCalls24h ? 'warning-text' : ''}>{stats ? stats.unlinkedCalls24h.toLocaleString('ru-RU') : '—'}</strong></span>
-        <span><small>Нераспознано</small><strong className={stats?.unknown24h ? 'warning-text' : ''}>{stats ? stats.unknown24h.toLocaleString('ru-RU') : '—'}</strong></span>
+        <span><small>Syslog сообщений</small><strong>
+          {stats ? stats.syslogMessages24h.toLocaleString('ru-RU') : '—'}
+        </strong></span>
       </>}
     </div>
-    {admin && diagnostics && <SyslogDiagnosticPanel value={diagnostics} />}
+    {admin && <OperationalDiagnosticsPanel />}
     <div className="toolbar">
       <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
@@ -1241,6 +1167,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     </div>
     <div className="table-shell" ref={tableShellRef}>
       {loading && <div className="table-loading" />}
+      {loadError && <div className="table-empty" role="alert"><strong>Не удалось загрузить данные</strong>
+        <p>{loadError}</p><button className="secondary" onClick={() => setReload((value) => value + 1)}>
+          Повторить</button></div>}
       {dataset === 'calls' ? (isSatel
         ? <SatelCallsTable rows={rows as SatelCdrRow[]}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedSatelCall} />
@@ -1251,7 +1180,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             onSelect={setSelectedAntifraud} />
           : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedEvent} />}
-      {showRadiusEmpty && <RadiusEmptyState />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
         {loading && rows.length > 0 ? 'Загрузка следующих 100 записей…' : hasMore ? '' : rows.length > 0 ? 'Все записи загружены' : ''}
@@ -1266,6 +1194,19 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     {selectedEvent && <EventDrawer event={selectedEvent} timezone={activeDeviceTimezone(device)}
       onClose={() => setSelectedEvent(null)} />}
   </section>
+}
+
+function CdrIngestBannerLoader({ deviceID }: { deviceID: string }) {
+  const [files, setFiles] = useState<CdrIngestFile[] | null>(null)
+  useEffect(() => {
+    let active = true
+    api<{ items: CdrIngestFile[] }>(`/devices/${deviceID}/ingest-files?limit=20`)
+      .then(({ items }) => { if (active) setFiles(items || []) })
+      .catch(() => { if (active) setFiles([]) })
+    return () => { active = false }
+  }, [deviceID])
+  if (!files) return null
+  return <CdrIngestBanner files={files} />
 }
 
 function CdrIngestBanner({ files }: { files: CdrIngestFile[] }) {
@@ -1286,117 +1227,70 @@ function CdrIngestBanner({ files }: { files: CdrIngestFile[] }) {
   </div>
 }
 
-function SyslogDiagnosticPanel({ value }: { value: SyslogDiagnostics }) {
-  const trace = value.breakdown.filter((row) => row.sourcePort === 10003)
-    .reduce((sum, row) => sum + row.count, 0)
-  const cdrFiles = value.cdrIngestFiles || []
-  return <details className="diagnostic-panel">
-    <summary>
-      Диагностика Syslog · Collector {value.version} · parser {value.parserVersion} ·
-      порт 10003: {trace.toLocaleString('ru-RU')} · ingress:
-      {value.ingressAvailable ? value.ingress.runtime.acceptedDatagrams.toLocaleString('ru-RU') : ' недоступен'}
-      · CDR files: {cdrFiles.length.toLocaleString('ru-RU')}
-    </summary>
-    <div className="diagnostic-facts">
-      <span>Глобально · ingress принято: <strong>{value.ingressAvailable
-        ? value.ingress.runtime.acceptedDatagrams.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>Глобально · ingress передано: <strong>{value.ingressAvailable
-        ? value.ingress.runtime.handedOff.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>Глобально · ingress spool: <strong>{value.ingressAvailable
-        ? value.ingress.spoolDepth.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>Глобально · ошибок handoff: <strong>{value.ingressAvailable
-        ? value.ingress.runtime.handoffErrors.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span>Глобально · app принято: <strong>{value.runtime.acceptedDatagrams.toLocaleString('ru-RU')}</strong></span>
-      <span>Глобально · app отклонено: <strong>{value.runtime.rejectedDatagrams.toLocaleString('ru-RU')}</strong></span>
-      <span>Глобально · app spool: <strong>{value.spoolDepth.toLocaleString('ru-RU')}</strong></span>
-      <span>Глобально · NATS stream: <strong>{value.natsStreamMessages.toLocaleString('ru-RU')}</strong></span>
-      <span>Глобально · NATS pending: <strong>{value.natsConsumerPending.toLocaleString('ru-RU')}</strong></span>
-      <span>Глобально · quarantine: <strong>{value.quarantineDepth.toLocaleString('ru-RU')}</strong></span>
-      <span>Classified, 24 ч: <strong>{value.classified24h.toLocaleString('ru-RU')} / {value.rawEvents24h.toLocaleString('ru-RU')}</strong></span>
-      <span>Reprocess current: <strong>{value.reprocessedCurrent.toLocaleString('ru-RU')}</strong></span>
-      <span>Осталось reprocess: <strong>{value.reprocessRemaining.toLocaleString('ru-RU')}</strong></span>
-      <span>Active / building revision: <strong>{value.activeRevision || '—'} / {value.buildingRevision || '—'}</strong></span>
-      <span>Read / ingest revision: <strong>{value.activeRevision || '—'} / {value.ingestRevision || '—'} · {value.revisionAligned ? 'aligned' : 'SPLIT'}</strong></span>
-      <span>Active / building timezone: <strong>{value.activeRevisionTimezone || '—'} / {value.revisionTimezone || '—'}</strong></span>
-      <span>Revision status / reason: <strong>{value.revisionStatus || '—'} / {value.revisionReason || '—'}</strong></span>
-      <span>Replay Syslog: <strong>{formatCount(value.replayProcessed)} / {formatCount(value.replayTotal)}</strong></span>
-      <span>Replay CDR: <strong>{formatCount(value.cdrReplayProcessed)} / {formatCount(value.cdrReplayTotal)}</strong></span>
-      <span>CDR без time fact: <strong>{formatCount(value.missingCdrInterpretations)}</strong></span>
-      <span>RADIUS raw / lifecycle: <strong>{formatCount(value.radiusRawFragments)} / {formatCount(value.lifecycleDerived)}</strong></span>
-      <span>AntiFraud packets / calls / operations: <strong>
-        {formatCount(value.antifraudPackets)} / {formatCount(value.antifraudCalls)} / {formatCount(value.antifraudOperations)}
+function OperationalDiagnosticsPanel() {
+  const [value, setValue] = useState<OperationalDiagnostics | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const load = () => {
+    setLoading(true)
+    setError('')
+    api<OperationalDiagnostics>('/system/diagnostics')
+      .then((next) => setValue(next))
+      .catch((reason) => {
+        setValue(null)
+        setError(reason instanceof Error ? reason.message : 'Диагностика недоступна')
+      })
+      .finally(() => setLoading(false))
+  }
+  const queue = value?.projectionQueue
+  const derived = value?.derived
+  const coverage = derived?.coverage || {}
+  return <details className="diagnostic-panel" onToggle={(event) => {
+    if ((event.currentTarget as HTMLDetailsElement).open) load()
+  }}>
+    <summary>Диагностика</summary>
+    {loading && <div className="diagnostic-facts"><span>Загрузка операционной диагностики…</span></div>}
+    {error && <div className="diagnostic-facts"><span className="form-error">{error}</span></div>}
+    {value && !loading && <div className="diagnostic-facts">
+      <span>Custom projection: <strong>{value.customProjectionEnabled ? 'включена' : 'выключена'}</strong></span>
+      <span>Очередь projection · depth / lag: <strong>
+        {formatCount(queue?.depth)} / {formatCount(queue?.lagSeconds ?? derived?.projectionLagSeconds)} с
       </strong></span>
-      <span>Operations accept / reject / fail-open / info / open: <strong>
-        {formatCount(value.operationVerificationAccept)} / {formatCount(value.operationVerificationReject)} /
-        {formatCount(value.operationVerificationFailOpen)} / {formatCount(value.operationInformational)} /
-        {formatCount(value.operationOutstanding)}
+      <span>Очередь projection · failed / backfill: <strong>
+        {formatCount(queue?.failed)} / {formatCount(queue?.backfilling)}
       </strong></span>
-      <span>RADIUS fragments unlinked / session collisions: <strong>
-        {formatCount(value.unlinkedRadiusFragments)} / {formatCount(value.ambiguousSessionCollisions)}
+      <span>Очередь projection · oldest: <strong>{formatDurationNanos(queue?.oldestAge)}</strong></span>
+      <span>SLO projection / coverage: <strong>
+        {derived?.projectionSloMet ? 'ok' : 'breach'} / {derived?.coverageSloMet ? 'ok' : 'breach'}
       </strong></span>
-      <span>Unknown total / envelope / evidence / empty: <strong>
-        {formatCount(value.unknownEvents)} / {formatCount(value.unknownEnvelopeAndBody)} /
-        {formatCount(value.unknownNoCategoryEvidence)} / {formatCount(value.unknownEmptyMessage)}
+      <span>Calls / packets: <strong>{formatCount(derived?.calls)} / {formatCount(derived?.packets)}</strong></span>
+      <span>Orphans / ambiguity: <strong>
+        {formatCount(derived?.orphans)} / {formatCount(derived?.ambiguity)}
       </strong></span>
-      <span>Fragment ambiguity / parser projection: <strong>
-        {formatCount(value.fragmentAmbiguity)} / {value.parserProjectionStatus || 'building'}
+      <span>Coverage matched / expected / late / missing: <strong>
+        {formatCount(coverage.matched)} / {formatCount(coverage.expected)} /
+        {formatCount(coverage.late)} / {formatCount(coverage.missing)}
       </strong></span>
-      <span>Syslog constructs / members: <strong>{formatCount(value.syslogConstructs)} / {formatCount(value.constructMembers)}</strong></span>
-      <span>Construct heuristic / orphan: <strong>{formatCount(value.heuristicConstructs)} / {formatCount(value.constructOrphans)}</strong></span>
-      <span>Последний raw / fact: <strong>{formatTime(value.latestRawAt, 'UTC')} / {formatTime(value.latestFactAt, 'UTC')}</strong></span>
-      <span>Последний lifecycle / link: <strong>{formatTime(value.latestLifecycleAt, 'UTC')} / {formatTime(value.latestAssignmentAt, 'UTC')}</strong></span>
-      <span>Dirty buckets: <strong>{formatCount(value.pendingDirtyBuckets)} · oldest {formatTime(value.oldestDirtyAt, 'UTC')}</strong></span>
-      <span>Correlation status / lag: <strong>{value.correlationStatus || '—'} / {formatCount(value.correlationAssignmentLag)}</strong></span>
-      <span>Последний correlation run: <strong>{formatTime(value.latestCorrelationRunAt, 'UTC')} · {formatCount(value.lastCorrelationDurationMs)} мс</strong></span>
-      <span>Среднее время bucket: <strong>{Math.round(value.averageCorrelationDurationMs || 0).toLocaleString('ru-RU')} мс</strong></span>
-      <span>Time source embedded / envelope / receive: <strong>
-        {formatCount(value.correlationTimeFromTimestamp)} / {formatCount(value.correlationTimeFromEnvelope)} / {formatCount(value.correlationTimeFromReceive)}
+      <span>Coverage ambiguous / n/a: <strong>
+        {formatCount(coverage.ambiguous)} / {formatCount(coverage.not_applicable)}
       </strong></span>
-      <span>AntiFraud complete: <strong>{value.antifraudComplete.toLocaleString('ru-RU')}</strong></span>
-      <span>AntiFraud incomplete: <strong>{value.antifraudIncomplete.toLocaleString('ru-RU')}</strong></span>
-      <span>AntiFraud без CDR: <strong>{value.antifraudOrphan.toLocaleString('ru-RU')}</strong></span>
-      <span>Exact links: <strong>{value.correlationExact.toLocaleString('ru-RU')}</strong></span>
-      <span>Composite links: <strong>{value.correlationComposite.toLocaleString('ru-RU')}</strong></span>
-      <span>Ambiguous: <strong>{value.correlationAmbiguous.toLocaleString('ru-RU')}</strong></span>
-      <span>Coverage invariant: <strong>{(value.correlationExact || 0) +
-        (value.correlationComposite || 0) + (value.correlationAmbiguous || 0) +
-        (value.correlationOrphan || 0)} / {value.correlationTotal || 0}</strong></span>
-      <span>Миграции: <strong>{value.appliedMigrations.join(', ') || '—'}</strong></span>
-      <span>CDR ingest files: <strong>{cdrFiles.length.toLocaleString('ru-RU')}</strong></span>
-    </div>
-    {cdrFiles.length > 0 && <div className="diagnostic-breakdown">
-      {cdrFiles.map((file) => <span key={file.id}>
-        <strong>{file.originalName}</strong> · {file.status} ·
-        rows {file.rowsValid}/{file.rowsTotal}
-        {file.error ? ` · ${file.error}` : ''}
-      </span>)}
+      <span>Reconciliation · depth / failed / oldest: <strong>
+        {formatCount(value.reconciliationQueue?.depth)} / {formatCount(value.reconciliationQueue?.failed)} /
+        {formatDurationNanos(value.reconciliationQueue?.oldestAge)}
+      </strong></span>
+      <span>Export · queued / running / oldest: <strong>
+        {formatCount(value.exports?.queued)} / {formatCount(value.exports?.running)} /
+        {formatDurationNanos(value.exports?.oldestAge)}
+      </strong></span>
+      <span>Снимок: <strong>{formatTime(value.generatedAt, 'UTC')}</strong></span>
     </div>}
-    <div className="diagnostic-breakdown">
-      {value.breakdown.map((row) => <span key={[
-        row.category, row.parseStatus, row.parserVersion, row.headerFormat, row.sourcePort,
-      ].join(':')}>
-        <strong>{row.category}</strong> · {row.parseStatus} · {row.parserVersion} ·
-        {row.headerFormat} · UDP/{row.sourcePort}: {row.count.toLocaleString('ru-RU')}
-      </span>)}
-    </div>
   </details>
-}
-
-function RadiusEmptyState() {
-  return <div className="table-empty">
-    <strong>RADIUS-сообщения не получены</strong>
-    <p>Проверьте наличие тестового вызова, включение «АнтиФрод» в активном RADIUS-профиле оборудования,
-      группы Access/Accounting серверов и уровень трассировки Syslog. Режим Custom сам по себе
-      задаёт формат RADIUS, но не создаёт события без вызовов.</p>
-  </div>
 }
 
 function AntifraudEmptyState() {
   return <div className="table-empty">
-    <strong>AntiFraud lifecycle пока не собран</strong>
-    <p>Технический RADIUS-поток доступен в разделе «RADIUS». В AntiFraud появляются
-      только операции number/save_call/check_call, подтверждённые xpgk-атрибутами,
-      вместе с ответом, решением и связью с CDR.</p>
+    <strong>Вызовы AntiFraud пока не собраны</strong>
+    <p>Здесь появится одна строка на вызов Custom AntiFraud после фоновой проекции Syslog.</p>
   </div>
 }
 
@@ -1406,33 +1300,19 @@ function AntifraudTable({ rows, timezone, onSelect }: {
   onSelect: (row: AntifraudRow) => void
 }) {
   return <table><thead><tr>
-    <th>Последнее событие</th><th>Операция</th><th>Решение</th><th>Номер A</th>
-    <th>Номер B</th><th>Входящий маршрут</th><th>Исходящий маршрут</th>
-    <th>RADIUS server</th><th>Latency</th><th>Accounting</th><th>Корреляция</th><th>CDR legs</th>
-    <th>Полнота</th><th>Acct-Session-Id</th><th>Call context</th>
-  </tr></thead><tbody>{rows.map((row) => <tr key={row.transactionId}
-    className={`outcome-row outcome-${antifraudOutcome(row)}`}
+    <th>Начало</th><th>Номер A</th><th>Номер B</th><th>Фазы</th><th>Статус</th>
+    <th>Покеты</th><th>Покрытие CDR</th><th>Acct-Session-Id</th><th>H323 Conf ID</th>
+  </tr></thead><tbody>{rows.map((row) => <tr key={row.callId}
     onClick={() => onSelect(row)}>
-    <td className="mono">{formatTime(row.lastEventAt, timezone)}</td>
-    <td><span className="tag">{operationTypeLabel(row.requestType)}</span></td>
-    <td><span className={`decision ${row.decision || 'pending'}`}>
-      {decisionLabel(row.decision)}</span>
-      <span className={`outcome-badge ${antifraudOutcome(row)}`}>
-        {outcomeLabel(antifraudOutcome(row))}
-      </span></td>
-    <td className="mono">{row.srcNumberIn || row.callingStationId || '—'}</td>
-    <td className="mono">{row.dstNumberIn || row.calledStationId || '—'}</td>
-    <td>{row.inTrunkgroupLabel || '—'}</td><td>{row.outTrunkgroupLabel || '—'}</td>
-    <td className="mono">{row.serverAddress || '—'}</td>
-    <td className="right">{row.latencyMs == null ? '—' : `${row.latencyMs} мс`}</td>
-    <td>{row.accountingStatus || '—'}</td>
-    <td><span className={`parse-status ${row.correlationState || 'orphan'}`}>
-      {row.correlationState || 'orphan'}</span> {row.correlationMethod}</td>
-    <td className="right">{row.legCount || 'нет CDR'}</td>
-    <td><span className={`parse-status ${row.completeness}`}>
-      {row.completeness}</span></td>
+    <td className="mono">{formatTime(row.firstSeenAt, timezone)}</td>
+    <td className="mono">{row.calling || '—'}</td>
+    <td className="mono">{row.called || '—'}</td>
+    <td>{row.phases?.join(' → ') || '—'}</td>
+    <td><span className={`parse-status ${row.status}`}>{row.status}</span></td>
+    <td className="right">{row.packetCount}</td>
+    <td><CoverageBadge coverage={row.coverage} /></td>
     <td className="mono">{row.acctSessionId || '—'}</td>
-    <td className="mono">{row.callContext || '—'}</td>
+    <td className="mono">{row.h323ConfId || '—'}</td>
   </tr>)}</tbody></table>
 }
 
@@ -1441,68 +1321,7 @@ function AntifraudDrawer({ device, row, onClose }: {
   row: AntifraudRow
   onClose: () => void
 }) {
-  const [timeline, setTimeline] = useState<TimelineRow[]>([])
-  useEffect(() => {
-    api<{ items: TimelineRow[] }>(
-      `/devices/${device.id}/antifraud/${row.transactionId}/timeline`,
-    ).then(({ items }) => setTimeline(items || []))
-  }, [device.id, row.transactionId])
-  return <div className="drawer">
-    <div className="drawer-header"><div><h3>AntiFraud lifecycle</h3>
-      <span className="mono">{row.transactionId}</span></div>
-      <button onClick={onClose}>×</button></div>
-    <div className="call-facts">
-      <span><small>Операция</small><strong>{operationTypeLabel(row.requestType)}</strong></span>
-      <span><small>Решение</small><strong>{decisionLabel(row.decision)}</strong></span>
-      <span><small>Причина</small><strong>{terminalReasonLabel(row.decisionReason)}</strong></span>
-      <span><small>Q.850</small><strong>{row.q850Cause ?? '—'}</strong></span>
-      <span><small>RADIUS server</small><strong className="mono">{row.serverAddress || '—'}</strong></span>
-      <span><small>Latency / retries</small><strong>{row.latencyMs == null ? '—' : `${row.latencyMs} мс`} / {row.retries}</strong></span>
-      <span><small>Accounting</small><strong>{row.accountingStatus || '—'}</strong></span>
-      <span><small>CDR legs</small><strong>{row.legCount}</strong></span>
-      <span><small>Timezone источника</small><strong>{row.sourceTimezone || activeDeviceTimezone(device)}</strong></span>
-      <span><small>AntiFraud local / UTC</small><strong>{row.firstEventLocal || formatTime(row.firstEventAt, activeDeviceTimezone(device))}
-        {' / '}{row.firstEventAt}</strong></span>
-      <span><small>CDR setup local / UTC</small><strong>{row.cdrSetupLocal || formatTime(row.cdrSetupTime, activeDeviceTimezone(device))}
-        {' / '}{row.cdrSetupTime || '—'}</strong></span>
-      <span><small>Состояние корреляции</small><strong>{row.correlationState || 'orphan'}</strong></span>
-      <span><small>Метод</small><strong>{row.correlationMethod || '—'}</strong></span>
-      <span><small>Confidence / delta</small><strong>
-        {row.correlationMethod ? `${row.correlationConfidence.toFixed(2)} / ${row.correlationTimeDeltaMs} мс` : '—'}</strong></span>
-      <span><small>Matched fields</small><strong>{row.matchedFields?.join(', ') || '—'}</strong></span>
-      <span><small>Причина ambiguity/orphan</small><strong>{row.ambiguityReason || '—'}</strong></span>
-      <span><small>Acct-Session-Id</small><strong className="mono">{row.acctSessionId || '—'}</strong></span>
-      <span><small>CDR Acct-Session-Id</small><strong className="mono">{row.cdrSessionId || '—'}</strong></span>
-      <span><small>Call context</small><strong className="mono">{row.callContext || '—'}</strong></span>
-    </div>
-    <h4>Номера и маршруты</h4>
-    <div className="call-facts">
-      <span><small>A: вход / выход</small><strong className="mono">
-        {row.srcNumberIn || row.callingStationId || '—'} / {row.srcNumberOut || '—'}</strong></span>
-      <span><small>B: вход / выход</small><strong className="mono">
-        {row.dstNumberIn || row.calledStationId || '—'} / {row.dstNumberOut || '—'}</strong></span>
-      <span><small>Входящий trunk</small><strong>{row.inTrunkgroupLabel || '—'}</strong></span>
-      <span><small>Исходящий trunk</small><strong>{row.outTrunkgroupLabel || '—'}</strong></span>
-    </div>
-    <h4>CDR legs</h4>
-    {row.linkedRecordIds.length === 0
-      ? <p className="warning-text">CDR не назначен: {row.correlationState || 'orphan'}.
-        {row.ambiguityReason ? ` ${row.ambiguityReason}` : ' Сверка повторится после новых фактов.'}</p>
-      : <div className="timeline">{row.linkedRecordIds.map((recordId, index) =>
-        <div className="timeline-item" key={recordId}><i /><div>
-          <strong>Leg {index + 1}</strong><p className="mono">{recordId}</p>
-        </div></div>)}</div>}
-    <h4>Исходные события RADIUS</h4>
-    <div className="timeline">{timeline.length === 0 && <p>События пока не найдены.</p>}
-      {timeline.map((event) => <div className="timeline-item" key={event.eventId}>
-        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, activeDeviceTimezone(device))}</time>
-          <strong>{event.component || 'RADIUS'} · {event.attributes.packet_code || 'fragment'}</strong>
-          <p>{event.message}</p></div>
-      </div>)}
-    </div>
-    <h4>Все собранные атрибуты</h4>
-    <pre className="raw-payload">{JSON.stringify(row.attributes || {}, null, 2)}</pre>
-  </div>
+  return <SharedCallCard device={device} callID={row.callId} onClose={onClose} />
 }
 
 function CallsTable({ rows, timezone, onSelect }: {
@@ -1644,96 +1463,137 @@ function SatelCallDrawer({ call, timezone, onClose }: {
 }
 
 function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; onClose: () => void }) {
-  const [timeline, setTimeline] = useState<TimelineRow[]>([])
-  const [summaryState, setSummaryState] = useState<AntiFraudSummaryState>({ kind: 'loading' })
-  const [summaryRequest, setSummaryRequest] = useState(0)
-  const summaryRequestId = useRef(0)
-  useEffect(() => {
-    api<{ items: TimelineRow[] }>(`/devices/${device.id}/calls/${call.recordId}/timeline`)
-      .then(({ items }) => setTimeline(items || []))
-  }, [device.id, call.recordId])
+  return <SharedCallCard device={device} recordID={call.recordId} fallbackCDR={call} onClose={onClose} />
+}
+
+function CoverageBadge({ coverage }: { coverage: CoverageSummary }) {
+  const state = coverage.ambiguous ? 'ambiguous' : coverage.state
+  const labels: Record<string, string> = {
+    matched: 'Связан', expected: 'Ожидается', late: 'Опаздывает', missing: 'Отсутствует',
+    ambiguous: 'Неоднозначно', not_applicable: 'Не применяется', unmatched: 'CDR не найден',
+  }
+  return <span className={`parse-status ${state}`} title={coverage.reason || coverage.ambiguityReason}>
+    {labels[state] || state}
+  </span>
+}
+
+function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
+  device: Device
+  recordID?: string
+  callID?: string
+  fallbackCDR?: CallRow
+  onClose: () => void
+}) {
+  const [detail, setDetail] = useState<CallCardDTO | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [retry, setRetry] = useState(0)
   useEffect(() => {
     const controller = new AbortController()
-    const requestId = ++summaryRequestId.current
-    api<CallAntiFraudSummary>(
-      `/devices/${device.id}/calls/${call.recordId}/antifraud-summary`,
-      { signal: controller.signal },
-    ).then((summary) => {
-      if (requestId === summaryRequestId.current) {
-        setSummaryState({ kind: 'ready', summary })
-      }
-    }).catch((error: unknown) => {
-      if (controller.signal.aborted || requestId !== summaryRequestId.current) return
-      setSummaryState({
-        kind: 'error',
-        message: error instanceof Error ? error.message : 'неизвестная ошибка',
+    const path = callID
+      ? `/devices/${device.id}/antifraud-calls/${callID}`
+      : `/devices/${device.id}/calls/${recordID}/card`
+    api<CallCardDTO | AntifraudCallDetail>(path, { signal: controller.signal })
+      .then((value) => {
+        if (callID) {
+          const antifraud = value as AntifraudCallDetail
+          setDetail({
+            cdr: antifraud.linkedCdrs?.[0] || ({} as CallRow),
+            coverage: antifraud.coverage,
+            antifraud,
+          })
+        } else {
+          setDetail(value as CallCardDTO)
+        }
       })
-    })
-    return () => {
-      controller.abort()
-      if (requestId === summaryRequestId.current) summaryRequestId.current += 1
-    }
-  }, [device.id, call.recordId, summaryRequest])
-  const groups = groupCallTimeline(timeline)
+      .catch((reason) => {
+        if (!controller.signal.aborted) {
+          setError(reason instanceof Error ? reason.message : 'Не удалось загрузить карточку')
+        }
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    return () => controller.abort()
+  }, [callID, device.id, recordID, retry])
+  const cdr = detail?.cdr?.recordId ? detail.cdr : fallbackCDR
+  const antifraud = detail?.antifraud
+  const coverage = detail?.coverage
   const timezone = activeDeviceTimezone(device)
   return <div className="drawer">
-    <div className="drawer-header"><div><h3>Карточка вызова</h3><span className="mono">{call.recordId}</span></div>
-      <button onClick={onClose}>×</button></div>
-    <div className="call-facts">
-      <span><small>Установка · {timezone}</small><strong>{formatTime(call.setupTime, timezone)}</strong></span>
-      <span><small>Длительность</small><strong>{call.durationMs == null ? '—' : `${(call.durationMs / 1000).toFixed(3)} c`}</strong></span>
-      <span><small>Q.850</small><strong>{call.releaseCause ?? '—'} · {call.releaseInfo || '—'}</strong></span>
-      <span><small>Acct-Session-Id</small><strong className="mono">{call.radiusSessionId || '—'}</strong></span>
-    </div>
-    <AntiFraudSummary state={summaryState} onRetry={() => {
-      setSummaryState({ kind: 'loading' })
-      setSummaryRequest((value) => value + 1)
-    }} />
-    <h4>Связанные события АнтиФрод и Syslog</h4>
-    {timeline.length === 0 && <div className="timeline"><p>Связанные события пока не найдены.</p></div>}
-    <div className="timeline-groups">{groups.map((group) => <section
-      className="timeline-group" key={group.id}>
-      <h5><span>{group.label}</span><b>{group.items.length}</b></h5>
-      <div className="timeline">{group.items.map((event) => <div
-        className="timeline-item" key={event.eventId}>
-        <i /><div><time>{formatTime(event.eventTime || event.receivedAt, timezone)}</time>
-          <strong>{event.component || 'Оборудование'}</strong>
-          <p>{event.message}</p><small>{event.method} · confidence {event.confidence.toFixed(2)}</small>
-        </div>
-      </div>)}</div>
-    </section>)}</div>
+    <div className="drawer-header"><div><h3>Карточка вызова</h3>
+      <span className="mono">{recordID || callID}</span></div>
+      <button aria-label="Закрыть карточку" onClick={onClose}>×</button></div>
+    {loading && <div className="table-empty" role="status">Загрузка карточки…</div>}
+    {error && <div className="table-empty" role="alert"><strong>Карточка недоступна</strong>
+      <p>{error}</p><button className="secondary" onClick={() => {
+        setLoading(true)
+        setError('')
+        setRetry((value) => value + 1)
+      }}>
+        Повторить</button></div>}
+    {!loading && !error && <>
+      {cdr && <><h4>CDR</h4><div className="call-facts">
+        <span><small>Установка · {timezone}</small><strong>{formatTime(cdr.setupTime, timezone)}</strong></span>
+        <span><small>Длительность</small><strong>{cdr.durationMs == null ? '—' : `${(cdr.durationMs / 1000).toFixed(3)} c`}</strong></span>
+        <span><small>Q.850</small><strong>{cdr.releaseCause ?? '—'} · {cdr.releaseInfo || '—'}</strong></span>
+        <span><small>Acct-Session-Id</small><strong className="mono">{cdr.radiusSessionId || '—'}</strong></span>
+        <span><small>Номер A</small><strong className="mono">{cdr.incomingCgpn || cdr.outgoingCgpn || '—'}</strong></span>
+        <span><small>Номер B</small><strong className="mono">{cdr.incomingCdpn || cdr.outgoingCdpn || '—'}</strong></span>
+      </div></>}
+      {coverage && <><h4>Покрытие AntiFraud</h4><div className="call-facts">
+        <span><small>Состояние</small><strong><CoverageBadge coverage={coverage} /></strong></span>
+        <span><small>Метод</small><strong>{coverage.method || '—'}</strong></span>
+        <span><small>Причина</small><strong>{coverage.ambiguityReason || coverage.reason || '—'}</strong></span>
+        <span><small>Delta</small><strong>{coverage.deltaMs == null ? '—' : `${coverage.deltaMs} мс`}</strong></span>
+      </div>
+      {coverage.evidence && <details><summary>Доказательства сопоставления</summary>
+        <pre className="raw-payload">{JSON.stringify(redactDisplayValue(coverage.evidence), null, 2)}</pre></details>}</>}
+      {antifraud ? <AntiFraudCallBody value={antifraud} timezone={timezone} /> :
+        coverage?.state !== 'not_applicable' &&
+          <p className="warning-text">Пакеты не синтезируются: связанная цепочка AntiFraud отсутствует.</p>}
+    </>}
   </div>
 }
 
-const timelineGroupOrder = [
-  ['antifraud', 'АнтиФрод'],
-  ['radius', 'RADIUS'],
-  ['call_trace', 'Обработка вызова'],
-  ['sip', 'SIP'],
-  ['isup', 'SS7 / ISUP'],
-  ['q931', 'Q.931'],
-  ['h323', 'H.323'],
-  ['rtp', 'RTP / RTCP'],
-  ['alarms', 'Аварии'],
-  ['other', 'Прочие Syslog'],
-] as const
-
-function groupCallTimeline(items: TimelineRow[]) {
-  const groups = new Map<string, TimelineRow[]>()
-  for (const item of items) {
-    let group = item.category
-    if (item.category === 'radius') {
-      const requestType = (item.attributes?.xpgk_request_type || '').toLowerCase()
-      group = item.attributes?.is_antifraud === 'true' ||
-        ['number', 'save_call', 'check_call'].includes(requestType) ? 'antifraud' : 'radius'
-    } else if (!timelineGroupOrder.some(([id]) => id === item.category)) {
-      group = 'other'
-    }
-    groups.set(group, [...(groups.get(group) || []), item])
-  }
-  return timelineGroupOrder
-    .map(([id, label]) => ({ id, label, items: groups.get(id) || [] }))
-    .filter((group) => group.items.length > 0)
+function AntiFraudCallBody({ value, timezone }: { value: AntifraudCallDetail; timezone: string }) {
+  return <section aria-label="Полный цикл AntiFraud">
+    <h4>Цикл Custom AntiFraud</h4>
+    <div className="call-facts">
+      <span><small>Начало</small><strong>{formatTime(value.firstSeenAt, timezone)}</strong></span>
+      <span><small>Завершение</small><strong>{formatTime(value.lastSeenAt, timezone)}</strong></span>
+      <span><small>Статус</small><strong>{value.status}</strong></span>
+      <span><small>Фазы</small><strong>{value.phases?.join(' → ') || '—'}</strong></span>
+      <span><small>Номера A / B</small><strong className="mono">{value.calling || '—'} / {value.called || '—'}</strong></span>
+      <span><small>Session / H323</small><strong className="mono">{value.acctSessionId || '—'} / {value.h323ConfId || '—'}</strong></span>
+    </div>
+    {value.truncated && <p className="warning-text" role="alert">
+      Ответ сокращён: {value.warnings?.join('; ')}</p>}
+    <details><summary>Атрибуты вызова ({value.attributes?.length || 0})</summary>
+      <pre className="raw-payload">{JSON.stringify(redactDisplayValue(value.attributes || []), null, 2)}</pre></details>
+    <details><summary>Обмены request / response ({value.exchanges?.length || 0})</summary>
+      <pre className="raw-payload">{JSON.stringify(redactDisplayValue(value.exchanges || []), null, 2)}</pre></details>
+    <h4>Пакеты и обмены ({value.packets?.length || 0})</h4>
+    <div className="timeline">{value.packets?.map((packet) =>
+      <details className="timeline-item" key={packet.packetId}>
+        <summary><span className="mono">{formatTime(packet.firstSeenAt, timezone)}</span>
+          {' '}{packet.phase} · {packet.direction} · {packet.status} · {packet.decision || 'без решения'}</summary>
+        <div className="call-facts">
+          <span><small>Request / response</small><strong className="mono">
+            {packet.requestId || '—'} / {packet.responseId || '—'}</strong></span>
+          <span><small>Попытки</small><strong>{packet.attemptIds?.length || 0}</strong></span>
+          <span><small>Confidence</small><strong>{packet.confidence || '—'}</strong></span>
+          <span><small>Объяснения</small><strong>{packet.explanationCodes?.join(', ') || '—'}</strong></span>
+          <span><small>Orphan / ambiguity</small><strong>
+            {packet.orphanReason || packet.ambiguityReason || '—'}</strong></span>
+          <span><small>Исходные фрагменты</small><strong>{packet.members?.length || 0}</strong></span>
+        </div>
+        <pre className="raw-payload">{JSON.stringify(redactDisplayValue(packet.attributes || []), null, 2)}</pre>
+      </details>)}</div>
+    {Boolean(value.orphanPacketIds?.length || value.unmatched) && <details>
+      <summary>Непривязанные факты</summary>
+      <pre className="raw-payload">{JSON.stringify(redactDisplayValue({
+        orphanPacketIds: value.orphanPacketIds, unmatched: value.unmatched,
+      }), null, 2)}</pre></details>}
+  </section>
 }
 
 function EventsTable({ rows, timezone, onSelect }: {
@@ -1741,14 +1601,10 @@ function EventsTable({ rows, timezone, onSelect }: {
   timezone: string
   onSelect: (row: EventRow) => void
 }) {
-  return <table><thead><tr><th>Получено</th><th>Раздел</th><th>Компонент</th>
-      <th>Сообщение</th><th>Статус</th><th>Атрибуты</th></tr></thead>
+  return <table><thead><tr><th>Получено</th><th>Источник</th><th>Transport</th>
+      <th>Payload</th><th>SHA-256</th></tr></thead>
     <tbody>{rows.map((row) => <EventTableRow key={row.eventId} row={row}
       timezone={timezone} onSelect={onSelect} />)}</tbody></table>
-}
-
-function formatEventAttrs(row: EventRow) {
-  return Object.entries(row.attributes || {}).map(([key, value]) => `${key}=${value}`).join(' · ') || '—'
 }
 
 function EventTableRow({ row, timezone, onSelect, nested }: {
@@ -1758,12 +1614,11 @@ function EventTableRow({ row, timezone, onSelect, nested }: {
   nested?: boolean
 }) {
   return <tr className={nested ? 'thread-child' : undefined} onClick={() => onSelect(row)}>
-    <td className="mono">{formatTime(row.eventTime || row.receivedAt, timezone)}</td>
-    <td><span className="tag">{row.category}</span></td>
-    <td className="mono">{row.component || '—'}</td>
-    <td className={`message-cell ${nested ? 'thread-fragment' : ''}`}>{row.message || '—'}</td>
-    <td><span className={`parse-status ${row.parseStatus}`}>{row.parseStatus}</span></td>
-    <td className="mono">{formatEventAttrs(row)}</td>
+    <td className="mono">{formatTime(row.receivedAt, timezone)}</td>
+    <td className="mono">{row.sourceIp}:{row.sourcePort}</td>
+    <td><span className="tag">{row.transport}</span></td>
+    <td className={`message-cell ${nested ? 'thread-fragment' : ''}`}>{redactDisplayText(row.payload) || '—'}</td>
+    <td className="mono">{row.payloadSha256}</td>
   </tr>
 }
 
@@ -1776,19 +1631,17 @@ function EventDrawer({ event, timezone, onClose }: {
     <div className="drawer-header"><div><h3>Событие Syslog</h3><span className="mono">{event.eventId}</span></div>
       <button onClick={onClose}>×</button></div>
     <div className="call-facts">
-      <span><small>Время события</small><strong>{formatTime(event.eventTime || event.receivedAt, timezone)}</strong></span>
       <span><small>Получено Collector</small><strong>{formatTime(event.receivedAt, timezone)}</strong></span>
-      <span><small>Timezone источника</small><strong>{event.sourceTimezone || timezone}</strong></span>
-      <span><small>Раздел</small><strong>{event.category}</strong></span>
-      <span><small>Компонент</small><strong>{event.component || '—'}</strong></span>
-      <span><small>Разбор</small><strong>{event.parseStatus}</strong></span>
+      <span><small>Источник</small><strong>{event.sourceIp}:{event.sourcePort}</strong></span>
+      <span><small>Transport</small><strong>{event.transport}</strong></span>
+      <span><small>Device ID</small><strong>{event.deviceId}</strong></span>
     </div>
-    <h4>Сообщение</h4>
-    <pre className="raw-payload">{event.message}</pre>
-    <h4>Исходный Syslog без изменений</h4>
-    <pre className="raw-payload">{event.rawPayload}</pre>
-    <h4>Извлечённые атрибуты</h4>
-    <pre className="raw-payload">{JSON.stringify(event.attributes || {}, null, 2)}</pre>
+    {event.truncated && <p className="warning-text" role="alert">
+      Payload был усечён при приёме UDP datagram.</p>}
+    <h4>Syslog (секреты скрыты)</h4>
+    <pre className="raw-payload">{redactDisplayText(event.payload)}</pre>
+    <h4>Payload SHA-256</h4>
+    <pre className="raw-payload">{event.payloadSha256}</pre>
   </div>
 }
 
@@ -1807,7 +1660,7 @@ function CreateDeviceDialog({ category, templates, onClose, onCreated }: {
     model: isSoftswitch ? '' : 'SMG-1016M',
     firmware: defaultTemplate.key.endsWith('3.410') ? '3.410' : isSoftswitch ? '' : '3.23.2',
     timezone: 'Asia/Novosibirsk', managementIp: '', syslogSourceIp: '', deviceSign: '',
-    antifraudEnabled: !isSoftswitch, antifraudMode: isSoftswitch ? 'OFF' : 'Custom',
+    antifraudEnabled: !isSoftswitch,
   })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1858,10 +1711,6 @@ function CreateDeviceDialog({ category, templates, onClose, onCreated }: {
             value={form.syslogSourceIp} onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
           <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
             onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
-          <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled} value={form.antifraudMode}
-            onChange={(e) => update('antifraudMode', e.target.value)}>
-            <option>Custom</option><option>Astarta</option><option>Intek</option><option>OFF</option>
-          </select></label>
         </>}
       </div>
       {error && <div className="form-error">{error}</div>}
@@ -1892,7 +1741,7 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
     timezone: device.timezone,
     managementIp: device.managementIp || '', syslogSourceIp: device.syslogSourceIp || '',
     deviceSign: device.deviceSign, antifraudEnabled: device.antifraudEnabled,
-    antifraudMode: device.antifraudMode, enabled: device.enabled,
+    enabled: device.enabled,
   })
   const [error, setError] = useState(device.purgeError || '')
   const [busy, setBusy] = useState(false)
@@ -1956,7 +1805,7 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
         <strong>Операция необратима.</strong>
         <p>{isSoftswitch
           ? 'Будут удалены raw CDR, архив MinIO, FTP-файлы, журнал приёма и аудит источника.'
-          : 'Будут удалены Syslog, CDR, RADIUS/АнтиФрод, связи, архив MinIO, FTP-файлы, очереди, ревизии и аудит оборудования.'}</p>
+          : 'Будут удалены Syslog, CDR, архив MinIO, FTP-файлы, очереди и аудит оборудования.'}</p>
         <label>Введите точное имя источника для подтверждения
           <input autoFocus value={deleteName} onChange={(event) => setDeleteName(event.target.value)}
             disabled={busy} data-testid="purge-confirm-name" />
@@ -2002,10 +1851,6 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
             onChange={(e) => update('syslogSourceIp', e.target.value)} /></label>
           <label className="checkbox-row"><input type="checkbox" checked={form.antifraudEnabled}
             onChange={(e) => update('antifraudEnabled', e.target.checked)} /> Используется АнтиФрод</label>
-          <label>Режим АнтиФрод<select disabled={!form.antifraudEnabled}
-            value={form.antifraudMode} onChange={(e) => update('antifraudMode', e.target.value)}>
-            <option>Custom</option><option>Astarta</option><option>Intek</option><option>OFF</option>
-          </select></label>
         </>}
         <label className="checkbox-row"><input type="checkbox" checked={form.enabled}
           onChange={(e) => update('enabled', e.target.checked)} /> Приём данных включён</label>
@@ -2401,6 +2246,14 @@ function activeDeviceTimezone(device: Device) {
 
 function formatCount(value?: number) {
   return Number.isFinite(value) ? Number(value).toLocaleString('ru-RU') : '0'
+}
+
+function formatDurationNanos(value?: number) {
+  if (!Number.isFinite(value) || Number(value) <= 0) return '—'
+  const seconds = Math.round(Number(value) / 1e9)
+  if (seconds < 60) return `${seconds} с`
+  if (seconds < 3600) return `${Math.round(seconds / 60)} мин`
+  return `${(seconds / 3600).toFixed(1)} ч`
 }
 
 function formatBytes(value?: number) {

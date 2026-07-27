@@ -18,77 +18,22 @@ import (
 	"collector/internal/config"
 	"collector/internal/store"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/xuri/excelize/v2"
 )
 
-func TestRevisionDiagnosticsAreIncludedInAPIResponse(t *testing.T) {
-	response := make(map[string]any)
-	addRevisionDiagnostics(response, analytics.SyslogDiagnostics{
-		ActiveRevision: 1, BuildingRevision: 2, RevisionTimezone: "Asia/Novosibirsk",
-		ActiveTimezone: "UTC", RevisionStatus: "building",
-		RevisionReason: "timezone_change", ReplayProcessed: 10, ReplayTotal: 20,
-		CDRReplayProcessed: 3, CDRReplayTotal: 4, MissingCDRTimes: 1,
-		RadiusRawFragments: 30, LifecycleDerived: 12, CorrelationTotal: 12,
-		CorrelationOrphan: 2, AntifraudPackets: 20, AntifraudCalls: 4,
-		AntifraudOperations: 12, UnlinkedFragments: 1, AmbiguousSessions: 2,
-	})
-	required := []string{
-		"activeRevision", "activeRevisionTimezone", "buildingRevision", "revisionTimezone",
-		"revisionStatus", "revisionReason",
-		"replayProcessed", "replayTotal", "cdrReplayProcessed", "cdrReplayTotal",
-		"missingCdrInterpretations", "radiusRawFragments", "lifecycleDerived",
-		"antifraudPackets", "antifraudCalls", "antifraudOperations",
-		"unlinkedRadiusFragments", "ambiguousSessionCollisions",
-		"correlationTotal", "correlationOrphan",
-	}
-	for _, key := range required {
-		if _, ok := response[key]; !ok {
-			t.Fatalf("diagnostics response is missing %q", key)
-		}
-	}
-}
+func TestRawSyslogListRejectsLegacyCategory(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/?category=radius", nil)
 
-func TestConstructAPIReportsDisabledFeature(t *testing.T) {
-	server := &Server{Config: config.Config{SyslogConstructsEnabled: false}}
-	for _, handler := range []http.HandlerFunc{
-		server.listSyslogConstructs,
-		server.getSyslogConstruct,
-	} {
-		response := httptest.NewRecorder()
-		handler(response, httptest.NewRequest(http.MethodGet, "/", nil))
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("got status %d, want 404", response.Code)
-		}
-		if !strings.Contains(response.Body.String(), `"error":"feature_disabled"`) {
-			t.Fatalf("unexpected response: %s", response.Body.String())
-		}
-	}
-}
+	(&Server{}).listEvents(response, request)
 
-func TestCallAntiFraudSummaryErrors(t *testing.T) {
-	t.Run("invalid record id", func(t *testing.T) {
-		route := chi.NewRouteContext()
-		route.URLParams.Add("deviceID", uuid.NewString())
-		route.URLParams.Add("recordID", "not-a-uuid")
-		request := httptest.NewRequest(http.MethodGet, "/", nil)
-		request = request.WithContext(context.WithValue(
-			request.Context(), chi.RouteCtxKey, route,
-		))
-		response := httptest.NewRecorder()
-		(&Server{}).callAntifraudSummary(response, request)
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
-	})
-	t.Run("missing CDR", func(t *testing.T) {
-		response := httptest.NewRecorder()
-		writeCallAntiFraudSummaryError(response, analytics.ErrCallCDRNotFound)
-		if response.Code != http.StatusNotFound {
-			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-		}
-	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "category is not supported") {
+		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
 }
 
 func TestDashboardWindowValidation(t *testing.T) {
@@ -189,10 +134,9 @@ func TestParsePageLimitIsBounded(t *testing.T) {
 
 func TestExportRequestValidation(t *testing.T) {
 	valid := map[string]exportRequest{
-		"?dataset=calls":                          {Dataset: "calls"},
-		"?dataset=antifraud&q=test":               {Dataset: "antifraud", Search: "test"},
-		"?dataset=events&category=all":            {Dataset: "events", Category: "all"},
-		"?dataset=events&category=system_journal": {Dataset: "events", Category: "system_journal"},
+		"?dataset=calls":        {Dataset: "calls"},
+		"?dataset=syslog&q=raw": {Dataset: "syslog", Search: "raw"},
+		"?dataset=antifraud":    {Dataset: "antifraud"},
 	}
 	for query, want := range valid {
 		request := httptest.NewRequest(http.MethodGet, "/export.xlsx"+query, nil)
@@ -202,8 +146,9 @@ func TestExportRequestValidation(t *testing.T) {
 		}
 	}
 	for _, query := range []string{
-		"", "?dataset=invalid", "?dataset=events", "?dataset=events&category=calls",
-		"?dataset=calls&category=all", "?dataset=antifraud&category=radius",
+		"", "?dataset=invalid", "?dataset=events", "?dataset=syslog_messages",
+		"?dataset=syslog&category=all",
+		"?dataset=events&category=calls", "?dataset=calls&category=all",
 	} {
 		request := httptest.NewRequest(http.MethodGet, "/export.xlsx"+query, nil)
 		if _, err := parseExportRequest(request.URL.Query()); err == nil {
@@ -338,7 +283,7 @@ func TestDeviceDateRangeRejectsInvalidDate(t *testing.T) {
 func TestSyncAllSyslogRequiresAsyncExport(t *testing.T) {
 	response := httptest.NewRecorder()
 	(&Server{}).exportXLSX(response, httptest.NewRequest(
-		http.MethodGet, "/export.xlsx?dataset=events&category=all", nil,
+		http.MethodGet, "/export.xlsx?dataset=syslog", nil,
 	))
 	if response.Code != http.StatusRequestEntityTooLarge ||
 		!strings.Contains(response.Body.String(), "export-jobs") {
@@ -384,18 +329,18 @@ func TestAutoExportUsesCSVForUnknownSyslogEstimate(t *testing.T) {
 	from := time.Now()
 	to := from.Add(time.Hour)
 	if !useCSVZip(store.ExportJob{
-		Dataset: "events", Format: "auto", RangeFrom: &from, RangeTo: &to,
+		Dataset: "syslog", Format: "auto", RangeFrom: &from, RangeTo: &to,
 	}) {
 		t.Fatal("unknown Syslog estimate did not select CSV.zip")
 	}
 	estimate := int64(100)
 	if useCSVZip(store.ExportJob{
-		Dataset: "events", Format: "auto", RangeFrom: &from, RangeTo: &to,
+		Dataset: "syslog", Format: "auto", RangeFrom: &from, RangeTo: &to,
 		RowsEstimated: &estimate,
 	}) {
 		t.Fatal("small bounded Syslog export did not select XLSX")
 	}
-	if useCSVZip(store.ExportJob{Dataset: "events", Format: "xlsx"}) {
+	if useCSVZip(store.ExportJob{Dataset: "syslog", Format: "xlsx"}) {
 		t.Fatal("explicit XLSX request was not honored")
 	}
 	if !useCSVZip(store.ExportJob{Dataset: "calls", Format: "csv_zip"}) {
@@ -445,7 +390,7 @@ func TestCSVArchiveStreamsSafeRows(t *testing.T) {
 
 func BenchmarkCSVArchiveStreaming100k(b *testing.B) {
 	job := store.ExportJob{
-		DeviceID: uuid.New(), Dataset: "events",
+		DeviceID: uuid.New(), Dataset: "syslog",
 		CreatedAt: time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC),
 	}
 	for range b.N {
@@ -536,12 +481,12 @@ func TestExportResponseMetadataAndFilename(t *testing.T) {
 	response := httptest.NewRecorder()
 	deviceID := uuid.MustParse("7845e6d4-b8f1-4d0f-a8d4-c527f6868d02")
 	setExportResponseHeaders(response, deviceID, exportRequest{
-		Dataset: "events", Category: "system_journal",
+		Dataset: "syslog",
 	}, "eltex-smg-1016m-3.410", 123, time.Date(2026, 7, 26, 12, 34, 56, 0, time.UTC))
-	if got := response.Header().Get("X-Export-Dataset"); got != "events" {
+	if got := response.Header().Get("X-Export-Dataset"); got != "syslog" {
 		t.Fatalf("dataset header=%q", got)
 	}
-	if got := response.Header().Get("X-Export-Category"); got != "system_journal" {
+	if got := response.Header().Get("X-Export-Category"); got != "" {
 		t.Fatalf("category header=%q", got)
 	}
 	if got := response.Header().Get("X-Export-Template"); got != "eltex-smg-1016m-3.410" {
@@ -551,7 +496,7 @@ func TestExportResponseMetadataAndFilename(t *testing.T) {
 		t.Fatalf("rows header=%q", got)
 	}
 	disposition := response.Header().Get("Content-Disposition")
-	for _, part := range []string{"events", "system_journal", "7845e6d4"} {
+	for _, part := range []string{"syslog", "7845e6d4"} {
 		if !strings.Contains(disposition, part) {
 			t.Fatalf("Content-Disposition %q does not contain %q", disposition, part)
 		}

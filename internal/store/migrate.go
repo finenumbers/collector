@@ -16,12 +16,58 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const postgresMigrationLockKey int64 = 0x436f6c6c6563746f
+const (
+	postgresMigrationLockKey   int64 = 0x436f6c6c6563746f
+	clickHouseMigrationLockKey int64 = 0x436f6c6c43484d47
+)
 
 type postgresMigration struct {
 	name     string
 	content  []byte
 	checksum string
+}
+
+// ActiveLegacySyslogParserJobs is intentionally usable before migrations.
+// Upgrade startup calls it before migration 017 removes the legacy queue.
+func (s *Store) ActiveLegacySyslogParserJobs(ctx context.Context) (uint64, error) {
+	var tableExists bool
+	if err := s.DB.QueryRow(ctx,
+		`SELECT to_regclass('syslog_parser_rebuild_jobs') IS NOT NULL`,
+	).Scan(&tableExists); err != nil {
+		return 0, err
+	}
+	if !tableExists {
+		return 0, nil
+	}
+	var count uint64
+	if err := s.DB.QueryRow(ctx, `SELECT count(*) FROM syslog_parser_rebuild_jobs
+		WHERE status IN ('pending','running')`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// LockClickHouseMigrations serializes the complete ClickHouse ledger
+// check/execution/record sequence across all collector instances.
+func (s *Store) LockClickHouseMigrations(ctx context.Context) (func(), error) {
+	conn, err := s.DB.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, clickHouseMigrationLockKey); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	return func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(
+			unlockCtx, `SELECT pg_advisory_unlock($1)`, clickHouseMigrationLockKey,
+		); err != nil {
+			_ = conn.Conn().Close(unlockCtx)
+		}
+		conn.Release()
+	}, nil
 }
 
 func (s *Store) Migrate(ctx context.Context, directory string) error {

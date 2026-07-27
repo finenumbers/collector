@@ -1,92 +1,72 @@
-# Корреляция вызовов и АнтиФрод
+# Корреляция вызовов и Custom AntiFraud
 
 ## Каноническая модель
 
-CDR record — биллинговый факт одного логического/протокольного плеча. Пользовательский вызов может состоять из нескольких records при B2BUA, redirection, transfer, pickup, conference, IVR, SIP fork и alternate route.
+CDR record — биллинговый факт одного логического/протокольного плеча. Пользовательский
+вызов может состоять из нескольких records при B2BUA, redirection, transfer, pickup,
+conference, IVR, SIP fork и alternate route.
 
-RADIUS trace состоит из нескольких Syslog datagrams. Они сначала объединяются в
-`antifraud_lifecycles` по device, timezone revision и bounded context occurrence.
-Текущее назначение каждой AntiFraud-операции хранится отдельно в `call_assignments`:
-`cdr_record_id` либо explicit ambiguous/orphan, method, confidence, delta и matched
-fields. Исходные записи не изменяются.
+Custom AntiFraud строится только из immutable `collector.syslog_messages`. Фоновый
+worker собирает RADIUS-пакеты и вызовы Custom AntiFraud в staged snapshots, а видимость
+задаёт active marker. Сырые Syslog-строки не изменяются и не удаляются replay.
+
+Разные нормализованные `Acct-Session-Id` всегда означают разные вызовы Custom AntiFraud.
+Один CDR может быть связан только с одним таким вызовом; несколько exact-кандидатов
+остаются `ambiguous`.
 
 ## Детерминированное правило
 
 ```text
-device_id + normalize(RADIUS Accounting-Session-Id)
+device_id + normalize(Acct-Session-Id)
 ```
 
-Нормализация удаляет whitespace и приводит регистр. Для operation-to-CDR projection
-сначала проверяется leg `Acct-Session-Id`, затем canonical call `h323-conf-id` против
-`cdr_records.radius_session_id_normalized`. Второй способ нужен для B2BUA outbound leg,
-у которого собственный session отличается от CDR session. `device_id` обязателен:
-RFC не гарантирует глобальную уникальность идентификаторов между NAS/reboot.
-Любое множество из нескольких exact-кандидатов остаётся `ambiguous`; временная
-сортировка используется только для детерминированного evidence, а не для выбора записи.
+Нормализация удаляет whitespace и приводит регистр. Matching сначала проверяет exact
+normalized `Acct-Session-Id` CDR ↔ Custom call. Если exact ID недоступен, допускается
+unique H323 значение из реального поля CDR (`h323-conf-id` / эквивалент). Номера и
+время — только supporting evidence, никогда не выбирают кандидата сами.
 
-### v16 staged canary
+`device_id` обязателен: RFC не гарантирует глобальную уникальность идентификаторов
+между NAS/reboot. Любое множество из нескольких exact-кандидатов остаётся
+`ambiguous`; временная сортировка используется только для детерминированного evidence.
 
-1. Дождаться, пока shadow replay достигнет watermark, не активируя новую projection.
-2. Сверить для canary device: `unknown`, `ambiguous_response`, долю linked operations
-   и golden summary (2 request + 2 response, 2 operations, 1 call, 1 CDR).
-3. Записать `active` marker только для canary device и проверить Call Drawer/API.
-4. При отсутствии регрессий активировать остальные devices по одному. Откат выполняется
-   сменой read marker; immutable raw Syslog и v15 projection не удаляются.
+Приход Syslog или CDR dirty-ит UTC-hour bucket. Worker идемпотентно пересобирает
+малый bucket, поэтому CDR-first и AntiFraud-first дают одно и то же покрытие.
+Toggle `antifraudEnabled` проверяется по PostgreSQL policy revision перед cutover:
+disable пишет `not_applicable` coverage и оставляет raw Syslog нетронутым.
 
-Приход RADIUS или CDR пакетно ставит `device + timezone revision + UTC day` в durable
-dirty queue. Worker повторно собирает весь малый day bucket идемпотентно, поэтому
-CDR-first и RADIUS-first дают одно назначение без device-wide scan.
+## Coverage states
 
-Когда Acct-Session-Id появился только в одном фрагменте transaction, все event IDs
-этого же lifecycle связываются через evidence `call_context_transaction`.
-Retransmissions остаются событиями доставки, но не становятся новыми вызовами.
+В UI и метриках отдельно показываются состояния покрытия CDR ↔ Custom AntiFraud:
 
-## Дополнительные exact evidence
+| State | Meaning |
+| --- | --- |
+| `expected` | CDR принят для устройства с включённым AntiFraud, связь ещё не подтверждена |
+| `matched` | Unique exact link (Acct-Session-Id или unique H323) |
+| `late` | Связь ещё не найдена после ожидаемого окна / lag |
+| `missing` | После grace окно закрыто без unique match |
+| `ambiguous` | Несколько exact-кандидатов; выбор запрещён |
+| `not_applicable` | AntiFraud выключен для устройства |
 
-Автоматически разрешены только документированные точные значения:
-
-1. incoming/outgoing SIP Call-ID в контексте устройства и ограниченного окна CDR;
-2. SS7 Global Call Reference;
-3. CDR `radius-rejected` как подтверждение блокирующего RADIUS server/reply.
-
-Если exact ID недоступен, worker строит composite signature из всех вариантов CgPN/CdPN
-до/после модификаций, точных incoming/outgoing route labels и исправленного event time.
-Российские 10/11-значные номера канонизируются к `7XXXXXXXXXX`.
-
-Внутри сигнатуры edges сортируются детерминированно по confidence, абсолютному time
-delta и UUID. Для каждой операции связывается только unique best с margin. Один CDR
-может получить несколько lifecycle одного вызова (`number`, `check_call`, `save_call`);
-один номер или округлённое время без route/второго номера недостаточны.
+Coverage-инвариант считается в направлении CDR с включённым AntiFraud: applicable
+строки (`matched + expected + late + missing`) участвуют в SLO; `late + missing`
+после grace не должны превышать 1%. Orphan/ambiguity пакеты Custom AntiFraud
+учитываются отдельно в operational diagnostics.
 
 ## Edge cases
 
-- SIP fork: один ingress и несколько egress Call-ID; сохраняются все legs.
-- Transfer: original/transferring/transferred records не склеиваются без transfer evidence.
-- Redirect: участвуют incoming/outgoing/original/redirecting numbers.
+- SIP fork: один ingress и несколько egress Call-ID; сохраняются все CDR legs.
+- Transfer / redirect: records не склеиваются без documented transfer evidence.
 - Route retry: trunk/IP/Call-ID меняются, Acct-Session-Id может сохраниться.
-- Missing accounting: CDR остаётся полноценным unmatched record.
-- Late events: используется embedded Event-Timestamp/Acct-Delay-Time, receive time только fallback.
-- Source wall clock Syslog и CDR интерпретируется в IANA timezone конкретного SMG.
-  Canonical UTC используется только как внутренний instant для matching; UI/API/XLSX
-  возвращают время устройства, `received_at` остаётся отдельным техническим фактом.
-- Clock step/NTP: временное окно расширяется только после измерения observed offset.
-- Reboot: sequence boot component сохраняется полностью.
+- Missing accounting: CDR остаётся `expected` → `late`/`missing`, без синтетических пакетов.
+- Late events: используется embedded Event-Timestamp/Acct-Delay-Time; receive time только fallback.
+- Source wall clock CDR интерпретируется в IANA timezone конкретного SMG.
+  Canonical UTC — внутренний instant для matching; UI/API/export показывают время
+  устройства, `received_at` Syslog остаётся отдельным техническим фактом.
+- Reboot: sequence/boot component сохраняется в provenance, но не создаёт новый call
+  без нового `Acct-Session-Id`.
 
-## Coverage
+## Операционная диагностика
 
-В UI и метриках отдельно показываются:
-
-- exact-linked;
-- fallback-linked по каждому method;
-- ambiguous candidates;
-- unlinked CDR;
-- RADIUS без CDR;
-- unknown parser messages.
-
-Для каждой AntiFraud transaction дополнительно фиксируются `complete`, `incomplete`,
-`orphan` и `ambiguous`. Каждая операция имеет максимум один активный CDR assignment;
-несколько операций одного звонка могут ссылаться на один CDR. Конфликтующие CDR-кандидаты
-одной операции разрешаются minimum delta либо остаются ambiguous.
-
-Coverage-инвариант считается в направлении AntiFraud: `linked + ambiguous + orphan =
-total AntiFraud`; число всех CDR не обязано совпадать с числом AntiFraud operations.
+Администратор открывает панель «Диагностика» (lazy `GET /api/system/diagnostics`):
+глубина/lag очереди Custom projection, coverage SLO, orphans/ambiguity и очередь
+export. Legacy category breakdown, lifecycle counters и v16 canary markers удалены.

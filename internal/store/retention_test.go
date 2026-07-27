@@ -24,7 +24,7 @@ func TestRetentionScheduling(t *testing.T) {
 
 func TestValidRetentionClassIncludesSoftswitchCDR(t *testing.T) {
 	for _, class := range []string{
-		"syslog", "cdr", "softswitch_cdr", "derived", "raw_cdr_archive",
+		"syslog", "cdr", "softswitch_cdr", "raw_cdr_archive",
 	} {
 		if !validRetentionClass(class) {
 			t.Errorf("retention class %q was rejected", class)
@@ -32,6 +32,9 @@ func TestValidRetentionClassIncludesSoftswitchCDR(t *testing.T) {
 	}
 	if validRetentionClass("unknown") {
 		t.Fatal("unknown retention class was accepted")
+	}
+	if validRetentionClass("derived") {
+		t.Fatal("removed derived retention class was accepted")
 	}
 }
 

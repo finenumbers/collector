@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"collector/internal/analytics"
@@ -26,6 +27,7 @@ import (
 	"collector/internal/ingest"
 	"collector/internal/spool"
 	"collector/internal/store"
+	"collector/internal/workload"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -34,6 +36,11 @@ import (
 )
 
 const sessionCookie = "collector_session"
+
+type costlyRate struct {
+	window time.Time
+	count  int
+}
 
 type Server struct {
 	Config             config.Config
@@ -49,6 +56,14 @@ type Server struct {
 	IngressStatusPath  string
 	ExportHealth       *exportworker.Health
 	ReconcileRetention func(context.Context) error
+	diagnosticsMu      sync.Mutex
+	diagnosticsAt      time.Time
+	diagnosticsValue   map[string]any
+	diagnosticsErr     error
+	diagnosticsRunning chan struct{}
+	diagnosticsLoad    func(context.Context) (map[string]any, error)
+	rateMu             sync.Mutex
+	costlyRates        map[uuid.UUID]costlyRate
 }
 
 type contextKey string
@@ -71,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 			private.Get("/auth/me", s.me)
 			private.Post("/auth/logout", s.logout)
 			private.Get("/system/info", s.systemInfo)
+			private.With(s.requireAdmin).Get("/system/diagnostics", s.systemDiagnostics)
 			private.Get("/dashboard", s.dashboard)
 			private.Get("/equipment-templates", s.listEquipmentTemplates)
 			private.With(s.requireAdmin).Get("/system/users", s.listUsers)
@@ -84,17 +100,14 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
 			private.Get("/devices/{deviceID}/events", s.listEvents)
-			private.Get("/devices/{deviceID}/syslog-constructs", s.listSyslogConstructs)
-			private.Get("/devices/{deviceID}/syslog-constructs/{constructID}", s.getSyslogConstruct)
+			private.Get("/devices/{deviceID}/syslog-messages", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
-			private.Get("/devices/{deviceID}/antifraud", s.listAntifraud)
+			private.Get("/devices/{deviceID}/calls/{recordID}/card", s.callCard)
+			private.Get("/devices/{deviceID}/antifraud-calls", s.listAntifraudCalls)
+			private.Get("/devices/{deviceID}/antifraud-calls/{callID}", s.antifraudCallDetail)
 			private.Get("/devices/{deviceID}/stats", s.deviceStats)
 			private.Get("/devices/{deviceID}/ingest-files", s.listIngestFiles)
 			private.Get("/devices/{deviceID}/ingest-files/{fileID}/download", s.downloadIngestFile)
-			private.With(s.requireAdmin).Get("/devices/{deviceID}/syslog-diagnostics", s.syslogDiagnostics)
-			private.Get("/devices/{deviceID}/calls/{recordID}/timeline", s.callTimeline)
-			private.Get("/devices/{deviceID}/calls/{recordID}/antifraud-summary", s.callAntifraudSummary)
-			private.Get("/devices/{deviceID}/antifraud/{transactionID}/timeline", s.antifraudTimeline)
 			private.Post("/devices/{deviceID}/export-jobs", s.createExportJob)
 			private.Get("/devices/{deviceID}/export-jobs", s.listExportJobs)
 			private.Get("/devices/{deviceID}/export-jobs/{jobID}", s.getExportJob)
@@ -234,18 +247,23 @@ func (s *Server) listDevices(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusInternalServerError, "unable to list devices")
 		return
 	}
+	summaries, err := s.Store.DeviceIngestSummaries(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load device replay progress")
+		return
+	}
 	type deviceWithReplay struct {
 		store.Device
-		Replay store.IngestReplayProgress `json:"replay"`
+		Replay                   store.IngestReplayProgress `json:"replay"`
+		CustomAntifraudAvailable bool                       `json:"customAntifraudAvailable"`
 	}
 	items := make([]deviceWithReplay, 0, len(devices))
 	for _, device := range devices {
-		replay, replayErr := s.Store.DeviceIngestReplayProgress(request.Context(), device.ID)
-		if replayErr != nil {
-			writeError(writer, http.StatusInternalServerError, "unable to load device replay progress")
-			return
-		}
-		items = append(items, deviceWithReplay{Device: device, Replay: replay})
+		items = append(items, deviceWithReplay{
+			Device: device, Replay: summaries[device.ID].Replay,
+			CustomAntifraudAvailable: s.Config.CustomProjectionEnabled &&
+				device.Capabilities.Antifraud && device.Capabilities.Radius,
+		})
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 }
@@ -292,19 +310,24 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "unable to list devices")
 		return
 	}
+	ingestSummaries, ingestSummaryErr := s.Store.DeviceIngestSummaries(request.Context())
+	if ingestSummaryErr != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load ingest summaries")
+		return
+	}
 	fleet := s.Analytics.Dashboard(request.Context(), window)
 	rows := make([]map[string]any, 0, len(devices))
 	totals := map[string]any{
 		"calls": uint64(0), "failed": uint64(0), "averageTalkMs": float64(0),
-		"alarms": uint64(0), "unknown": uint64(0), "antifraud": uint64(0),
-		"rejects": uint64(0), "incomplete": uint64(0), "activeDevices": 0,
+		"antifraud": uint64(0), "rejects": uint64(0),
+		"incomplete": uint64(0), "activeDevices": 0,
 	}
-	var calls, failed, alarms, unknown, antifraud, rejects, incomplete uint64
+	var calls, failed, antifraud, rejects, incomplete uint64
 	var weightedTalk float64
 	activeDevices := 0
 	type categoryAccumulator struct {
 		totalSources, activeSources      int
-		calls, failed, alarms, unknown   uint64
+		calls, failed                    uint64
 		antifraud, rejects, files, bytes uint64
 		weightedTalk                     float64
 	}
@@ -322,12 +345,8 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			}
 		}
 		if configured.SourceCategory == equipment.CategorySoftswitch {
-			ledger, ledgerErr := s.Store.DeviceIngestFileMetrics(request.Context(), configured.ID)
-			if ledgerErr != nil {
-				fleet.Diagnostics = append(fleet.Diagnostics, "ingest ledger: "+ledgerErr.Error())
-			} else {
-				fileMetrics = &ledger
-			}
+			ledger := ingestSummaries[configured.ID].Metrics
+			fileMetrics = &ledger
 		}
 		if configured.Enabled && configured.PurgeState == "active" {
 			activeDevices++
@@ -344,18 +363,18 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		if metrics != nil {
 			calls += metrics.Calls
 			failed += metrics.FailedCalls
-			alarms += metrics.Alarms
-			unknown += metrics.Unknown
-			antifraud += metrics.Antifraud
-			rejects += metrics.AntifraudRejected
-			incomplete += metrics.AntifraudIncomplete
+			if s.Config.CustomProjectionEnabled && configured.AntifraudEnabled {
+				antifraud += metrics.Antifraud
+				rejects += metrics.AntifraudRejected
+				incomplete += metrics.AntifraudIncomplete
+			}
 			weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
 			category.calls += metrics.Calls
 			category.failed += metrics.FailedCalls
-			category.alarms += metrics.Alarms
-			category.unknown += metrics.Unknown
-			category.antifraud += metrics.Antifraud
-			category.rejects += metrics.AntifraudRejected
+			if s.Config.CustomProjectionEnabled && configured.AntifraudEnabled {
+				category.antifraud += metrics.Antifraud
+				category.rejects += metrics.AntifraudRejected
+			}
 			category.weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
 		}
 		if fileMetrics != nil {
@@ -369,7 +388,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		averageTalk = weightedTalk / float64(calls)
 	}
 	totals["calls"], totals["failed"], totals["averageTalkMs"] = calls, failed, averageTalk
-	totals["alarms"], totals["unknown"], totals["antifraud"] = alarms, unknown, antifraud
+	totals["antifraud"] = antifraud
 	totals["rejects"], totals["incomplete"], totals["activeDevices"] = rejects, incomplete, activeDevices
 	categoryResponse := make(map[string]any, len(categoryTotals))
 	for name, category := range categoryTotals {
@@ -380,7 +399,6 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		categoryResponse[name] = map[string]any{
 			"totalSources": category.totalSources, "activeSources": category.activeSources,
 			"calls": category.calls, "failed": category.failed, "averageTalkMs": average,
-			"alarms": category.alarms, "unknown": category.unknown,
 			"antifraud": category.antifraud, "rejects": category.rejects,
 			"files": category.files, "bytes": category.bytes,
 		}
@@ -421,6 +439,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		"system": map[string]any{
 			"version": s.Version, "services": services, "runtime": runtime,
 			"spoolDepth": spoolDepth, "natsStreamMessages": natsMessages,
+			"customProjectionEnabled": s.Config.CustomProjectionEnabled,
 		},
 		"diagnostics": fleet.Diagnostics,
 	})
@@ -455,8 +474,9 @@ func dashboardDeviceRow(
 		"firmware": configured.Firmware, "timezone": configured.Timezone,
 		"activeTimezone": activeTimezone,
 		"sourceCategory": configured.SourceCategory, "templateKey": configured.TemplateKey,
-		"capabilities": configured.Capabilities,
-		"enabled":      configured.Enabled, "metrics": metrics, "fileMetrics": fileMetrics,
+		"capabilities":     configured.Capabilities,
+		"antifraudEnabled": configured.AntifraudEnabled,
+		"enabled":          configured.Enabled, "metrics": metrics, "fileMetrics": fileMetrics,
 		"freshness": map[string]any{
 			"latestSyslogAt": latestSyslogAt, "latestCdrAt": latestCDRAt,
 		},
@@ -634,20 +654,6 @@ func (s *Server) createDevice(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 	}
-	if (device.Capabilities.Syslog ||
-		(device.Capabilities.TypedCDR && device.TemplateKey != equipment.TemplateSatelRTUCDRV1)) &&
-		s.Analytics != nil {
-		if err := s.Analytics.ScheduleDeviceRebuild(
-			request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
-			analytics.RevisionReasonInitialBuild,
-		); err != nil {
-			slog.Error("unable to initialize device derived revision",
-				"device", device.ID, "error", err)
-			writeError(writer, http.StatusInternalServerError,
-				"device created, but derived revision initialization failed")
-			return
-		}
-	}
 	writeJSON(writer, http.StatusCreated, device)
 }
 
@@ -709,18 +715,13 @@ func (s *Server) updateDevice(writer http.ResponseWriter, request *http.Request)
 				"device saved; Satel RTU timezone reparse failed")
 			return
 		}
-	} else if device.TimezoneRevision != device.ActiveTimezoneRevision {
-		if device.Capabilities.Syslog || device.Capabilities.TypedCDR {
-			if err := s.Analytics.ScheduleDeviceRebuild(
-				request.Context(), device.ID, uint64(device.TimezoneRevision), device.Timezone,
-				analytics.RevisionReasonTimezoneChange,
-			); err != nil {
-				slog.Error("unable to schedule device timezone revision",
-					"device", device.ID, "revision", device.TimezoneRevision, "error", err)
-				writeError(writer, http.StatusInternalServerError,
-					"device saved; timezone rebuild could not be scheduled")
-				return
-			}
+	} else if previous.Timezone != device.Timezone && device.Capabilities.TypedCDR {
+		if err := s.Analytics.ReinterpretCDRTimes(
+			request.Context(), device.ID, device.Timezone,
+		); err != nil {
+			writeError(writer, http.StatusInternalServerError,
+				"device saved; CDR timezone reinterpretation failed")
+			return
 		}
 	}
 	writeJSON(writer, http.StatusOK, device)
@@ -956,6 +957,11 @@ func deviceDateRange(
 }
 
 func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Query().Has("category") {
+		writeError(writer, http.StatusBadRequest,
+			"category is not supported for raw Syslog messages")
+		return
+	}
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
@@ -970,8 +976,16 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
+	if request.URL.Query().Get("q") != "" && timeRange == nil {
+		writeError(writer, http.StatusBadRequest, "payload search requires date=YYYY-MM-DD")
+		return
+	}
+	if request.URL.Query().Get("q") != "" && !s.allowCostlyRequest(currentSession(request).User.ID) {
+		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
+		return
+	}
 	limit := parsePageLimit(request)
-	var cursor *analytics.EventCursor
+	var cursor *analytics.SyslogMessageCursor
 	before := request.URL.Query().Get("before")
 	beforeID := request.URL.Query().Get("before_id")
 	if before != "" || beforeID != "" {
@@ -981,11 +995,17 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusBadRequest, "invalid event cursor")
 			return
 		}
-		cursor = &analytics.EventCursor{ReceivedAt: receivedAt, EventID: eventID}
+		cursor = &analytics.SyslogMessageCursor{ReceivedAt: receivedAt, EventID: eventID}
 	}
-	page, err := s.Analytics.ListEventsPageRange(request.Context(), deviceID,
-		request.URL.Query().Get("category"), request.URL.Query().Get("q"), limit, cursor, timeRange)
+	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+	defer cancel()
+	page, err := s.Analytics.ListSyslogMessagesPage(
+		ctx, deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+	)
 	if err != nil {
+		if writeAdmissionError(writer, err) {
+			return
+		}
 		writeError(writer, http.StatusInternalServerError, "unable to query events")
 		return
 	}
@@ -997,90 +1017,6 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
 	})
-}
-
-func (s *Server) listSyslogConstructs(writer http.ResponseWriter, request *http.Request) {
-	if !s.Config.SyslogConstructsEnabled {
-		writeJSON(writer, http.StatusNotFound, map[string]string{
-			"error": "feature_disabled", "message": "Syslog constructs are disabled",
-		})
-		return
-	}
-	deviceID, ok := parseDeviceID(writer, request)
-	if !ok {
-		return
-	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
-		return device.Capabilities.Syslog
-	}, "Syslog constructs") {
-		return
-	}
-	limit := parsePageLimit(request)
-	var cursor *analytics.SyslogConstructCursor
-	before := request.URL.Query().Get("before")
-	beforeID := request.URL.Query().Get("before_id")
-	if before != "" || beforeID != "" {
-		startedAt, timeErr := time.Parse(time.RFC3339Nano, before)
-		constructID, idErr := uuid.Parse(beforeID)
-		if timeErr != nil || idErr != nil {
-			writeError(writer, http.StatusBadRequest, "invalid Syslog construct cursor")
-			return
-		}
-		cursor = &analytics.SyslogConstructCursor{
-			StartedAt: startedAt, ConstructID: constructID,
-		}
-	}
-	page, err := s.Analytics.ListSyslogConstructsFilteredPage(
-		request.Context(), deviceID, analytics.SyslogConstructFilters{
-			Category:     request.URL.Query().Get("category"),
-			Search:       request.URL.Query().Get("q"),
-			Kind:         request.URL.Query().Get("kind"),
-			Direction:    strings.ToUpper(request.URL.Query().Get("direction")),
-			MessageName:  request.URL.Query().Get("message_name"),
-			CallContext:  request.URL.Query().Get("call_context"),
-			ProblemsOnly: request.URL.Query().Get("problems") == "true",
-		}, limit, cursor,
-	)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query Syslog constructs")
-		return
-	}
-	writeJSON(writer, http.StatusOK, page)
-}
-
-func (s *Server) getSyslogConstruct(writer http.ResponseWriter, request *http.Request) {
-	if !s.Config.SyslogConstructsEnabled {
-		writeJSON(writer, http.StatusNotFound, map[string]string{
-			"error": "feature_disabled", "message": "Syslog constructs are disabled",
-		})
-		return
-	}
-	deviceID, ok := parseDeviceID(writer, request)
-	if !ok {
-		return
-	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
-		return device.Capabilities.Syslog
-	}, "Syslog constructs") {
-		return
-	}
-	constructID, err := uuid.Parse(chi.URLParam(request, "constructID"))
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid Syslog construct id")
-		return
-	}
-	detail, err := s.Analytics.GetSyslogConstruct(
-		request.Context(), deviceID, constructID,
-	)
-	if errors.Is(err, analytics.ErrSyslogConstructNotFound) {
-		writeError(writer, http.StatusNotFound, "Syslog construct not found")
-		return
-	}
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query Syslog construct")
-		return
-	}
-	writeJSON(writer, http.StatusOK, detail)
 }
 
 func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
@@ -1098,6 +1034,14 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
+	if request.URL.Query().Get("q") != "" && timeRange == nil {
+		writeError(writer, http.StatusBadRequest, "call search requires date=YYYY-MM-DD")
+		return
+	}
+	if request.URL.Query().Get("q") != "" && !s.allowCostlyRequest(currentSession(request).User.ID) {
+		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
+		return
+	}
 	limit := parsePageLimit(request)
 	var cursor *analytics.CallCursor
 	before := request.URL.Query().Get("before")
@@ -1112,18 +1056,23 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		cursor = &analytics.CallCursor{SortTime: sortTime, RecordID: recordID}
 	}
 	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+		ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+		defer cancel()
 		var page analytics.SatelRTUCallPage
 		var err error
 		if timeRange != nil {
 			page, err = s.Analytics.ListSatelRTUCallsPageRange(
-				request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+				ctx, deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
 			)
 		} else {
 			page, err = s.Analytics.ListSatelRTUCallsPage(
-				request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor,
+				ctx, deviceID, request.URL.Query().Get("q"), limit, cursor,
 			)
 		}
 		if err != nil {
+			if writeAdmissionError(writer, err) {
+				return
+			}
 			writeError(writer, http.StatusInternalServerError, "unable to query Satel RTU calls")
 			return
 		}
@@ -1138,10 +1087,15 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		})
 		return
 	}
+	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+	defer cancel()
 	page, err := s.Analytics.ListCallsPageRange(
-		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+		ctx, deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
 	)
 	if err != nil {
+		if writeAdmissionError(writer, err) {
+			return
+		}
 		writeError(writer, http.StatusInternalServerError, "unable to query calls")
 		return
 	}
@@ -1156,53 +1110,164 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	})
 }
 
-func (s *Server) listAntifraud(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) listAntifraudCalls(writer http.ResponseWriter, request *http.Request) {
+	if !s.Config.CustomProjectionEnabled {
+		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
+		return
+	}
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
 	}
-	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
-		return device.Capabilities.Antifraud && device.Capabilities.Radius
-	}, "AntiFraud/RADIUS")
-	if !ok {
+	device, err := s.Store.Device(request.Context(), deviceID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load device")
+		return
+	}
+	if !device.Capabilities.Syslog || !device.Capabilities.Antifraud ||
+		!device.Capabilities.Radius {
+		writeError(writer, http.StatusConflict, "AntiFraud is not supported by this source template")
+		return
+	}
+	if !device.AntifraudEnabled {
+		writeError(writer, http.StatusNotFound, "AntiFraud is disabled for this device")
+		return
+	}
+	ready, err := s.Store.CustomAntifraudReady(request.Context(), deviceID)
+	if err != nil || !ready {
+		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud projection is rebuilding")
 		return
 	}
 	timeRange, ok := deviceDateRange(writer, request, device)
 	if !ok {
 		return
 	}
+	if request.URL.Query().Get("q") != "" && timeRange == nil {
+		writeError(writer, http.StatusBadRequest, "AntiFraud search requires date=YYYY-MM-DD")
+		return
+	}
+	if request.URL.Query().Get("q") != "" && !s.allowCostlyRequest(currentSession(request).User.ID) {
+		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
+		return
+	}
 	limit := parsePageLimit(request)
-	var cursor *analytics.AntifraudCursor
-	before := request.URL.Query().Get("before")
-	beforeID := request.URL.Query().Get("before_id")
+	var cursor *analytics.AntifraudCallCursor
+	before, beforeID := request.URL.Query().Get("before"), request.URL.Query().Get("before_id")
 	if before != "" || beforeID != "" {
-		lastEventAt, timeErr := time.Parse(time.RFC3339Nano, before)
-		transactionID, idErr := uuid.Parse(beforeID)
+		sortTime, timeErr := time.Parse(time.RFC3339Nano, before)
+		callID, idErr := uuid.Parse(beforeID)
 		if timeErr != nil || idErr != nil {
-			writeError(writer, http.StatusBadRequest, "invalid AntiFraud cursor")
+			writeError(writer, http.StatusBadRequest, "invalid AntiFraud call cursor")
 			return
 		}
-		cursor = &analytics.AntifraudCursor{
-			LastEventAt: lastEventAt, TransactionID: transactionID,
-		}
+		cursor = &analytics.AntifraudCallCursor{SortTime: sortTime, CallID: callID}
 	}
-	page, err := s.Analytics.ListAntifraudPageRange(
-		request.Context(), deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+	defer cancel()
+	page, err := s.Analytics.ListAntifraudCallsPage(
+		ctx, deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
 	)
 	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query AntiFraud lifecycle")
+		if writeAdmissionError(writer, err) {
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "unable to query AntiFraud calls")
 		return
 	}
 	var nextCursor any
 	if page.HasMore && len(page.Items) > 0 {
 		last := page.Items[len(page.Items)-1]
-		nextCursor = map[string]any{
-			"before": last.LastEventAt, "beforeId": last.TransactionID,
-		}
+		nextCursor = map[string]any{"before": last.SortTime, "beforeId": last.CallID}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
 	})
+}
+
+func (s *Server) antifraudCallDetail(writer http.ResponseWriter, request *http.Request) {
+	if !s.Config.CustomProjectionEnabled {
+		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
+		return
+	}
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	callID, err := uuid.Parse(chi.URLParam(request, "callID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid AntiFraud call id")
+		return
+	}
+	device, err := s.Store.Device(request.Context(), deviceID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load device")
+		return
+	}
+	if !device.Capabilities.Syslog || !device.Capabilities.Antifraud ||
+		!device.Capabilities.Radius || !device.AntifraudEnabled {
+		writeError(writer, http.StatusNotFound, "AntiFraud is disabled for this device")
+		return
+	}
+	ready, err := s.Store.CustomAntifraudReady(request.Context(), deviceID)
+	if err != nil || !ready {
+		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud projection is rebuilding")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	detail, err := s.Analytics.AntifraudCallDetail(ctx, deviceID, callID)
+	if err != nil {
+		if writeAdmissionError(writer, err) {
+			return
+		}
+		writeError(writer, http.StatusNotFound, "AntiFraud call not found")
+		return
+	}
+	writeJSON(writer, http.StatusOK, detail)
+}
+
+func (s *Server) callCard(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	recordID, err := uuid.Parse(chi.URLParam(request, "recordID"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid CDR record id")
+		return
+	}
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.TypedCDR
+	}, "typed CDR calls")
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	customReady := false
+	if s.Config.CustomProjectionEnabled && device.AntifraudEnabled {
+		customReady, _ = s.Store.CustomAntifraudReady(request.Context(), deviceID)
+	}
+	card, err := s.Analytics.CallCard(
+		ctx, deviceID, recordID,
+		customReady,
+	)
+	if err != nil {
+		if writeAdmissionError(writer, err) {
+			return
+		}
+		writeError(writer, http.StatusNotFound, "CDR call not found")
+		return
+	}
+	writeJSON(writer, http.StatusOK, card)
 }
 
 func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) {
@@ -1236,251 +1301,6 @@ func (s *Server) deviceStats(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusOK, stats)
-}
-
-func (s *Server) syslogDiagnostics(writer http.ResponseWriter, request *http.Request) {
-	deviceID, ok := parseDeviceID(writer, request)
-	if !ok {
-		return
-	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
-		return device.Capabilities.Syslog
-	}, "Syslog diagnostics") {
-		return
-	}
-	diagnostics, err := s.Analytics.SyslogDiagnostics(request.Context(), deviceID)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query Syslog diagnostics")
-		return
-	}
-	device, err := s.Store.Device(request.Context(), deviceID)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query device revision")
-		return
-	}
-	var spoolDepth, quarantineDepth uint64
-	if s.Spool != nil {
-		if spoolDepth, err = s.Spool.Depth(); err != nil {
-			writeError(writer, http.StatusInternalServerError, "unable to query Syslog spool")
-			return
-		}
-		if quarantineDepth, err = s.Spool.QuarantineDepth(); err != nil {
-			writeError(writer, http.StatusInternalServerError, "unable to query Syslog quarantine")
-			return
-		}
-	}
-	var natsStreamMessages, natsConsumerPending uint64
-	if s.NATS != nil {
-		if js, natsErr := s.NATS.JetStream(); natsErr == nil {
-			if info, infoErr := js.StreamInfo("SYSLOG"); infoErr == nil {
-				natsStreamMessages = info.State.Msgs
-			}
-			if consumer, consumerErr := js.ConsumerInfo("SYSLOG", "syslog-parser"); consumerErr == nil {
-				natsConsumerPending = consumer.NumPending + uint64(consumer.NumAckPending)
-			}
-		}
-	}
-	ingressStatus, ingressStatusErr := ingest.ReadIngressStatus(s.IngressStatusPath)
-	ingressAvailable := ingressStatusErr == nil &&
-		time.Since(ingressStatus.UpdatedAt) < 5*time.Second
-	replay := map[string]any{"status": "not_started"}
-	replayJobs, replayErr := s.Store.ListSyslogParserRebuildJobs(
-		request.Context(), analytics.SyslogParserVersion,
-	)
-	if replayErr != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query Syslog replay progress")
-		return
-	}
-	for _, job := range replayJobs {
-		if job.DeviceID != deviceID {
-			continue
-		}
-		progress := float64(0)
-		if job.TotalEvents > 0 {
-			progress = float64(job.ProcessedEvents) / float64(job.TotalEvents)
-			if progress > 1 {
-				progress = 1
-			}
-		}
-		replay = map[string]any{
-			"status": job.Status, "processedEvents": job.ProcessedEvents,
-			"totalEvents": job.TotalEvents, "processedBatches": job.ProcessedBatches,
-			"progress": progress, "attempts": job.Attempts, "error": job.Error,
-			"heartbeatAt": job.HeartbeatAt, "updatedAt": job.UpdatedAt,
-		}
-		if job.StartedAt != nil && job.ProcessedEvents > 0 &&
-			job.ProcessedEvents < job.TotalEvents {
-			elapsed := time.Since(*job.StartedAt).Seconds()
-			if elapsed > 0 {
-				rate := float64(job.ProcessedEvents) / elapsed
-				replay["eventsPerSecond"] = rate
-				replay["etaSeconds"] = float64(job.TotalEvents-job.ProcessedEvents) / rate
-			}
-		}
-		break
-	}
-	response := map[string]any{
-		"version": s.Version, "parserVersion": analytics.SyslogParserVersion,
-		"runtime": s.Metrics.Snapshot(), "spoolDepth": spoolDepth,
-		"quarantineDepth": quarantineDepth, "natsStreamMessages": natsStreamMessages,
-		"natsConsumerPending": natsConsumerPending, "breakdown": diagnostics.Breakdown,
-		"appliedMigrations": diagnostics.AppliedMigrations,
-		"rawEvents24h":      diagnostics.RawEvents24h, "classified24h": diagnostics.Classified24h,
-		"reprocessedCurrent":           diagnostics.ReprocessedCurrent,
-		"reprocessRemaining":           diagnostics.ReprocessRemaining,
-		"antifraudComplete":            diagnostics.AntifraudComplete,
-		"antifraudIncomplete":          diagnostics.AntifraudIncomplete,
-		"antifraudOrphan":              diagnostics.AntifraudOrphan,
-		"correlationExact":             diagnostics.CorrelationExact,
-		"correlationComposite":         diagnostics.CorrelationComposite,
-		"correlationAmbiguous":         diagnostics.CorrelationAmbiguous,
-		"correlationStatus":            diagnostics.CorrelationStatus,
-		"correlationAssignmentLag":     diagnostics.CorrelationLag,
-		"latestCorrelationRunAt":       diagnostics.LatestCorrelationRun,
-		"lastCorrelationDurationMs":    diagnostics.CorrelationDuration,
-		"averageCorrelationDurationMs": diagnostics.CorrelationAvgMS,
-		"correlationTimeFromTimestamp": diagnostics.TimeFromTimestamp,
-		"correlationTimeFromEnvelope":  diagnostics.TimeFromEnvelope,
-		"correlationTimeFromReceive":   diagnostics.TimeFromReceive,
-		"ingress":                      ingressStatus, "ingressAvailable": ingressAvailable,
-		"historicalReplay": replay,
-	}
-	addRevisionDiagnostics(response, diagnostics)
-	response["ingestRevision"] = device.ActiveTimezoneRevision
-	response["revisionAligned"] = uint64(device.ActiveTimezoneRevision) == diagnostics.ActiveRevision
-	ingestFiles, ingestErr := s.Store.ListRecentIngestFiles(request.Context(), deviceID, 20)
-	if ingestErr != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query CDR ingest ledger")
-		return
-	}
-	if ingestFiles == nil {
-		ingestFiles = []store.IngestFileSummary{}
-	}
-	response["cdrIngestFiles"] = ingestFiles
-	writeJSON(writer, http.StatusOK, response)
-}
-
-func addRevisionDiagnostics(response map[string]any, diagnostics analytics.SyslogDiagnostics) {
-	response["activeRevision"] = diagnostics.ActiveRevision
-	response["activeRevisionTimezone"] = diagnostics.ActiveTimezone
-	response["buildingRevision"] = diagnostics.BuildingRevision
-	response["revisionTimezone"] = diagnostics.RevisionTimezone
-	response["revisionStatus"] = diagnostics.RevisionStatus
-	response["revisionReason"] = diagnostics.RevisionReason
-	response["replayProcessed"] = diagnostics.ReplayProcessed
-	response["replayTotal"] = diagnostics.ReplayTotal
-	response["cdrReplayProcessed"] = diagnostics.CDRReplayProcessed
-	response["cdrReplayTotal"] = diagnostics.CDRReplayTotal
-	response["missingCdrInterpretations"] = diagnostics.MissingCDRTimes
-	response["radiusRawFragments"] = diagnostics.RadiusRawFragments
-	response["lifecycleDerived"] = diagnostics.LifecycleDerived
-	response["antifraudPackets"] = diagnostics.AntifraudPackets
-	response["antifraudCalls"] = diagnostics.AntifraudCalls
-	response["antifraudOperations"] = diagnostics.AntifraudOperations
-	response["operationOutstanding"] = diagnostics.OperationOutstanding
-	response["operationVerificationAccept"] = diagnostics.OperationAccept
-	response["operationVerificationReject"] = diagnostics.OperationReject
-	response["operationVerificationFailOpen"] = diagnostics.OperationFailOpen
-	response["operationInformational"] = diagnostics.OperationInformation
-	response["unlinkedRadiusFragments"] = diagnostics.UnlinkedFragments
-	response["ambiguousSessionCollisions"] = diagnostics.AmbiguousSessions
-	response["unknownEvents"] = diagnostics.UnknownEvents
-	response["unknownEnvelopeAndBody"] = diagnostics.UnknownEnvelope
-	response["unknownNoCategoryEvidence"] = diagnostics.UnknownEvidence
-	response["unknownEmptyMessage"] = diagnostics.UnknownEmpty
-	response["fragmentAmbiguity"] = diagnostics.FragmentAmbiguity
-	response["parserProjectionStatus"] = diagnostics.ParserProjection
-	response["correlationTotal"] = diagnostics.CorrelationTotal
-	response["correlationOrphan"] = diagnostics.CorrelationOrphan
-	response["latestRawAt"] = diagnostics.LatestRawAt
-	response["latestFactAt"] = diagnostics.LatestFactAt
-	response["latestLifecycleAt"] = diagnostics.LatestLifecycleAt
-	response["latestAssignmentAt"] = diagnostics.LatestAssignmentAt
-	response["pendingDirtyBuckets"] = diagnostics.PendingDirtyBuckets
-	response["oldestDirtyAt"] = diagnostics.OldestDirtyAt
-}
-
-func (s *Server) callTimeline(writer http.ResponseWriter, request *http.Request) {
-	deviceID, ok := parseDeviceID(writer, request)
-	if !ok {
-		return
-	}
-	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
-		return device.Capabilities.TypedCDR
-	}, "typed CDR calls")
-	if !ok {
-		return
-	}
-	recordID, err := uuid.Parse(chi.URLParam(request, "recordID"))
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid record id")
-		return
-	}
-	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
-		writeJSON(writer, http.StatusOK, map[string]any{"items": []analytics.TimelineRow{}})
-		return
-	}
-	rows, err := s.Analytics.CallTimeline(request.Context(), deviceID, recordID)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query call timeline")
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
-}
-
-func (s *Server) callAntifraudSummary(writer http.ResponseWriter, request *http.Request) {
-	deviceID, ok := parseDeviceID(writer, request)
-	if !ok {
-		return
-	}
-	recordID, err := uuid.Parse(chi.URLParam(request, "recordID"))
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid record id")
-		return
-	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
-		return device.Capabilities.TypedCDR && device.Capabilities.Antifraud &&
-			device.Capabilities.Radius
-	}, "typed CDR and AntiFraud/RADIUS") {
-		return
-	}
-	summary, err := s.Analytics.CallAntiFraudSummary(request.Context(), deviceID, recordID)
-	if err != nil {
-		writeCallAntiFraudSummaryError(writer, err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, summary)
-}
-
-func writeCallAntiFraudSummaryError(writer http.ResponseWriter, err error) {
-	if errors.Is(err, analytics.ErrCallCDRNotFound) {
-		writeError(writer, http.StatusNotFound, "call CDR not found")
-		return
-	}
-	writeError(writer, http.StatusInternalServerError, "unable to query call AntiFraud summary")
-}
-
-func (s *Server) antifraudTimeline(writer http.ResponseWriter, request *http.Request) {
-	deviceID, ok := parseDeviceID(writer, request)
-	if !ok {
-		return
-	}
-	if !s.requireDeviceCapability(writer, request, deviceID, func(device store.Device) bool {
-		return device.Capabilities.Antifraud && device.Capabilities.Radius
-	}, "AntiFraud/RADIUS") {
-		return
-	}
-	transactionID, err := uuid.Parse(chi.URLParam(request, "transactionID"))
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid AntiFraud transaction id")
-		return
-	}
-	rows, err := s.Analytics.AntifraudTimeline(request.Context(), deviceID, transactionID)
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "unable to query AntiFraud timeline")
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": rows})
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -1540,6 +1360,25 @@ func parsePageLimit(request *http.Request) uint64 {
 		return defaultPageSize
 	}
 	return min(limit, maxPageSize)
+}
+
+func (s *Server) allowCostlyRequest(userID uuid.UUID) bool {
+	now := time.Now()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	if s.costlyRates == nil {
+		s.costlyRates = make(map[uuid.UUID]costlyRate)
+	}
+	rate := s.costlyRates[userID]
+	if rate.window.IsZero() || now.Sub(rate.window) >= time.Minute {
+		rate = costlyRate{window: now}
+	}
+	if rate.count >= 10 {
+		return false
+	}
+	rate.count++
+	s.costlyRates[userID] = rate
+	return true
 }
 
 func parseDeviceID(writer http.ResponseWriter, request *http.Request) (uuid.UUID, bool) {
@@ -1610,6 +1449,19 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 
 func writeError(writer http.ResponseWriter, status int, message string) {
 	writeJSON(writer, status, map[string]string{"error": message})
+}
+
+func writeAdmissionError(writer http.ResponseWriter, err error) bool {
+	if errors.Is(err, workload.ErrRejected) {
+		writer.Header().Set("Retry-After", "1")
+		writeError(writer, http.StatusTooManyRequests, "analytics workload queue is full")
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeError(writer, http.StatusGatewayTimeout, "analytics query deadline exceeded")
+		return true
+	}
+	return false
 }
 
 func remoteIP(request *http.Request) string {

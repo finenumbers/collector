@@ -80,7 +80,8 @@ func (s *Store) UpdateRetentionPolicy(
 		details["days"] = days
 		details["previousDays"] = active
 		details["effectiveAt"] = effective
-		_, err = tx.Exec(ctx, `UPDATE retention_policies SET pending_days=$2,effective_at=$3,
+		_, err = tx.Exec(ctx, `UPDATE retention_policies SET pending_days=$2,
+			effective_at=LEAST($3::timestamptz,now()),
 			updated_by=$4,last_error=NULL,updated_at=now() WHERE policy_class=$1`,
 			class, days, effective, actor.ID)
 	}
@@ -118,7 +119,7 @@ func retentionEffectiveAt(now time.Time, days int) (time.Time, error) {
 
 func validRetentionClass(class string) bool {
 	switch class {
-	case "syslog", "cdr", "softswitch_cdr", "derived", "raw_cdr_archive":
+	case "syslog", "cdr", "softswitch_cdr", "raw_cdr_archive":
 		return true
 	default:
 		return false

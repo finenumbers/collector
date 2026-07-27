@@ -1,0 +1,9 @@
+[
+  "-- RADIUS. Accs-Request [196] --",
+  "-- RADIUS. Antifraud-Auth-Request [203] --",
+  "Cisco-AVPair = 'xpgk-request-type=number'",
+  "Cisco-AVPair = 'xpgk-request-type=save_call'",
+  "Cisco-AVPair = 'xpgk-request-type=check_call'",
+  "Cisco-AVPair = 'xpkg-request-type=check_call'",
+  "RADIUS server rejected: :0 (replied 0)"
+]

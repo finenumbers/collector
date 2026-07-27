@@ -349,3 +349,67 @@ func TestSatelArchiveReplayRestartAndPartialQuarantine(t *testing.T) {
 		t.Fatalf("completed replay reran %d batches after restart", restartedAnalytics.satelCalls)
 	}
 }
+
+func TestEltexWatcherDoesNotRecursivelyLockDeviceWrites(t *testing.T) {
+	databaseURL := os.Getenv("POSTGRES_TEST_URL")
+	if databaseURL == "" {
+		t.Skip("POSTGRES_TEST_URL is not set")
+	}
+	ctx := context.Background()
+	control, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.DB.Close()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := store.User{
+		ID: uuid.New(), Username: "watcher-lock-" + uuid.NewString(), Role: "admin",
+	}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = control.DB.Exec(context.Background(), `DELETE FROM users WHERE id=$1`, actor.ID)
+	})
+	device, err := control.CreateDevice(ctx, store.NewDevice{
+		Name: "watcher-lock-" + uuid.NewString(), Model: "SMG-1016M",
+		Firmware: store.FirmwareScheme3410, Timezone: "UTC",
+		SourceCategory: equipment.CategoryEquipment, TemplateKey: equipment.TemplateEltex3410,
+		SyslogSourceIP: "192.0.2.10", DeviceSign: "mts", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = control.DeleteDevice(context.Background(), device.ID, actor, "127.0.0.1")
+	})
+	const fixture = `SMG1016M. CDR. File started at '20260723235757'
+Device Sign;Setup time;Connect time;Disconnect time;Sequence number
+mts;2026-07-23 23:58:33.237;2026-07-23 23:58:37.191;2026-07-23 23:58:46.657;20260628183403-155881
+`
+	path := filepath.Join(t.TempDir(), "eltex.csv")
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher := &CDRWatcher{
+		Store: control, Analytics: &countingCDRAnalytics{},
+		Archive: &memoryCDRArchive{objects: make(map[string][]byte)},
+	}
+	done := make(chan error, 1)
+	go func() { done <- watcher.process(ctx, device, path, info) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CDR processing deadlocked on a recursive device write lock")
+	}
+}

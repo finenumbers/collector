@@ -1,140 +1,98 @@
-# Архитектура
-
-## Контекст
-
-Один production-хост обслуживает до 10 SMG-1016M и пиково 100 CPS. Горячий аналитический слой рассчитан на 12 месяцев; raw и агрегаты хранятся до 3 лет согласно локальной политике retention/backup.
+# Architecture
 
 ```mermaid
 flowchart LR
-    SMG[SMG-1016M] -->|Syslog UDP| Ingress[Host-network ingress]
-    SMG -->|CDR FTP| FTP[SFTPGo]
-    Ingress --> IngressSpool[Ingress durable spool]
-    IngressSpool -->|Unix socket with ACK| Receiver[Collector receiver]
-    Receiver --> Spool[App durable spool]
-    Spool --> NATS[NATS JetStream]
-    NATS --> Parser[Eltex Syslog parser v14 + firmware dialect + device timezone]
-    Parser --> Functional[Typed functional events]
-    Functional --> Radius[Batch RADIUS lifecycle assembler]
-    Radius --> Dirty[Durable dirty day buckets]
-    Dirty --> Correlator[One-to-one evidence correlator]
-    FTP --> Watcher[CDR watcher]
-    Watcher --> MinIO[Raw archive]
-    Watcher --> CDR[Typed CDR legs]
-    CDR --> Correlator
-    Parser --> CH[ClickHouse]
-    Radius --> CH
-    Correlator --> CH
-    Parser --> PG[PostgreSQL]
-    UI[React UI] --> API[Go API]
-    API --> CH
-    API --> PG
+    SMG[Syslog source] --> Ingress[Host-network UDP ingress]
+    Ingress --> ISpool[Ingress BoltDB spool]
+    ISpool -->|Unix handoff + ACK| Receiver[App handoff receiver]
+    Receiver --> ASpool[App BoltDB spool]
+    ASpool --> NATS[NATS JetStream]
+    NATS --> Raw[Raw Syslog store worker]
+    Raw --> Messages[(ClickHouse syslog_messages)]
+    Messages --> Custom[Custom projection worker]
+    PG --> Custom
+    Custom --> Projection[(Custom snapshots)]
+    FTP[CDR FTP] --> Watcher[CDR watcher]
+    Watcher --> Archive[(MinIO raw CDR)]
+    Watcher --> CDR[(ClickHouse CDR tables)]
+    CDR --> Reconcile[Strict reconciliation worker]
+    Projection --> Reconcile
+    Reconcile --> Coverage[(CDR coverage)]
+    API[Go API] --> Messages
+    API --> CDR
+    API --> PG[(PostgreSQL control plane)]
 ```
 
-## Компоненты
+## Reliability boundary
 
-- `collector-ingress`: тот же stateless image в роли `ingress`; host-network UDP receiver фиксирует реальный source IP/port в отдельном `ingress.db` и передаёт подтверждёнными batch через локальный Unix socket.
-- `collector`: image в роли `app`; HTTP API, device validation, Syslog worker и CDR watcher запускаются как независимые goroutines с общим graceful shutdown. Сервис остаётся в Docker-сетях `default` и `proxy`.
-- `PostgreSQL`: control plane — users/sessions, devices, ingest file ledger, export jobs и audit.
-- `ClickHouse`: immutable raw Syslog/CDR, typed RADIUS fragments, собранные
-  AntiFraud lifecycle, exact call-event links, неоднозначные correlation candidates
-  и агрегаты.
-- `durable spool`: две независимые BoltDB-очереди. `ingress.db` удерживает datagram до ACK после device validation и записи в `syslog.db`; `syslog.db` удерживает envelope до JetStream publish. Файлы не открываются двумя процессами одновременно; повреждённые envelopes атомарно переносятся в quarantine bucket.
-- `NATS JetStream`: disk-backed work queue между spool publisher и parser; без time-based eviction, duplicate window 72 часа, лимит 20 GiB и `discard=new`, чтобы переполнение оставляло данные в local spool. Некорректные envelopes сохраняются в отдельном `SYSLOG_DLQ`.
-- `MinIO`: неизменяемые исходные CDR. Архивация Syslog в MinIO пока не реализована; canonical raw-копия хранится в ClickHouse.
-- `SFTPGo`: FTP endpoint, динамическая отдельная учётная запись и home каждого источника CDR.
-- `Nginx Proxy Manager`: существующий внешний TLS/reverse proxy в Docker-сети `proxy`; Collector доступен ему как `smg-collector:8080`, но app port и инфраструктурные API наружу не публикуются.
+UDP itself has no acknowledgement. Once ingress accepts a datagram, the same
+`event_id` passes through the ingress spool, acknowledged Unix handoff, app
+spool, and JetStream. Spool deletion happens only after the next durable
+boundary acknowledges it. `Nats-Msg-Id=event_id` suppresses duplicate publish
+after a crash.
 
-## Категории источников и шаблоны
+The NATS consumer writes the immutable transport record directly to
+`syslog_messages` and acknowledges NATS as soon as raw persistence succeeds.
+The durable PostgreSQL discovery job continuously scans the immutable table
+and idempotently enqueues new UTC-hour buckets for enabled devices. A temporary
+PostgreSQL enqueue failure therefore cannot force duplicate raw delivery or
+lose later projection. The transport consumer itself does no parsing.
 
-`devices` остаётся общей таблицей источников и сохраняет все существующие FK. Поля
-`source_category` и `template_key` выбирают неизменяемый каталог шаблонов из кода:
-оборудование Eltex использует Syslog, typed CDR, raw archive и AntiFraud/RADIUS;
-`satel-rtu-cdr-v1` — отдельный header-driven typed CDR pipeline без Syslog,
-RADIUS и AntiFraud. Поле `firmware` сохранено для совместимости, но выбор
-pipeline выполняется только по `template_key`.
+## Storage boundaries
 
-Satel RTU сначала архивируется в MinIO, затем разбирается по именам 120 vendor
-полей в отдельную ClickHouse projection. Stable row key строится из
-`device_id + cdr_id`; наличие `connect_time`, а не vendor success flag, определяет
-answered outcome. Durable replay повторно читает immutable MinIO object без повторной
-загрузки пользователем.
+PostgreSQL stores users, sessions, devices, ingest/export ledgers, retention,
+and audit state. ClickHouse stores immutable Syslog, Eltex CDR, Satel RTU CDR,
+and CDR time interpretations. MinIO stores immutable source CDR files.
 
-Retention разделён по назначению: `cdr` управляет typed CDR оборудования,
-`softswitch_cdr` — typed CDR софтсвитчей (сейчас Satel RTU), а
-`raw_cdr_archive` остаётся общей MinIO lifecycle-политикой для исходных файлов
-всех категорий. Сроки аналитических projections разных source categories не
-связаны, при этом immutable archive contract остаётся единым.
+`syslog_messages` is the extension boundary for the pure `customradius`
+engine. PostgreSQL owns policy revisions, durable discovery/bucket jobs,
+generation counters, deadline cursors, deployment-wide leases, and watermarks.
+Every arrival increments its bucket generation, including arrivals while a
+worker owns the lease. ClickHouse stores staged complete snapshots. A final
+active marker is the visibility boundary; retries reuse the deterministic
+snapshot ID, superseded rows receive tombstones, and raw rows are never
+updated or deleted by replay.
 
-## Границы надёжности
+Session recomputation uses exact engine identities plus
+`custom_radius_session_events` to expand bounded indexed windows across UTC
+hours or days. `NextDeadline` creates a durable cutoff job, so unanswered
+requests time out without another arrival.
 
-UDP Syslog не имеет acknowledgement: packet может потеряться на SMG, сети или до попадания в ingress process. После этого datagram удаляется из ingress spool только после ACK основного Collector, а из app spool — только после JetStream acknowledgement. Один `event_id` проходит через оба spool; повторная передача безопасно перезаписывает BoltDB key, а `Nats-Msg-Id=event_id` подавляет повторную публикацию после crash. При заполнении JetStream новая публикация отклоняется и остаётся в spool вместо удаления старых сообщений. Далее событие обрабатывается at-least-once. CDR имеет stronger durability: файл остаётся на FTP volume до raw archive и успешной фиксации результата.
+Toggle races are resolved by checking the PostgreSQL policy revision before
+cutover under a device-scoped PostgreSQL advisory lock shared by all roles and
+instances. Enable creates durable Syslog and CDR discovery jobs. Disable cancels live
+jobs, writes disabled markers and not-applicable CDR coverage, and leaves raw
+Syslog untouched.
 
-CDR сначала получает SHA-256 и запись ledger. Повтор с тем же `device_id + sha256`
-не импортируется повторно. Eltex-строка дедуплицируется по полному sequence number,
-Satel RTU — по vendor `cdr_id`; source file/row, parser template/version и raw field map
-остаются в provenance.
+## Migration boundary
 
-Parser version `eltex-smg-syslog-v15` использует общий envelope core (включая `CONFIG`
-без wall-clock) и firmware dialect из template key. Component-first classification,
-typed attributes и provenance одинаковы, а firmware-specific фрагменты
-(`#`/`##`/bare SDP/ISUP dotted-hex/`SIPT Proc`/AVP/hex/host_ip) связывает с родителем по
-`device_id + call_context` (RADIUS/SIP/ISUP burst — отдельно). Bare RFC 4566 SDP,
-включая `b=`, и dotted ISUP dump принимаются профилем `3.410`; wrapped `##` остаётся
-общим форматом. Durable rebuild последовательно читает raw по integer microsecond cursor,
-пакетно строит `syslog_facts`, `cdr_time_facts`, `radius_fragments` и
-`antifraud_lifecycles` в новой timezone revision. Активная revision не удаляется и
-остаётся read model до проверки counts и короткой catch-up фазы.
+ClickHouse migration 022 creates and copies `syslog_messages`. Application
+preflight compares source/destination counts and deterministic aggregate
+digests, including payload bytes and stored hash, and checks the old PostgreSQL
+rebuild queue. A PostgreSQL advisory lock serializes the complete ClickHouse
+migration ledger check, execution, and recording across instances. Migration 023 is allowed
+to remove legacy Syslog-derived objects only after that validation. All
+migrations finish before workers start.
 
-Поверх неизменяемых raw datagram'ов `readable-syslog-v1` строит отдельный versioned read
-model: `syslog_fragment_links` сохраняет provenance связи, `syslog_constructs` — summary
-протокольного message, а `syslog_construct_members` — его ordered raw members. Exact
-идентификаторы и parent links помечаются deterministic; временные burst-связи никогда не
-пересекают device/source/call context и явно публикуют confidence. API пагинирует по
-`(started_at, construct_id)`, поэтому construct не разрезается границей страницы.
-Модель оставлена для rollback и по умолчанию отключена feature flag; пользовательский
-Syslog UI показывает неизменённую плоскую ленту исходных datagram.
+Migrations 024 and 025 create the Custom projection and CDR coverage model.
+Migration 018 creates the new durable PostgreSQL queue; it does not reuse the
+deleted legacy parser queue.
+PostgreSQL migration 020 adds generation/deadline state and leased
+reconciliation. ClickHouse migration 026 adds finalized link/exchange views and
+the session-event index.
 
-Eltex/RFC3164 и CDR wall clock конкретного SMG интерпретируются в одной активной IANA
-timezone этого устройства. Оба потока переводятся во внутренний canonical UTC instant;
-raw wall clock, source timezone и offset сохраняются отдельно, а UI показывает время SMG.
-Смена timezone создаёт shadow revision. После snapshot replay выполняется ограниченный
-cutover с фиксированным watermark, затем ClickHouse публикует новый read model.
-Satel RTU использует ту же IANA-семантику, но не зависит от Syslog read model:
-timezone активируется сразу, а сохранённые raw fields позволяют переинтерпретировать
-vendor timestamps в versioned time projection.
+See [the migration runbook](syslog-storage-migration.md).
 
-Batch RADIUS assembler переносит Acct-Session-Id из любого fragment и ограничивает
-повторное использование call context временным occurrence. Новые Syslog/CDR факты
-ставят только `device + revision + day` в durable dirty queue. Set-oriented exact
-Acct-Session-Id/SIP Call-ID/GCR и composite matching выполняются внутри малого day/signature
-набора. `call_assignments` хранит одну versioned assignment на lifecycle со состоянием
-`exact`, `composite`, `ambiguous` либо `orphan`; повторный запуск заменяет stale link.
+## CDR independence
 
-## Изоляция устройств
+Eltex and Satel typed CDR ingestion remain active. CDR timezone reinterpretation
+does not invoke a Syslog rebuild. `cdr_time_interpretations`,
+`cdr_time_facts`, `satel_rtu_cdr`, and `satel_rtu_cdr_time_facts` are retained
+through cleanup.
 
-- Syslog принимается только от IP, зарегистрированного в `devices.syslog_source_ip`.
-- Изменение IP немедленно инвалидирует resolver cache; старый `device_id` не используется до TTL.
-- FTP login/home генерируется отдельно для каждого `device_id`.
-- `device_id` входит во все order keys, correlation keys и API paths.
-- Для каждого включённого SMG фоновый bootstrap гарантирует активную derived revision.
-- Полное удаление SMG синхронно стирает PostgreSQL (включая device audit), ClickHouse,
-  MinIO `cdr/{device_id}/`, CDR volume, app/ingress spool и device-scoped NATS сообщения.
-  Перед стиранием устройство переходит в `purge_state=deleting`, отключает ingest и ставит
-  write fence; при сбое остаётся `purge_failed` для безопасного повтора.
-
-## Масштабирование
-
-На одном узле основная вертикальная нагрузка приходится на ClickHouse и disk IOPS NATS/MinIO. Для перехода выше 100 CPS:
-
-1. разнести ClickHouse data и object storage на отдельные диски;
-2. запускать receiver и workers отдельными replicas;
-3. заменить single-node ClickHouse на replicated cluster;
-4. вынести PostgreSQL/MinIO backup за пределы хоста.
-
-## Целевые SLO
-
-- HTTP availability: 99.5% в пределах single-host ограничения;
-- accepted Syslog → searchable p95: менее 5 секунд;
-- completed FTP file → searchable p95: менее 60 секунд;
-- RPO: до 24 часов при потере всего хоста, RTO: до 4 часов;
-- внутри collector после JetStream publish — отсутствие silent loss.
+Every typed Eltex CDR insert immediately writes `expected` coverage for an
+enabled device or `not_applicable` for a disabled device. CDR and Custom call
+arrivals dirty the same UTC reconciliation buckets. The fair scheduler also
+ages expected rows without new arrivals. Exact normalized Acct-Session-Id is
+the only primary key; H323 fallback requires a unique value from a real CDR
+field. Number and time similarity never select a candidate.

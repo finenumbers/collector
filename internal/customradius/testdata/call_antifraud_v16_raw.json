@@ -1,0 +1,11 @@
+[
+  "<14> <smg1016m> 22:30:31.000000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Request [068] --",
+  "<14> <smg1016m> 22:30:31.001000 [INFO] [C0000A7] \tAcct-Session-Id = \"session-a\" Eltex-AVPair=\"h323-conf-id=conference-a\" Eltex-AVPair=\"xpgk-request-type=number\" Eltex-AVPair=\"xpgk-src-number-in=1001\" Eltex-AVPair=\"xpgk-dst-number-in=2001\"",
+  "<14> <smg1016m> 22:30:31.111000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Reply [068] --",
+  "<14> <smg1016m> 22:30:31.112000 [INFO] [C0000A7] RADIUS. Proc Reply. Request ID [068] Accs-Reply [accept]. Time [0:111]",
+  "<14> <smg1016m> 22:30:31.500000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Request [069] --",
+  "<14> <smg1016m> 22:30:31.501000 [INFO] [C0000A7] \tAcct-Session-Id = \"session-b\" Eltex-AVPair=\"h323-conf-id=conference-a\" Eltex-AVPair=\"xpgk-request-type=number\" Eltex-AVPair=\"xpgk-src-number-in=1001\" Eltex-AVPair=\"xpgk-dst-number-in=2001\"",
+  "<14> <smg1016m> 22:30:31.599000 [INFO] [C0000A7] RADIUS. -- RADIUS. Accs-Reply [069] --",
+  "<14> <smg1016m> 22:30:31.600000 [INFO] [C0000A7] RADIUS. Proc Reply. Request ID [069] Accs-Reply [accept]. Time [0:99]",
+  "<14> <smg1016m> 22:31:00.000000 [INFO] [C0000A7] RADIUS server rejected: :0 (replied 0)"
+]

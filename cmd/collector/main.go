@@ -16,10 +16,12 @@ import (
 	"collector/internal/analytics"
 	"collector/internal/archive"
 	"collector/internal/config"
+	"collector/internal/customprojection"
 	"collector/internal/exportworker"
 	ftpclient "collector/internal/ftp"
 	"collector/internal/httpapi"
 	"collector/internal/ingest"
+	"collector/internal/reconciliation"
 	"collector/internal/retention"
 	"collector/internal/spool"
 	"collector/internal/store"
@@ -28,20 +30,6 @@ import (
 )
 
 var version = "dev"
-
-const (
-	correlationNormalBudget = uint64(20)
-	correlationReplayBudget = uint64(2)
-	correlationTimeout      = 30 * time.Second
-	correlationRepairEvery  = 5 * time.Minute
-)
-
-func correlationBudget(replayActive bool) uint64 {
-	if replayActive {
-		return correlationReplayBudget
-	}
-	return correlationNormalBudget
-}
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -52,6 +40,13 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "migration-preflight" {
+		if err := runMigrationPreflight(ctx, cfg); err != nil {
+			slog.Error("migration preflight failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if cfg.Role == "ingress" {
 		if err := runIngress(ctx, cfg); err != nil {
 			slog.Error("Syslog ingress stopped", "error", err)
@@ -59,6 +54,9 @@ func main() {
 		}
 		return
 	}
+	runAPIIngest := cfg.Role == "app" || cfg.Role == "api-ingest"
+	runExport := cfg.Role == "app" || cfg.Role == "export"
+	runMaintenance := cfg.Role == "app" || cfg.Role == "maintenance"
 
 	control, err := openPostgres(ctx, cfg.PostgresURL)
 	if err != nil {
@@ -66,9 +64,22 @@ func main() {
 		os.Exit(1)
 	}
 	defer control.DB.Close()
-	if err := control.Migrate(ctx, "/app/migrations/postgres"); err != nil {
-		slog.Error("postgres migration failed", "error", err)
-		os.Exit(1)
+	var activeLegacyJobs uint64
+	if runAPIIngest {
+		activeLegacyJobs, err = control.ActiveLegacySyslogParserJobs(ctx)
+		if err != nil {
+			slog.Error("legacy parser rebuild preflight failed", "error", err)
+			os.Exit(1)
+		}
+		if activeLegacyJobs != 0 {
+			slog.Error("legacy parser rebuild jobs are active; cleanup refused",
+				"active_jobs", activeLegacyJobs)
+			os.Exit(1)
+		}
+		if err := control.Migrate(ctx, "/app/migrations/postgres"); err != nil {
+			slog.Error("postgres migration failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	warehouse, err := openClickHouse(ctx, cfg)
@@ -76,45 +87,68 @@ func main() {
 		slog.Error("clickhouse startup failed", "error", err)
 		os.Exit(1)
 	}
-	if err := warehouse.Migrate(ctx, "/app/migrations/clickhouse"); err != nil {
-		slog.Error("clickhouse migration failed", "error", err)
-		os.Exit(1)
+	if runAPIIngest {
+		if err := warehouse.Migrate(ctx, "/app/migrations/clickhouse", analytics.MigrationOptions{
+			LegacyParserJobsChecked: true,
+			ActiveLegacyParserJobs:  activeLegacyJobs,
+			DeploymentLocker:        control,
+			RequireDeploymentLock:   true,
+		}); err != nil {
+			slog.Error("clickhouse migration failed", "error", err)
+			os.Exit(1)
+		}
 	}
 	rawArchive, err := openArchive(ctx, cfg)
 	if err != nil {
 		slog.Error("object archive startup failed", "error", err)
 		os.Exit(1)
 	}
+	if err := control.SetCustomProjectionGlobalEnabled(ctx, cfg.CustomProjectionEnabled); err != nil {
+		slog.Error("custom projection global gate setup failed", "error", err)
+		os.Exit(1)
+	}
 	retentionReconciler := &retention.Reconciler{
 		Store: control, Analytics: warehouse, Archive: rawArchive,
 	}
-	if err := retentionReconciler.Run(ctx); err != nil {
-		slog.Error("startup retention reconciliation failed", "error", err)
+	if runAPIIngest || runMaintenance {
+		if err := retentionReconciler.Run(ctx); err != nil {
+			slog.Error("startup retention reconciliation failed", "error", err)
+		}
 	}
-	if err := rawArchive.ApplyExportRetention(ctx); err != nil {
-		slog.Error("export retention setup failed", "error", err)
-		os.Exit(1)
+	if runExport {
+		if err := rawArchive.ApplyExportRetention(ctx); err != nil {
+			slog.Error("export retention setup failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
-	nc, err := nats.Connect(cfg.NATSURL,
-		nats.Name("eltex-collector"), nats.Timeout(10*time.Second), nats.MaxReconnects(-1))
-	if err != nil {
-		slog.Error("NATS startup failed", "error", err)
-		os.Exit(1)
+	var nc *nats.Conn
+	var durableSpool *spool.Queue
+	if runAPIIngest {
+		nc, err = nats.Connect(cfg.NATSURL,
+			nats.Name("eltex-collector"), nats.Timeout(10*time.Second), nats.MaxReconnects(-1))
+		if err != nil {
+			slog.Error("NATS startup failed", "error", err)
+			os.Exit(1)
+		}
+		defer nc.Drain()
+		if err := ingest.EnsureStreams(nc); err != nil {
+			slog.Error("NATS stream setup failed", "error", err)
+			os.Exit(1)
+		}
+		durableSpool, err = spool.Open(cfg.SyslogSpoolPath)
+		if err != nil {
+			slog.Error("durable spool startup failed", "error", err)
+			os.Exit(1)
+		}
+		defer durableSpool.Close()
 	}
-	defer nc.Drain()
-	if err := ingest.EnsureStreams(nc); err != nil {
-		slog.Error("NATS stream setup failed", "error", err)
-		os.Exit(1)
-	}
-	durableSpool, err := spool.Open(cfg.SyslogSpoolPath)
-	if err != nil {
-		slog.Error("durable spool startup failed", "error", err)
-		os.Exit(1)
-	}
-	defer durableSpool.Close()
 	ingestMetrics := &ingest.Metrics{}
 	exportHealth := &exportworker.Health{}
+	var apiExportHealth *exportworker.Health
+	if cfg.Role == "app" {
+		apiExportHealth = exportHealth
+	}
 
 	apiServer := &httpapi.Server{
 		Config: cfg, Store: control, Analytics: warehouse,
@@ -126,7 +160,7 @@ func main() {
 		Spool:              durableSpool,
 		NATS:               nc,
 		IngressStatusPath:  cfg.IngressStatusPath,
-		ExportHealth:       exportHealth,
+		ExportHealth:       apiExportHealth,
 		ReconcileRetention: retentionReconciler.RunNow,
 	}
 	server := &http.Server{
@@ -140,151 +174,111 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	errs := make(chan error, 5)
-	go func() {
-		slog.Info("HTTP server listening", "address", cfg.HTTPAddr)
-		errs <- server.ListenAndServe()
-	}()
-	go func() {
-		slog.Info("Syslog handoff receiver listening", "socket", cfg.HandoffSocketPath)
-		errs <- ingest.RunHandoffReceiver(
-			ctx, cfg.HandoffSocketPath, control, durableSpool, ingestMetrics,
-		)
-	}()
-	go func() {
-		errs <- ingest.RunSpoolPublisher(ctx, durableSpool, nc)
-	}()
-	go func() {
-		errs <- ingest.RunSyslogWorker(ctx, nc, warehouse, control, cfg.SyslogConstructsEnabled)
-	}()
-	go func() {
-		watcher := ingest.CDRWatcher{
-			Root: "/data/cdr", Store: control, Analytics: warehouse, Archive: rawArchive,
-		}
-		errs <- watcher.Run(ctx)
-	}()
-	hostname, _ := os.Hostname()
-	exportWorker := &exportworker.Worker{
-		Store: control, Archive: rawArchive,
-		WorkerID: fmt.Sprintf("%s-%d", hostname, os.Getpid()),
-		SpoolDir: "/data/spool", Render: apiServer.AsyncExportRenderer(), Health: exportHealth,
-	}
-	go func() {
-		if err := exportWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			errs <- err
-		}
-	}()
-	go func() {
-		for ctx.Err() == nil {
-			if err := ingest.RunDeviceRevisionRebuilds(
-				ctx, warehouse, control, cfg.SyslogConstructsEnabled,
-			); err != nil &&
-				!errors.Is(err, context.Canceled) {
-				slog.Error("versioned device rebuild failed; retrying", "error", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-		}
-	}()
-	go func() {
-		for ctx.Err() == nil {
-			if err := ingest.RunHistoricalSyslogReprocessWithOptions(
-				ctx, warehouse, control, cfg.SyslogConstructsEnabled,
-				ingest.SyslogReplayOptions{
-					Paused: cfg.SyslogReplayPaused, BatchSize: uint64(cfg.SyslogReplayBatchSize),
-					Sleep: cfg.SyslogReplaySleep, MaxThreads: cfg.SyslogReplayMaxThreads,
-					MaxMemoryUsage: cfg.SyslogReplayMaxMemory,
+	errs := make(chan error, 8)
+	if runAPIIngest {
+		go func() {
+			slog.Info("HTTP server listening", "address", cfg.HTTPAddr)
+			errs <- server.ListenAndServe()
+		}()
+		go func() {
+			slog.Info("Syslog handoff receiver listening", "socket", cfg.HandoffSocketPath)
+			errs <- ingest.RunHandoffReceiver(
+				ctx, cfg.HandoffSocketPath, control, durableSpool, ingestMetrics,
+			)
+		}()
+		go func() {
+			errs <- ingest.RunSpoolPublisher(ctx, durableSpool, nc)
+		}()
+		go func() {
+			errs <- ingest.RunSyslogWorker(
+				ctx, nc, warehouse, control, cfg.CustomProjectionEnabled,
+			)
+		}()
+		go func() {
+			watcher := ingest.CDRWatcher{
+				Root: "/data/cdr", Store: control, Analytics: warehouse, Archive: rawArchive,
+				CoverageThresholds: analytics.CoverageThresholds{
+					ExpectedGrace:   cfg.CoverageExpectedGrace,
+					LateThreshold:   cfg.CoverageLateThreshold,
+					MissingTerminal: cfg.CoverageMissingTerminal,
+					RetryHorizon:    cfg.CoverageRetryHorizon,
 				},
-			); err != nil &&
+				CustomProjectionEnabled: cfg.CustomProjectionEnabled,
+			}
+			errs <- watcher.Run(ctx)
+		}()
+	}
+	hostname, _ := os.Hostname()
+	if runMaintenance && cfg.CustomProjectionEnabled {
+		projectionWorker := &customprojection.Worker{
+			Queue: control, Warehouse: warehouse,
+			Config: customprojection.Config{
+				WorkerID:        fmt.Sprintf("%s-%d-custom", hostname, os.Getpid()),
+				BatchSize:       cfg.CustomProjectionBatchSize,
+				MaxEvents:       cfg.CustomProjectionMaxEvents,
+				Threads:         cfg.CustomProjectionThreads,
+				MaxMemoryBytes:  cfg.CustomProjectionMaxMemoryBytes,
+				Sleep:           cfg.CustomProjectionSleep,
+				Lease:           cfg.CustomProjectionLease,
+				ResponseTimeout: cfg.CustomResponseTimeout,
+				PairingHorizon:  cfg.CustomPairingHorizon,
+				RetryHorizon:    cfg.CustomRetryHorizon,
+				AssemblyIdle:    cfg.CustomAssemblyIdle,
+			},
+		}
+		go func() {
+			if err := projectionWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				errs <- err
+			}
+		}()
+		reconciliationWorker := &reconciliation.Worker{
+			Store: warehouse, Queue: control,
+			Config: reconciliation.Config{
+				ExpectedGrace:   cfg.CoverageExpectedGrace,
+				LateThreshold:   cfg.CoverageLateThreshold,
+				MissingTerminal: cfg.CoverageMissingTerminal,
+				RetryHorizon:    cfg.CoverageRetryHorizon,
+			},
+			Sleep:    cfg.CoverageWorkerSleep,
+			Lease:    cfg.CustomProjectionLease,
+			WorkerID: fmt.Sprintf("%s-%d-reconcile", hostname, os.Getpid()),
+		}
+		go func() {
+			if err := reconciliationWorker.Run(ctx); err != nil &&
 				!errors.Is(err, context.Canceled) {
-				slog.Error("historical Syslog reprocess failed; retrying", "error", err)
+				errs <- err
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
+		}()
+	}
+	if runExport {
+		exportWorker := &exportworker.Worker{
+			Store: control, Archive: rawArchive,
+			WorkerID: fmt.Sprintf("%s-%d", hostname, os.Getpid()),
+			SpoolDir: "/data/spool", Render: apiServer.AsyncExportRenderer(), Health: exportHealth,
 		}
-	}()
-	go func() {
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := retentionReconciler.Run(ctx); err != nil &&
-					!errors.Is(err, context.Canceled) {
-					slog.Error("retention reconciliation failed", "error", err)
-				}
+		go func() {
+			if err := exportWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				errs <- err
 			}
-		}
-	}()
-	go func() {
-		nextRepair := time.Time{}
-		for ctx.Err() == nil {
-			replayActive, replayErr := control.HasActiveSyslogParserRebuildJobs(
-				ctx, analytics.SyslogParserVersion,
-			)
-			if replayErr != nil {
-				slog.Error("Syslog replay admission check failed", "error", replayErr)
-			}
-			if !time.Now().Before(nextRepair) {
-				if err := warehouse.EnqueueActiveCorrelationRepairs(
-					ctx, correlationBudget(replayActive),
-				); err != nil {
-					slog.Error("active correlation repair enqueue failed", "error", err)
-				}
-				nextRepair = time.Now().Add(correlationRepairEvery)
-			}
-			buckets, err := warehouse.ListPendingCorrelationBuckets(
-				ctx, correlationBudget(replayActive),
-			)
-			if err != nil {
-				slog.Error("dirty correlation queue read failed", "error", err)
-			} else {
-				for _, bucket := range buckets {
-					release := control.LockDeviceWrites(bucket.DeviceID)
-					if _, configErr := control.DeviceTimeConfig(ctx, bucket.DeviceID); configErr != nil {
-						release()
-						if !errors.Is(configErr, store.ErrDeviceDeleting) &&
-							!errors.Is(configErr, store.ErrNotFound) {
-							slog.Error("dirty correlation device lookup failed",
-								"device", bucket.DeviceID, "error", configErr)
-						}
-						continue
+		}()
+	}
+	if runMaintenance {
+		go func() {
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := retentionReconciler.Run(ctx); err != nil &&
+						!errors.Is(err, context.Canceled) {
+						slog.Error("retention reconciliation failed", "error", err)
 					}
-					started := time.Now()
-					bucketCtx, cancel := context.WithTimeout(ctx, correlationTimeout)
-					slog.Info("dirty correlation bucket started",
-						"device", bucket.DeviceID, "revision", bucket.Revision,
-						"bucket", bucket.Bucket, "replayActive", replayActive)
-					err := warehouse.ReconcileDirtyBucket(bucketCtx, bucket)
-					cancel()
-					if err != nil {
-						slog.Error("dirty correlation bucket failed",
-							"device", bucket.DeviceID, "revision", bucket.Revision,
-							"bucket", bucket.Bucket, "duration", time.Since(started), "error", err)
-					} else {
-						slog.Info("dirty correlation bucket completed",
-							"device", bucket.DeviceID, "revision", bucket.Revision,
-							"bucket", bucket.Bucket, "duration", time.Since(started))
-					}
-					release()
 				}
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-		}
-	}()
-
+		}()
+	}
 	select {
 	case <-ctx.Done():
 		slog.Info("shutdown requested")
@@ -296,7 +290,43 @@ func main() {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_ = server.Shutdown(shutdownCtx)
+	if runAPIIngest {
+		_ = server.Shutdown(shutdownCtx)
+	}
+}
+
+func runMigrationPreflight(ctx context.Context, cfg config.Config) error {
+	control, err := openPostgres(ctx, cfg.PostgresURL)
+	if err != nil {
+		return err
+	}
+	defer control.DB.Close()
+	activeJobs, err := control.ActiveLegacySyslogParserJobs(ctx)
+	if err != nil {
+		return err
+	}
+	warehouse, err := openClickHouse(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	options := analytics.MigrationOptions{
+		LegacyParserJobsChecked: true,
+		ActiveLegacyParserJobs:  activeJobs,
+		StopBeforeCleanup:       true,
+		DeploymentLocker:        control,
+		RequireDeploymentLock:   true,
+	}
+	if err := warehouse.Migrate(ctx, "/app/migrations/clickhouse", options); err != nil {
+		return err
+	}
+	report, err := warehouse.PreflightLegacySyslogCleanup(ctx, options)
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		return err
+	}
+	return report.Validate()
 }
 
 func runIngress(ctx context.Context, cfg config.Config) error {
@@ -398,6 +428,9 @@ func openClickHouse(ctx context.Context, cfg config.Config) (*analytics.Client, 
 	for attempt := 1; attempt <= 30; attempt++ {
 		result, err = analytics.Open(cfg.ClickHouseAddr, cfg.ClickHouseDB, cfg.ClickHouseUser, cfg.ClickHousePass)
 		if err == nil {
+			result.ConfigureWorkloads(analytics.WorkloadOptions{
+				Capacity: cfg.ClickHouseAdmissionCapacity,
+			})
 			return result, nil
 		}
 		select {

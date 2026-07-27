@@ -8,88 +8,118 @@ import (
 )
 
 type Config struct {
-	Role                    string
-	Environment             string
-	HTTPAddr                string
-	SyslogAddr              string
-	IngressSpoolPath        string
-	SyslogSpoolPath         string
-	HandoffSocketPath       string
-	IngressControlPath      string
-	IngressStatusPath       string
-	IngressHealthAddr       string
-	PostgresURL             string
-	ClickHouseAddr          string
-	ClickHouseDB            string
-	ClickHouseUser          string
-	ClickHousePass          string
-	NATSURL                 string
-	MinIOEndpoint           string
-	MinIOAccessKey          string
-	MinIOSecretKey          string
-	MinIOUseTLS             bool
-	RawBucket               string
-	SFTPGoURL               string
-	SFTPGoAdmin             string
-	SFTPGoPassword          string
-	SessionTTL              time.Duration
-	SecureCookies           bool
-	TrustedProxyCount       int
-	SyslogConstructsEnabled bool
-	SyslogReplayPaused      bool
-	SyslogReplayBatchSize   int
-	SyslogReplaySleep       time.Duration
-	SyslogReplayMaxThreads  int
-	SyslogReplayMaxMemory   uint64
+	Role                           string
+	Environment                    string
+	HTTPAddr                       string
+	SyslogAddr                     string
+	IngressSpoolPath               string
+	SyslogSpoolPath                string
+	HandoffSocketPath              string
+	IngressControlPath             string
+	IngressStatusPath              string
+	IngressHealthAddr              string
+	PostgresURL                    string
+	ClickHouseAddr                 string
+	ClickHouseDB                   string
+	ClickHouseUser                 string
+	ClickHousePass                 string
+	NATSURL                        string
+	MinIOEndpoint                  string
+	MinIOAccessKey                 string
+	MinIOSecretKey                 string
+	MinIOUseTLS                    bool
+	RawBucket                      string
+	SFTPGoURL                      string
+	SFTPGoAdmin                    string
+	SFTPGoPassword                 string
+	SessionTTL                     time.Duration
+	SecureCookies                  bool
+	TrustedProxyCount              int
+	CustomProjectionEnabled        bool
+	CustomProjectionBatchSize      int
+	CustomProjectionMaxEvents      int
+	CustomProjectionThreads        int
+	CustomProjectionMaxMemoryBytes int64
+	CustomProjectionSleep          time.Duration
+	CustomProjectionLease          time.Duration
+	CustomResponseTimeout          time.Duration
+	CustomPairingHorizon           time.Duration
+	CustomRetryHorizon             time.Duration
+	CustomAssemblyIdle             time.Duration
+	CoverageExpectedGrace          time.Duration
+	CoverageLateThreshold          time.Duration
+	CoverageMissingTerminal        time.Duration
+	CoverageRetryHorizon           time.Duration
+	CoverageWorkerSleep            time.Duration
+	ClickHouseAdmissionCapacity    int
+	ExportPageSize                 int
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		Role:                    env("COLLECTOR_ROLE", "app"),
-		Environment:             env("ENVIRONMENT", "development"),
-		HTTPAddr:                env("HTTP_ADDR", ":8080"),
-		SyslogAddr:              env("SYSLOG_ADDR", ":1514"),
-		IngressSpoolPath:        env("INGRESS_SPOOL_PATH", "/data/spool/ingress.db"),
-		SyslogSpoolPath:         env("SYSLOG_SPOOL_PATH", "/data/spool/syslog.db"),
-		HandoffSocketPath:       env("HANDOFF_SOCKET_PATH", "/data/spool/handoff.sock"),
-		IngressControlPath:      env("INGRESS_CONTROL_PATH", "/data/spool/ingress-control.sock"),
-		IngressStatusPath:       env("INGRESS_STATUS_PATH", "/data/spool/ingress-status.json"),
-		IngressHealthAddr:       env("INGRESS_HEALTH_ADDR", "127.0.0.1:18081"),
-		PostgresURL:             env("DATABASE_URL", "postgres://collector:collector@postgres:5432/collector?sslmode=disable"),
-		ClickHouseAddr:          env("CLICKHOUSE_ADDR", "clickhouse:9000"),
-		ClickHouseDB:            env("CLICKHOUSE_DATABASE", "collector"),
-		ClickHouseUser:          env("CLICKHOUSE_USER", "collector"),
-		ClickHousePass:          env("CLICKHOUSE_PASSWORD", "collector"),
-		NATSURL:                 env("NATS_URL", "nats://nats:4222"),
-		MinIOEndpoint:           env("MINIO_ENDPOINT", "minio:9000"),
-		MinIOAccessKey:          env("MINIO_ACCESS_KEY", "collector"),
-		MinIOSecretKey:          env("MINIO_SECRET_KEY", "collector-change-me"),
-		MinIOUseTLS:             envBool("MINIO_USE_TLS", false),
-		RawBucket:               env("RAW_BUCKET", "collector-raw"),
-		SFTPGoURL:               env("SFTPGO_URL", "http://sftpgo:8080"),
-		SFTPGoAdmin:             env("SFTPGO_ADMIN", "collector"),
-		SFTPGoPassword:          env("SFTPGO_ADMIN_PASSWORD", "collector-change-me"),
-		SessionTTL:              12 * time.Hour,
-		SecureCookies:           envBool("SECURE_COOKIES", false),
-		TrustedProxyCount:       envInt("TRUSTED_PROXY_COUNT", 1),
-		SyslogConstructsEnabled: envBool("SYSLOG_CONSTRUCTS_ENABLED", false),
-		SyslogReplayPaused:      envBool("SYSLOG_REPLAY_PAUSED", false),
-		SyslogReplayBatchSize:   envInt("SYSLOG_REPLAY_BATCH_SIZE", 500),
-		SyslogReplaySleep:       envDuration("SYSLOG_REPLAY_SLEEP", 250*time.Millisecond),
-		SyslogReplayMaxThreads:  envInt("SYSLOG_REPLAY_MAX_THREADS", 2),
-		SyslogReplayMaxMemory:   envUint64("SYSLOG_REPLAY_MAX_MEMORY_BYTES", 512<<20),
+		Role:                           env("COLLECTOR_ROLE", "app"),
+		Environment:                    env("ENVIRONMENT", "development"),
+		HTTPAddr:                       env("HTTP_ADDR", ":8080"),
+		SyslogAddr:                     env("SYSLOG_ADDR", ":1514"),
+		IngressSpoolPath:               env("INGRESS_SPOOL_PATH", "/data/spool/ingress.db"),
+		SyslogSpoolPath:                env("SYSLOG_SPOOL_PATH", "/data/spool/syslog.db"),
+		HandoffSocketPath:              env("HANDOFF_SOCKET_PATH", "/data/spool/handoff.sock"),
+		IngressControlPath:             env("INGRESS_CONTROL_PATH", "/data/spool/ingress-control.sock"),
+		IngressStatusPath:              env("INGRESS_STATUS_PATH", "/data/spool/ingress-status.json"),
+		IngressHealthAddr:              env("INGRESS_HEALTH_ADDR", "127.0.0.1:18081"),
+		PostgresURL:                    env("DATABASE_URL", "postgres://collector:collector@postgres:5432/collector?sslmode=disable"),
+		ClickHouseAddr:                 env("CLICKHOUSE_ADDR", "clickhouse:9000"),
+		ClickHouseDB:                   env("CLICKHOUSE_DATABASE", "collector"),
+		ClickHouseUser:                 env("CLICKHOUSE_USER", "collector"),
+		ClickHousePass:                 env("CLICKHOUSE_PASSWORD", "collector"),
+		NATSURL:                        env("NATS_URL", "nats://nats:4222"),
+		MinIOEndpoint:                  env("MINIO_ENDPOINT", "minio:9000"),
+		MinIOAccessKey:                 env("MINIO_ACCESS_KEY", "collector"),
+		MinIOSecretKey:                 env("MINIO_SECRET_KEY", "collector-change-me"),
+		MinIOUseTLS:                    envBool("MINIO_USE_TLS", false),
+		RawBucket:                      env("RAW_BUCKET", "collector-raw"),
+		SFTPGoURL:                      env("SFTPGO_URL", "http://sftpgo:8080"),
+		SFTPGoAdmin:                    env("SFTPGO_ADMIN", "collector"),
+		SFTPGoPassword:                 env("SFTPGO_ADMIN_PASSWORD", "collector-change-me"),
+		SessionTTL:                     12 * time.Hour,
+		SecureCookies:                  envBool("SECURE_COOKIES", false),
+		TrustedProxyCount:              envInt("TRUSTED_PROXY_COUNT", 1),
+		CustomProjectionEnabled:        envBool("CUSTOM_PROJECTION_ENABLED", true),
+		CustomProjectionBatchSize:      envInt("CUSTOM_PROJECTION_BATCH_SIZE", 128),
+		CustomProjectionMaxEvents:      envInt("CUSTOM_PROJECTION_MAX_EVENTS", 20_000),
+		CustomProjectionThreads:        envInt("CUSTOM_PROJECTION_THREADS", 1),
+		CustomProjectionMaxMemoryBytes: envInt64("CUSTOM_PROJECTION_MAX_MEMORY_BYTES", 128<<20),
+		CustomProjectionSleep:          envDuration("CUSTOM_PROJECTION_SLEEP", time.Second),
+		CustomProjectionLease:          envDuration("CUSTOM_PROJECTION_LEASE", 2*time.Minute),
+		CustomResponseTimeout:          envDuration("CUSTOM_RESPONSE_TIMEOUT", 5*time.Second),
+		CustomPairingHorizon:           envDuration("CUSTOM_PAIRING_HORIZON", 5*time.Minute),
+		CustomRetryHorizon:             envDuration("CUSTOM_RETRY_HORIZON", 7*24*time.Hour),
+		CustomAssemblyIdle:             envDuration("CUSTOM_ASSEMBLY_IDLE", 2*time.Second),
+		CoverageExpectedGrace:          envDuration("CDR_COVERAGE_EXPECTED_GRACE", 5*time.Minute),
+		CoverageLateThreshold:          envDuration("CDR_COVERAGE_LATE_THRESHOLD", 5*time.Minute),
+		CoverageMissingTerminal:        envDuration("CDR_COVERAGE_MISSING_TERMINAL", 30*time.Minute),
+		CoverageRetryHorizon:           envDuration("CDR_COVERAGE_RETRY_HORIZON", 7*24*time.Hour),
+		CoverageWorkerSleep:            envDuration("CDR_COVERAGE_WORKER_SLEEP", 5*time.Second),
+		ClickHouseAdmissionCapacity:    envInt("CLICKHOUSE_ADMISSION_CAPACITY", 8),
+		ExportPageSize:                 envInt("EXPORT_PAGE_SIZE", 1000),
 	}
-	if cfg.Role != "app" && cfg.Role != "ingress" {
-		return Config{}, fmt.Errorf("COLLECTOR_ROLE must be app or ingress")
+	switch cfg.Role {
+	case "app", "ingress", "api-ingest", "export", "maintenance":
+	default:
+		return Config{}, fmt.Errorf(
+			"COLLECTOR_ROLE must be app, ingress, api-ingest, export, or maintenance",
+		)
 	}
-	if cfg.Role == "app" && cfg.PostgresURL == "" {
+	if cfg.Role != "ingress" && cfg.PostgresURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
 	}
-	if cfg.SyslogReplayBatchSize <= 0 || cfg.SyslogReplayMaxThreads <= 0 ||
-		cfg.SyslogReplayMaxMemory == 0 || cfg.SyslogReplaySleep <= 0 {
-		return Config{}, fmt.Errorf("Syslog replay limits must be positive")
+	if cfg.ClickHouseAdmissionCapacity < 4 || cfg.ClickHouseAdmissionCapacity > 128 {
+		return Config{}, fmt.Errorf("CLICKHOUSE_ADMISSION_CAPACITY must be between 4 and 128")
 	}
-	if cfg.Environment == "production" && cfg.Role == "app" {
+	if cfg.ExportPageSize < 100 || cfg.ExportPageSize > 5000 {
+		return Config{}, fmt.Errorf("EXPORT_PAGE_SIZE must be between 100 and 5000")
+	}
+	if cfg.Environment == "production" && cfg.Role != "ingress" {
 		if cfg.ClickHousePass == "collector" || cfg.MinIOSecretKey == "collector-change-me" ||
 			cfg.SFTPGoPassword == "collector-change-me" || !cfg.SecureCookies {
 			return Config{}, fmt.Errorf("production requires non-default service secrets and secure cookies")
@@ -129,13 +159,13 @@ func envInt(key string, fallback int) int {
 	return parsed
 }
 
-func envUint64(key string, fallback uint64) uint64 {
+func envInt64(key string, fallback int64) int64 {
 	value := os.Getenv(key)
 	if value == "" {
 		return fallback
 	}
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
 		return fallback
 	}
 	return parsed
@@ -147,7 +177,7 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	parsed, err := time.ParseDuration(value)
-	if err != nil {
+	if err != nil || parsed <= 0 {
 		return fallback
 	}
 	return parsed

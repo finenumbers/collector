@@ -81,6 +81,25 @@ type ExportJobCursor struct {
 	ID        uuid.UUID
 }
 
+type ExportQueueStats struct {
+	Queued  uint64        `json:"queued"`
+	Running uint64        `json:"running"`
+	Oldest  time.Duration `json:"oldestAge"`
+}
+
+func (s *Store) ExportQueueStats(ctx context.Context) (ExportQueueStats, error) {
+	var result ExportQueueStats
+	var oldestSeconds float64
+	err := s.DB.QueryRow(ctx, `SELECT
+		count(*) FILTER (WHERE status='queued'),
+		count(*) FILTER (WHERE status='running'),
+		COALESCE(EXTRACT(epoch FROM now()-min(created_at)
+			FILTER (WHERE status IN ('queued','running'))),0)
+		FROM export_jobs`).Scan(&result.Queued, &result.Running, &oldestSeconds)
+	result.Oldest = time.Duration(oldestSeconds * float64(time.Second))
+	return result, err
+}
+
 func scanExportJob(row pgx.Row) (ExportJob, error) {
 	var job ExportJob
 	err := row.Scan(

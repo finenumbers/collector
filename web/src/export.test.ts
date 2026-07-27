@@ -24,24 +24,8 @@ describe('export navigation mapping', () => {
   it.each([
     ['calls', { dataset: 'calls' }],
     ['antifraud', { dataset: 'antifraud' }],
-    ['syslog_all', { dataset: 'events', category: 'all' }],
-    ['alarms', { dataset: 'events', category: 'alarms' }],
-    ['call_trace', { dataset: 'events', category: 'call_trace' }],
-    ['sip', { dataset: 'events', category: 'sip' }],
-    ['isup', { dataset: 'events', category: 'isup' }],
-    ['q931', { dataset: 'events', category: 'q931' }],
-    ['h323', { dataset: 'events', category: 'h323' }],
-    ['rtp', { dataset: 'events', category: 'rtp' }],
-    ['hardware', { dataset: 'events', category: 'hardware' }],
-    ['ivr', { dataset: 'events', category: 'ivr' }],
-    ['ip_network', { dataset: 'events', category: 'ip_network' }],
-    ['ip_connections', { dataset: 'events', category: 'ip_connections' }],
-    ['ip_modules', { dataset: 'events', category: 'ip_modules' }],
-    ['radius', { dataset: 'events', category: 'radius' }],
-    ['config_history', { dataset: 'events', category: 'config_history' }],
-    ['auth_log', { dataset: 'events', category: 'auth_log' }],
-    ['system_journal', { dataset: 'events', category: 'system_journal' }],
-    ['unknown', { dataset: 'events', category: 'unknown' }],
+    ['syslog', { dataset: 'syslog' }],
+    ['syslog_all', { dataset: 'syslog' }],
   ] as const)('maps %s to its backend export target', (dataset, expected) => {
     expect(exportTarget(dataset)).toEqual(expected)
   })
@@ -54,10 +38,9 @@ describe('export navigation mapping', () => {
 })
 
 describe('async export request contract', () => {
-  it('builds a CSV.zip request with the selected day and event mapping', () => {
-    expect(createExportRequest('alarms', 'critical', '2026-07-01', '2026-07-26')).toEqual({
-      dataset: 'events',
-      category: 'alarms',
+  it('builds a CSV.zip request with the selected day and syslog mapping', () => {
+    expect(createExportRequest('syslog', 'critical', '2026-07-01', '2026-07-26')).toEqual({
+      dataset: 'syslog',
       q: 'critical',
       format: 'csv_zip',
       from: '2026-07-01',
@@ -161,10 +144,10 @@ describe('async export state presentation', () => {
   })
 
   it('isolates persisted jobs across section, date, and query remounts', () => {
-    const base = exportStorageKey('device-1', 'alarms', '2026-07-26', '')
-    expect(exportStorageKey('device-1', 'sip', '2026-07-26', '')).not.toBe(base)
-    expect(exportStorageKey('device-1', 'alarms', '2026-07-27', '')).not.toBe(base)
-    expect(exportStorageKey('device-1', 'alarms', '2026-07-26', 'critical')).not.toBe(base)
+    const base = exportStorageKey('device-1', 'syslog', '2026-07-26', '')
+    expect(exportStorageKey('device-1', 'antifraud', '2026-07-26', '')).not.toBe(base)
+    expect(exportStorageKey('device-1', 'syslog', '2026-07-27', '')).not.toBe(base)
+    expect(exportStorageKey('device-1', 'syslog', '2026-07-26', 'critical')).not.toBe(base)
     const completed = job({ status: 'completed' })
     expect(exportJobDisposition(
       restoreExportTracking(serializeExportTracking(completed)).job!,

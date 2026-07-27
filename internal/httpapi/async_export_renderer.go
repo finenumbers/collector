@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +17,7 @@ import (
 	"collector/internal/equipment"
 	"collector/internal/exportworker"
 	"collector/internal/store"
+	"collector/internal/workload"
 
 	"github.com/google/uuid"
 )
@@ -40,13 +41,27 @@ func (s *Server) AsyncExportRenderer() exportworker.RenderFunc {
 		ctx context.Context, job store.ExportJob, output io.Writer,
 		progress exportworker.ProgressFunc,
 	) (exportworker.RenderResult, error) {
+		if job.Dataset == "antifraud" {
+			if !s.Config.CustomProjectionEnabled {
+				return exportworker.RenderResult{}, errors.New("Custom AntiFraud feature is unavailable")
+			}
+			ready, readyErr := s.Store.CustomAntifraudReady(ctx, job.DeviceID)
+			if readyErr != nil || !ready {
+				return exportworker.RenderResult{}, errors.New("Custom AntiFraud projection is rebuilding")
+			}
+		}
+		ctx, release, err := s.Analytics.AdmitWorkload(ctx, workload.Export)
+		if err != nil {
+			return exportworker.RenderResult{}, err
+		}
+		defer release()
 		location, err := time.LoadLocation(job.Timezone)
 		if err != nil {
 			return exportworker.RenderResult{}, fmt.Errorf("load pinned timezone: %w", err)
 		}
 		if useCSVZip(job) {
 			switch job.Dataset {
-			case "events":
+			case "syslog":
 				return s.renderEventsCSVZip(ctx, job, location, output, progress)
 			case "calls":
 				if job.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
@@ -71,10 +86,10 @@ func (s *Server) AsyncExportRenderer() exportworker.RenderFunc {
 			} else {
 				workbook, err = s.exportEltexCalls(request, job.DeviceID, job.Search, location)
 			}
-		case "antifraud":
-			workbook, err = s.exportAntifraud(request, job.DeviceID, job.Search, location)
-		case "events":
+		case "syslog":
 			workbook, err = s.exportEvents(request, job.DeviceID, job.Category, job.Search, location)
+		case "antifraud":
+			err = fmt.Errorf("AntiFraud export is available as CSV.zip")
 		default:
 			err = fmt.Errorf("unsupported dataset %q", job.Dataset)
 		}
@@ -107,7 +122,7 @@ func useCSVZip(job store.ExportJob) bool {
 		return false
 	}
 	return (job.RangeFrom == nil && job.RangeTo == nil) ||
-		(job.Dataset == "events" &&
+		(job.Dataset == "syslog" &&
 			(job.RowsEstimated == nil || *job.RowsEstimated > analytics.ExportEstimateLimit))
 }
 
@@ -131,22 +146,23 @@ func (s *Server) renderEventsCSVZip(
 	}
 	writer := csv.NewWriter(entry)
 	if err = writer.Write([]string{
-		"Время", "Раздел", "Компонент", "Сообщение", "Статус", "Атрибуты",
+		"Event ID", "Device ID", "Received UTC", "Source IP", "Source port",
+		"Transport", "Payload", "Payload SHA-256",
 	}); err != nil {
 		return exportworker.RenderResult{}, err
 	}
-	var cursor *analytics.EventCursor
+	var cursor *analytics.SyslogMessageCursor
 	if job.RawHighWatermark != nil {
-		cursor = &analytics.EventCursor{
+		cursor = &analytics.SyslogMessageCursor{
 			ReceivedAt: job.RawHighWatermark.Add(time.Microsecond),
 			EventID:    maxUUID(),
 		}
 	}
 	var total int64
 	for {
-		page, queryErr := s.Analytics.ListExportEventsPage(ctx, job.DeviceID,
-			uint64(job.ActiveRevision), job.Category, job.Search, exportPageSize, cursor,
-			exportJobTimeRange(job))
+		page, queryErr := s.Analytics.ListSyslogMessagesPage(
+			ctx, job.DeviceID, job.Search, s.exportPageSize(), cursor, exportJobTimeRange(job),
+		)
 		if queryErr != nil {
 			return exportworker.RenderResult{}, queryErr
 		}
@@ -156,17 +172,9 @@ func (s *Server) renderEventsCSVZip(
 			) {
 				continue
 			}
-			eventTime := row.EventTime
-			if eventTime == nil {
-				eventTime = &row.ReceivedAt
-			}
-			attributes, marshalErr := json.Marshal(row.Attributes)
-			if marshalErr != nil {
-				return exportworker.RenderResult{}, marshalErr
-			}
 			if err = writeCSVValues(writer,
-				formatTimeInLocation(eventTime, location), row.Category, row.Component,
-				row.Message, row.Status, string(attributes),
+				row.EventID, row.DeviceID, row.ReceivedAt.UTC().Format(time.RFC3339Nano),
+				row.SourceIP, row.SourcePort, row.Transport, row.Payload, row.PayloadSHA256,
 			); err != nil {
 				return exportworker.RenderResult{}, err
 			}
@@ -183,7 +191,7 @@ func (s *Server) renderEventsCSVZip(
 			break
 		}
 		last := page.Items[len(page.Items)-1]
-		cursor = &analytics.EventCursor{ReceivedAt: last.ReceivedAt, EventID: last.EventID}
+		cursor = &analytics.SyslogMessageCursor{ReceivedAt: last.ReceivedAt, EventID: last.EventID}
 	}
 	if err = archiveWriter.Close(); err != nil {
 		return exportworker.RenderResult{}, err
@@ -213,7 +221,7 @@ func (s *Server) renderCallsCSVZip(
 		for {
 			page, err := s.Analytics.ListExportCallsPage(
 				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
-				exportPageSize, cursor, exportJobTimeRange(job),
+				s.exportPageSize(), cursor, exportJobTimeRange(job),
 			)
 			if err != nil {
 				return total, err
@@ -246,6 +254,60 @@ func (s *Server) renderCallsCSVZip(
 	}, progress)
 }
 
+func (s *Server) renderAntifraudCSVZip(
+	ctx context.Context, job store.ExportJob, location *time.Location, output io.Writer,
+	progress exportworker.ProgressFunc,
+) (exportworker.RenderResult, error) {
+	return renderCSVArchive(job, output, []string{
+		"Call ID", "Начало", "Завершение", "Acct-Session-Id", "H323 Conf ID",
+		"Номер A", "Номер B", "Фазы", "Статус", "Покрытие CDR", "CDR IDs",
+	}, func(writer *csv.Writer) (int64, error) {
+		var cursor *analytics.AntifraudCallCursor
+		if job.RawHighWatermark != nil {
+			cursor = &analytics.AntifraudCallCursor{
+				SortTime: job.RawHighWatermark.Add(time.Microsecond), CallID: maxUUID(),
+			}
+		}
+		var total int64
+		for {
+			page, err := s.Analytics.ListAntifraudCallsPage(
+				ctx, job.DeviceID, job.Search, s.exportPageSize(), cursor, exportJobTimeRange(job),
+			)
+			if err != nil {
+				return total, err
+			}
+			for _, row := range page.Items {
+				if job.RawHighWatermark != nil && exportRowAfterSnapshot(
+					row.SortTime, row.CallID, job.RawHighWatermark, job.RawHighWatermarkID,
+				) {
+					continue
+				}
+				cdrIDs := make([]string, 0, len(row.Coverage.LinkedCDRIDs))
+				for _, id := range row.Coverage.LinkedCDRIDs {
+					cdrIDs = append(cdrIDs, id.String())
+				}
+				if err = writeCSVValues(writer,
+					row.CallID, formatTimeInLocation(&row.FirstSeenAt, location),
+					formatTimeInLocation(&row.LastSeenAt, location), row.AcctSessionID,
+					row.H323ConfID, row.Calling, row.Called, strings.Join(row.Phases, "|"),
+					row.Status, row.Coverage.State, strings.Join(cdrIDs, "|"),
+				); err != nil {
+					return total, err
+				}
+				total++
+			}
+			if err = progress(total); err != nil {
+				return total, err
+			}
+			if !page.HasMore || len(page.Items) == 0 {
+				return total, nil
+			}
+			last := page.Items[len(page.Items)-1]
+			cursor = &analytics.AntifraudCallCursor{SortTime: last.SortTime, CallID: last.CallID}
+		}
+	}, progress)
+}
+
 func (s *Server) renderSatelCallsCSVZip(
 	ctx context.Context, job store.ExportJob, location *time.Location, output io.Writer,
 	progress exportworker.ProgressFunc,
@@ -265,7 +327,7 @@ func (s *Server) renderSatelCallsCSVZip(
 		for {
 			page, err := s.Analytics.ListExportSatelRTUCallsPage(
 				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
-				exportPageSize, cursor, exportJobTimeRange(job),
+				s.exportPageSize(), cursor, exportJobTimeRange(job),
 			)
 			if err != nil {
 				return total, err
@@ -296,63 +358,6 @@ func (s *Server) renderSatelCallsCSVZip(
 			}
 			last := page.Items[len(page.Items)-1]
 			cursor = &analytics.CallCursor{SortTime: last.SortTime, RecordID: last.RecordID}
-		}
-	}, progress)
-}
-
-func (s *Server) renderAntifraudCSVZip(
-	ctx context.Context, job store.ExportJob, location *time.Location, output io.Writer,
-	progress exportworker.ProgressFunc,
-) (exportworker.RenderResult, error) {
-	return renderCSVArchive(job, output, []string{
-		"Последнее событие", "Операция", "Решение", "Номер A", "Номер B",
-		"Входящий маршрут", "Исходящий маршрут", "RADIUS server", "Latency, мс",
-		"Accounting", "Корреляция", "CDR legs", "Полнота", "Acct-Session-Id", "Call context",
-	}, func(writer *csv.Writer) (int64, error) {
-		var cursor *analytics.AntifraudCursor
-		if job.RawHighWatermark != nil {
-			cursor = &analytics.AntifraudCursor{
-				LastEventAt: job.RawHighWatermark.Add(time.Microsecond), TransactionID: maxUUID(),
-			}
-		}
-		var total int64
-		for {
-			page, err := s.Analytics.ListExportAntifraudPage(
-				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
-				exportPageSize, cursor, exportJobTimeRange(job),
-			)
-			if err != nil {
-				return total, err
-			}
-			for _, row := range page.Items {
-				if job.RawHighWatermark != nil && exportRowAfterSnapshot(
-					row.LastEventAt, row.TransactionID,
-					job.RawHighWatermark, job.RawHighWatermarkID,
-				) {
-					continue
-				}
-				if err = writeCSVValues(writer,
-					formatTimeInLocation(&row.LastEventAt, location), row.RequestType,
-					row.Decision, firstNonEmpty(row.SrcNumberIn, row.CallingStationID),
-					firstNonEmpty(row.DstNumberIn, row.CalledStationID),
-					row.InTrunkgroupLabel, row.OutTrunkgroupLabel, row.ServerAddress,
-					row.LatencyMS, row.AccountingStatus, row.CorrelationState,
-					row.LegCount, row.Completeness, row.AcctSessionID, row.CallContext,
-				); err != nil {
-					return total, err
-				}
-				total++
-			}
-			if err = progress(total); err != nil {
-				return total, err
-			}
-			if !page.HasMore || len(page.Items) == 0 {
-				return total, nil
-			}
-			last := page.Items[len(page.Items)-1]
-			cursor = &analytics.AntifraudCursor{
-				LastEventAt: last.LastEventAt, TransactionID: last.TransactionID,
-			}
 		}
 	}, progress)
 }
@@ -402,15 +407,6 @@ func csvSafe(value string) string {
 		return "'" + value
 	}
 	return value
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func maxUUID() uuid.UUID {

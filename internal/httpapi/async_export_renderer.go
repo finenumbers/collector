@@ -206,11 +206,7 @@ func (s *Server) renderCallsCSVZip(
 	ctx context.Context, job store.ExportJob, location *time.Location, output io.Writer,
 	progress exportworker.ProgressFunc,
 ) (exportworker.RenderResult, error) {
-	return renderCSVArchive(job, output, []string{
-		"Установка", "Входящий маршрут", "Исходящий маршрут", "Номер A вход",
-		"Номер A выход", "Номер B вход", "Номер B выход", "Длительность, мс",
-		"Q.850", "Результат", "Acct-Session-Id", "UniqueTag",
-	}, func(writer *csv.Writer) (int64, error) {
+	return renderCSVArchive(job, output, eltexCallExportHeaders(), func(writer *csv.Writer) (int64, error) {
 		var cursor *analytics.CallCursor
 		if job.RawHighWatermark != nil {
 			cursor = &analytics.CallCursor{
@@ -232,12 +228,7 @@ func (s *Server) renderCallsCSVZip(
 				) {
 					continue
 				}
-				if err = writeCSVValues(writer,
-					formatTimeInLocation(row.SetupTime, location),
-					row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
-					row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS,
-					row.ReleaseCause, row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag,
-				); err != nil {
+				if err = writeCSVValues(writer, eltexCallExportValues(row, location)...); err != nil {
 					return total, err
 				}
 				total++

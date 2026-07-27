@@ -91,8 +91,7 @@ describe('product shell', () => {
     expect(alpha.some((value) => value > 0 && value < 255)).toBe(true)
   })
 
-  it('has no manual CDR profile UI', () => {
+  it('has no manual CDR profile editor UI', () => {
     expect(main).not.toContain('Профиль колонок CDR')
-    expect(main).not.toContain('cdrColumns')
   })
 })

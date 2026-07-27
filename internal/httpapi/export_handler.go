@@ -115,12 +115,7 @@ func validateExportCapability(writer http.ResponseWriter, dataset string, device
 func (s *Server) exportEltexCalls(
 	request *http.Request, deviceID uuid.UUID, search string, location *time.Location,
 ) (*exportWorkbook, error) {
-	headers := []any{
-		"Установка", "Входящий маршрут", "Исходящий маршрут", "Номер A вход",
-		"Номер A выход", "Номер B вход", "Номер B выход", "Длительность, мс",
-		"Q.850", "Результат", "Acct-Session-Id", "UniqueTag",
-	}
-	workbook, err := newExportWorkbook(headers, excelMaximumRows)
+	workbook, err := newExportWorkbook(eltexCallExportHeaderAnys(), excelMaximumRows)
 	if err != nil {
 		return nil, err
 	}
@@ -163,12 +158,7 @@ func (s *Server) exportEltexCalls(
 				stop = true
 				break
 			}
-			err = workbook.AddRow(request.Context(), []any{
-				formatTimeInLocation(row.SetupTime, location),
-				row.IncomingDescription, row.OutgoingDescription, row.IncomingCgPN,
-				row.OutgoingCgPN, row.IncomingCdPN, row.OutgoingCdPN, row.DurationMS,
-				row.ReleaseCause, row.ReleaseInfo, row.RadiusSessionID, row.UniqueTag,
-			})
+			err = workbook.AddRow(request.Context(), eltexCallExportValues(row, location))
 			if err != nil {
 				return workbook, err
 			}

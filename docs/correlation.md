@@ -1,4 +1,4 @@
-# Корреляция вызовов и Custom AntiFraud
+# CDR coverage и Custom AntiFraud
 
 ## Каноническая модель
 

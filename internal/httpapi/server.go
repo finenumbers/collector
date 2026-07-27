@@ -99,7 +99,6 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Post("/devices", s.createDevice)
 			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
-			private.Get("/devices/{deviceID}/events", s.listEvents)
 			private.Get("/devices/{deviceID}/syslog-messages", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
 			private.Get("/devices/{deviceID}/calls/{recordID}/card", s.callCard)

@@ -35,7 +35,7 @@ type ManagedUser = User & {
 }
 type SystemInfo = { version: string; status: string; user: User; services: Record<string, boolean> }
 type RetentionPolicy = {
-  policyClass: 'syslog' | 'cdr' | 'softswitch_cdr' | 'derived' | 'raw_cdr_archive'
+  policyClass: 'syslog' | 'cdr' | 'softswitch_cdr' | 'raw_cdr_archive'
   activeDays: number
   pendingDays?: number
   effectiveAt?: string

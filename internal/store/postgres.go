@@ -755,20 +755,6 @@ func (s *Store) ClaimIngestFile(
 	return claim, nil
 }
 
-// RegisterIngestFile keeps the legacy helper for callers that only need a new row id.
-func (s *Store) RegisterIngestFile(
-	ctx context.Context, deviceID uuid.UUID, name, objectKey, checksum string, size int64,
-) (uuid.UUID, error) {
-	claim, err := s.ClaimIngestFile(ctx, deviceID, name, objectKey, checksum, size)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	if !claim.Retry {
-		return uuid.Nil, ErrNotFound
-	}
-	return claim.ID, nil
-}
-
 type IngestFileSummary struct {
 	ID              uuid.UUID  `json:"id"`
 	OriginalName    string     `json:"originalName"`

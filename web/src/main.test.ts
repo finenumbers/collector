@@ -68,6 +68,7 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('Цепочка AntiFraud')
     expect(main).toContain('AntiFraud JSON')
     expect(main).toContain('antifraudTranscript')
+    expect(main).toContain('formatAntifraudTranscript')
     expect(main).toContain('drawer-header')
     expect(main).not.toContain('Пакеты и атрибуты')
   })

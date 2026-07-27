@@ -289,12 +289,38 @@ func (s *Store) Session(ctx context.Context, token, csrf string, requireCSRF boo
 		if !equalBytes(provided[:], csrfHash) {
 			return Session{}, ErrNotFound
 		}
+		session.CSRF = csrf
+	} else if csrf != "" {
+		provided := sha256.Sum256([]byte(csrf))
+		if equalBytes(provided[:], csrfHash) {
+			session.CSRF = csrf
+		}
 	}
 	if _, err := s.DB.Exec(ctx, `UPDATE sessions SET last_seen_at=now() WHERE id_hash=$1`, tokenHash[:]); err != nil {
 		return Session{}, err
 	}
-	session.CSRF = csrf
 	return session, nil
+}
+
+// RotateSessionCSRF issues a fresh CSRF secret for an existing browser session.
+// Needed after page reload: the session cookie survives, but the SPA loses the
+// in-memory CSRF token and only the hash is stored server-side.
+func (s *Store) RotateSessionCSRF(ctx context.Context, token string) (string, error) {
+	csrf, err := randomToken(24)
+	if err != nil {
+		return "", err
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+	csrfHash := sha256.Sum256([]byte(csrf))
+	tag, err := s.DB.Exec(ctx, `UPDATE sessions SET csrf_hash=$2, last_seen_at=now()
+		WHERE id_hash=$1 AND expires_at>now()`, tokenHash[:], csrfHash[:])
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", ErrNotFound
+	}
+	return csrf, nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, token string) error {

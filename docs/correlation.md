@@ -33,6 +33,31 @@ Custom call identity (строго):
   и/или accounting без верификации — нормальный случай);
 - `unknown` — `check_call` был, но ответ неоднозначен.
 
+Колонка `status` на уровне Call следует той же границе: `unavailable_fallback`
+только при timeout/`unavailable_fallback` на **`check_call`**. Timeout индикации
+(`number`/`save_call`) остаётся в raw timeline/JSON, но не поднимает Call в
+`unavailable_fallback` и не противоречит `final_decision=not_applicable`.
+
+Transcript карточки (канон, одна строка на логическую фазу):
+
+```text
+CALL <primary_session>
+A: <calling>
+B: <called>
+
+1) indication: save_call|number -> Access-Accept
+2) verification: check_call -> Access-Accept|Access-Reject|no_response
+3) accounting: Stop -> Accounting-Response
+
+final_decision=allowed|blocked|unavailable|not_applicable|unknown
+duration_sec=15
+disconnect_cause_q850=10
+```
+
+Несколько indication-попыток схлопываются в один шаг (успех важнее `no_response`).
+Отсутствующая фаза не синтезируется. `Access-Response` Eltex отображается как
+`Access-Accept`. Сырые packet-attempts остаются в AntiFraud JSON.
+
 Accounting Stop нормализует `h323-setup/connect/disconnect-time`,
 `h323-disconnect-cause` (Q.850), `Acct-Session-Time`, `Acct-Delay-Time`,
 `Event-Timestamp`. `Acct-Terminate-Cause` хранится отдельно и не подменяет Q.850.

@@ -38,7 +38,7 @@ describe('dashboard and read-model timezone messaging', () => {
     expect(readModelNotice(aligned, {
       activeRevision: 0,
       revisionAligned: false,
-    })).toContain('создаётся первый согласованный read model')
+    })).toContain('создаётся первый согласованный read model для Syslog, CDR и Custom AntiFraud')
     expect(readModelNotice(aligned, {
       activeRevision: 2,
       revisionAligned: false,

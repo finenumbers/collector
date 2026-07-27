@@ -6,15 +6,22 @@ import (
 	"testing"
 )
 
-func TestRetentionRegistryIncludesSyslogHourly(t *testing.T) {
-	found := false
+func TestRetentionRegistryIncludesCustomProjection(t *testing.T) {
+	required := map[string]bool{
+		"syslog_messages": false, "custom_radius_packets": false,
+		"custom_radius_packet_members": false, "custom_radius_exchanges": false,
+		"custom_antifraud_calls": false, "custom_antifraud_call_packets": false,
+		"custom_radius_session_events": false,
+	}
 	for _, table := range retentionTables["syslog"] {
-		if table.name == "syslog_hourly" && table.timeExpr == "hour" {
-			found = true
+		if _, ok := required[table.name]; ok {
+			required[table.name] = true
 		}
 	}
-	if !found {
-		t.Fatal("syslog_hourly is missing from the Syslog retention registry")
+	for table, found := range required {
+		if !found {
+			t.Fatalf("%s is missing from Syslog retention", table)
+		}
 	}
 }
 
@@ -60,10 +67,13 @@ func TestApplyRetentionRejectsUnsafeInputBeforeDatabaseAccess(t *testing.T) {
 
 func TestRetentionAllowlistExcludesLedgers(t *testing.T) {
 	disallowed := map[string]bool{
-		"schema_migrations":         true,
-		"syslog_reprocess_ledger":   true,
-		"device_derived_revisions":  true,
-		"correlation_dirty_buckets": true,
+		"schema_migrations":                true,
+		"syslog_reprocess_ledger":          true,
+		"device_derived_revisions":         true,
+		"correlation_dirty_buckets":        true,
+		"custom_projection_dirty_buckets":  true,
+		"custom_projection_state":          true,
+		"cdr_reconciliation_dirty_buckets": true,
 	}
 	for class, tables := range retentionTables {
 		for _, table := range tables {

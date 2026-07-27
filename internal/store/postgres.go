@@ -27,10 +27,54 @@ var (
 	ErrDeviceDeleting = errors.New("device is being deleted")
 )
 
+const clickHouseHeavyLaneLockKey int64 = 0x43484c414e453031
+
 type Store struct {
 	DB                  *pgxpool.Pool
 	deviceCacheRevision atomic.Uint64
 	deviceLocks         sync.Map
+}
+
+// AcquireClickHouseHeavyLane is a deployment-wide export/custom-replay lane.
+// It uses a dedicated PostgreSQL session so split roles cannot overlap heavy
+// warehouse work. Callers acquire it before workload admission and device locks.
+func (s *Store) AcquireClickHouseHeavyLane(ctx context.Context) (func(), error) {
+	conn, err := s.DB.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var acquired bool
+		if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`,
+			clickHouseHeavyLaneLockKey).Scan(&acquired); err != nil {
+			conn.Release()
+			return nil, err
+		}
+		if acquired {
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					var unlocked bool
+					unlockErr := conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock($1)`,
+						clickHouseHeavyLaneLockKey).Scan(&unlocked)
+					if unlockErr != nil || !unlocked {
+						_ = conn.Conn().Close(context.Background())
+					}
+					conn.Release()
+				})
+			}, nil
+		}
+		select {
+		case <-ctx.Done():
+			conn.Release()
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 type User struct {
@@ -73,7 +117,6 @@ type Device struct {
 	SyslogSourceIP         string                 `json:"syslogSourceIp"`
 	DeviceSign             string                 `json:"deviceSign"`
 	AntifraudEnabled       bool                   `json:"antifraudEnabled"`
-	AntifraudMode          string                 `json:"antifraudMode"`
 	FTPUsername            string                 `json:"ftpUsername"`
 	FTPHome                string                 `json:"ftpHome"`
 	Enabled                bool                   `json:"enabled"`
@@ -109,7 +152,6 @@ type NewDevice struct {
 	SyslogSourceIP   string `json:"syslogSourceIp"`
 	DeviceSign       string `json:"deviceSign"`
 	AntifraudEnabled bool   `json:"antifraudEnabled"`
-	AntifraudMode    string `json:"antifraudMode"`
 }
 
 type DeviceUpdate struct {
@@ -122,7 +164,6 @@ type DeviceUpdate struct {
 	SyslogSourceIP   string `json:"syslogSourceIp"`
 	DeviceSign       string `json:"deviceSign"`
 	AntifraudEnabled bool   `json:"antifraudEnabled"`
-	AntifraudMode    string `json:"antifraudMode"`
 	Enabled          bool   `json:"enabled"`
 }
 
@@ -516,7 +557,7 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 	}
 	rows, err := s.DB.Query(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
-		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
+		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,
 		ftp_username,ftp_home,enabled,purge_state,purge_error,detection_status,detection_template,
 		detection_fingerprint,detection_error,detection_checked_at,detection_last_file_at,created_at
 		FROM devices WHERE ($1='' OR source_category=$1) ORDER BY name`, category)
@@ -531,7 +572,7 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 			&device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
+			&device.AntifraudEnabled, &device.FTPUsername,
 			&device.FTPHome, &device.Enabled, &device.PurgeState,
 			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -591,7 +632,7 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
 	err := s.DB.QueryRow(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
-		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,
+		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,
 		ftp_username,ftp_home,enabled,purge_state,purge_error,detection_status,detection_template,
 		detection_fingerprint,detection_error,detection_checked_at,detection_last_file_at,created_at
 		FROM devices WHERE id=$1`, id).
@@ -599,7 +640,7 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 			&device.Model, &device.Firmware, &device.Timezone,
 			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-			&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
+			&device.AntifraudEnabled, &device.FTPUsername,
 			&device.FTPHome, &device.Enabled, &device.PurgeState,
 			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -820,6 +861,44 @@ type IngestReplayProgress struct {
 	Quarantined uint64 `json:"quarantined"`
 }
 
+type DeviceIngestSummary struct {
+	Replay  IngestReplayProgress
+	Metrics IngestFileMetrics
+}
+
+func (s *Store) DeviceIngestSummaries(
+	ctx context.Context,
+) (map[uuid.UUID]DeviceIngestSummary, error) {
+	rows, err := s.DB.Query(ctx, `SELECT device_id,
+		count(*) FILTER (WHERE replay_state='pending'),
+		count(*) FILTER (WHERE replay_state='processing'),
+		count(*) FILTER (WHERE replay_state='complete'),
+		count(*) FILTER (WHERE replay_state='complete' AND status='quarantined'),
+		count(*) FILTER (WHERE status IN ('archived','processed','quarantined')),
+		COALESCE(sum(size_bytes) FILTER
+			(WHERE status IN ('archived','processed','quarantined')),0),
+		max(received_at) FILTER (WHERE status IN ('archived','processed','quarantined'))
+		FROM ingest_files GROUP BY device_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[uuid.UUID]DeviceIngestSummary)
+	for rows.Next() {
+		var id uuid.UUID
+		var summary DeviceIngestSummary
+		if err = rows.Scan(
+			&id, &summary.Replay.Pending, &summary.Replay.Processing,
+			&summary.Replay.Complete, &summary.Replay.Quarantined,
+			&summary.Metrics.Files, &summary.Metrics.Bytes, &summary.Metrics.LatestAt,
+		); err != nil {
+			return nil, err
+		}
+		result[id] = summary
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) DeviceIngestReplayProgress(
 	ctx context.Context, deviceID uuid.UUID,
 ) (IngestReplayProgress, error) {
@@ -966,8 +1045,7 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 			return Device{}, errors.New("valid syslogSourceIp is required")
 		}
 		input.SyslogSourceIP = syslogSourceIP
-	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled ||
-		(input.AntifraudMode != "" && input.AntifraudMode != "OFF") {
+	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled {
 		return Device{}, errors.New("softswitch template does not support syslog or AntiFraud/RADIUS")
 	}
 	if input.ManagementIP != "" {
@@ -982,7 +1060,6 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		input.Firmware = template.Key
 		input.ManagementIP = ""
 		input.DeviceSign = ""
-		input.AntifraudMode = "OFF"
 	} else if input.Model == "" {
 		input.Model = "SMG-1016M"
 	}
@@ -1002,9 +1079,6 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 	if _, err := time.LoadLocation(input.Timezone); err != nil {
 		return Device{}, fmt.Errorf("invalid IANA timezone %q", input.Timezone)
 	}
-	if input.AntifraudMode == "" {
-		input.AntifraudMode = "OFF"
-	}
 	id := uuid.New()
 	ftpPrefix := "smg_"
 	if template.Category == equipment.CategorySoftswitch {
@@ -1021,26 +1095,32 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		return Device{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text,$2))`,
+		id.String(), customProjectionAdvisorySeed,
+	); err != nil {
+		return Device{}, err
+	}
 	var device Device
 	err = tx.QueryRow(ctx, `INSERT INTO devices
 		(id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,management_ip,syslog_source_ip,device_sign,
-		 antifraud_enabled,antifraud_mode,ftp_username,ftp_home)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$7,1,1,$7,NULLIF($8,'')::inet,NULLIF($9,'')::inet,$10,$11,$12,$13,$14)
+		 antifraud_enabled,ftp_username,ftp_home)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$7,1,1,$7,NULLIF($8,'')::inet,NULLIF($9,'')::inet,$10,$11,$12,$13)
 		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
-		 COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
+		 COALESCE(device_sign,''),antifraud_enabled,ftp_username,ftp_home,
 		 enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
 		 detection_error,detection_checked_at,detection_last_file_at,created_at`,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Model, input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign, input.AntifraudEnabled,
-		input.AntifraudMode, ftpUsername, ftpHome,
+		ftpUsername, ftpHome,
 	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
 		&device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
+		&device.AntifraudEnabled, &device.FTPUsername,
 		&device.FTPHome, &device.Enabled, &device.PurgeState,
 		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -1054,6 +1134,24 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		VALUES($1,'device_create','device',$2,$3,$4)`, actor.ID, id.String(), nullableIP(remoteIP), details)
 	if err != nil {
 		return Device{}, err
+	}
+	projectionState := "disabled"
+	if device.AntifraudEnabled {
+		projectionState = "backfilling"
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO custom_projection_watermarks
+		(device_id,policy_revision,state) VALUES($1,1,$2)`, id, projectionState); err != nil {
+		return Device{}, err
+	}
+	if device.AntifraudEnabled {
+		if _, err := tx.Exec(ctx, `INSERT INTO custom_projection_jobs
+			(device_id,policy_revision,kind) VALUES($1,1,'discover')`, id); err != nil {
+			return Device{}, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO custom_reconciliation_jobs
+			(device_id,policy_revision,kind) VALUES($1,1,'discover')`, id); err != nil {
+			return Device{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Device{}, err
@@ -1103,8 +1201,7 @@ func (s *Store) UpdateDevice(
 			return Device{}, errors.New("valid syslogSourceIp is required")
 		}
 		input.SyslogSourceIP = syslogSourceIP
-	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled ||
-		(input.AntifraudMode != "" && input.AntifraudMode != "OFF") {
+	} else if input.SyslogSourceIP != "" || input.AntifraudEnabled {
 		return Device{}, errors.New("softswitch template does not support syslog or AntiFraud/RADIUS")
 	}
 	if _, err := time.LoadLocation(input.Timezone); err != nil {
@@ -1122,7 +1219,6 @@ func (s *Store) UpdateDevice(
 		input.ManagementIP = ""
 		input.DeviceSign = ""
 		input.AntifraudEnabled = false
-		input.AntifraudMode = "OFF"
 	} else {
 		switch template.Key {
 		case equipment.TemplateEltex3410:
@@ -1131,40 +1227,56 @@ func (s *Store) UpdateDevice(
 			input.Firmware = FirmwareScheme3232
 		}
 	}
-	activateTimezoneImmediately := template.Key == equipment.TemplateSatelRTUCDRV1
+	// Raw Syslog has no timezone-derived projection. CDR reinterpretation is
+	// independent, so the control-plane timezone can become active immediately.
+	activateTimezoneImmediately := true
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return Device{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text,$2))`,
+		id.String(), customProjectionAdvisorySeed,
+	); err != nil {
+		return Device{}, err
+	}
+	var persistedAntifraudEnabled bool
+	if err := tx.QueryRow(ctx, `SELECT antifraud_enabled FROM devices WHERE id=$1 FOR UPDATE`, id).
+		Scan(&persistedAntifraudEnabled); err != nil {
+		return Device{}, err
+	}
 	var device Device
 	err = tx.QueryRow(ctx, `UPDATE devices SET
 		name=$2,source_category=$3,template_key=$4,firmware=$5,
 		timezone_revision=CASE WHEN timezone IS DISTINCT FROM $6 THEN timezone_revision+1
 			ELSE timezone_revision END,
-		active_timezone=CASE WHEN $13 THEN $6 ELSE active_timezone END,
-		active_timezone_revision=CASE WHEN $13 AND timezone IS DISTINCT FROM $6
+		active_timezone=CASE WHEN $12 THEN $6 ELSE active_timezone END,
+		active_timezone_revision=CASE WHEN $12 AND timezone IS DISTINCT FROM $6
 			THEN timezone_revision+1
-			WHEN $13 THEN timezone_revision
+			WHEN $12 THEN timezone_revision
 			ELSE active_timezone_revision END,
 		timezone=$6,cdr_source_timezone=$6,management_ip=NULLIF($7,'')::inet,
-		syslog_source_ip=NULLIF($8,'')::inet,device_sign=$9,antifraud_enabled=$10,antifraud_mode=$11,
-		enabled=$12
+		syslog_source_ip=NULLIF($8,'')::inet,device_sign=$9,
+		antifraud_policy_revision=CASE WHEN antifraud_enabled IS DISTINCT FROM $10
+			THEN antifraud_policy_revision+1 ELSE antifraud_policy_revision END,
+		antifraud_enabled=$10,
+		enabled=$11
 		WHERE id=$1 AND purge_state='active'
 		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 			active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
-			COALESCE(device_sign,''),antifraud_enabled,antifraud_mode,ftp_username,ftp_home,
+			COALESCE(device_sign,''),antifraud_enabled,ftp_username,ftp_home,
 			enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
 			detection_error,detection_checked_at,detection_last_file_at,created_at`,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
-		input.AntifraudEnabled, input.AntifraudMode, input.Enabled, activateTimezoneImmediately,
+		input.AntifraudEnabled, input.Enabled, activateTimezoneImmediately,
 	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
 		&device.Model, &device.Firmware, &device.Timezone,
 		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
 		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-		&device.AntifraudEnabled, &device.AntifraudMode, &device.FTPUsername,
+		&device.AntifraudEnabled, &device.FTPUsername,
 		&device.FTPHome, &device.Enabled, &device.PurgeState,
 		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
 		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
@@ -1185,6 +1297,52 @@ func (s *Store) UpdateDevice(
 		VALUES($1,'device_update','device',$2,$3,$4)`,
 		actor.ID, id.String(), nullableIP(remoteIP), details); err != nil {
 		return Device{}, err
+	}
+	if persistedAntifraudEnabled != device.AntifraudEnabled {
+		var revision uint64
+		if err := tx.QueryRow(ctx,
+			`SELECT antifraud_policy_revision FROM devices WHERE id=$1`, id,
+		).Scan(&revision); err != nil {
+			return Device{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
+			SET status='cancelled',completed_at=now(),lease_expires_at=NULL,
+				worker_id=NULL,updated_at=now()
+			WHERE device_id=$1 AND status IN ('pending','running')`, id); err != nil {
+			return Device{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE custom_reconciliation_jobs
+			SET status='cancelled',completed_at=now(),lease_expires_at=NULL,
+				worker_id=NULL,updated_at=now()
+			WHERE device_id=$1 AND status IN ('pending','running')`, id); err != nil {
+			return Device{}, err
+		}
+		kind, state := "disable", "disabled"
+		if device.AntifraudEnabled {
+			kind, state = "discover", "backfilling"
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO custom_projection_watermarks
+			(device_id,policy_revision,state) VALUES($1,$2,$3)
+			ON CONFLICT (device_id) DO UPDATE SET
+				policy_revision=EXCLUDED.policy_revision,state=EXCLUDED.state,
+				previous_snapshot_id=custom_projection_watermarks.active_snapshot_id,
+				active_snapshot_id=CASE WHEN EXCLUDED.state='disabled' THEN NULL
+					ELSE custom_projection_watermarks.active_snapshot_id END,
+				updated_at=now()`, id, revision, state); err != nil {
+			return Device{}, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO custom_projection_jobs
+			(device_id,policy_revision,kind) VALUES($1,$2,$3)`,
+			id, revision, kind); err != nil {
+			return Device{}, err
+		}
+		if device.AntifraudEnabled {
+			if _, err := tx.Exec(ctx, `INSERT INTO custom_reconciliation_jobs
+				(device_id,policy_revision,kind) VALUES($1,$2,'discover')`,
+				id, revision); err != nil {
+				return Device{}, err
+			}
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Device{}, err

@@ -164,9 +164,9 @@ SMG1016M. CDR. File started at '20260724120100'
 smg;2026-07-24 12:01:00;;;20260724120100-2
 `
 	result, err := (CDRParser{
-		DeviceID:           uuid.New(),
-		FileID:             uuid.New(),
-		Location:           time.UTC,
+		DeviceID: uuid.New(),
+		FileID:   uuid.New(),
+		Location: time.UTC,
 		// Header-driven exports may contain a configured subset of the firmware
 		// profile. Repeated blocks must match the file's active header.
 		ExpectedHeader:     append(strings.Split(header, ";"), "Release cause"),

@@ -42,7 +42,7 @@ func TestExportJobClaimAndLeaseRecovery(t *testing.T) {
 	}
 	create := func() ExportJob {
 		job, createErr := control.CreateExportJob(ctx, NewExportJob{
-			DeviceID: device.ID, Dataset: "events", Category: "all",
+			DeviceID: device.ID, Dataset: "syslog",
 			Format: "csv_zip", Timezone: "UTC", ActiveRevision: 1,
 		}, actor, "127.0.0.1")
 		if createErr != nil {
@@ -133,4 +133,33 @@ func TestExportJobClaimAndLeaseRecovery(t *testing.T) {
 		unavailable.Error != "export worker is unavailable; retry the export" {
 		t.Fatalf("failed queued job = %#v", unavailable)
 	}
+}
+
+func TestClickHouseHeavyLaneSerializesAndCancels(t *testing.T) {
+	databaseURL := os.Getenv("POSTGRES_TEST_URL")
+	if databaseURL == "" {
+		t.Skip("POSTGRES_TEST_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	control, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.DB.Close()
+	release, err := control.AcquireClickHouseHeavyLane(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancelWait := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancelWait()
+	if _, err = control.AcquireClickHouseHeavyLane(waitCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("competing lane error = %v", err)
+	}
+	release()
+	nextRelease, err := control.AcquireClickHouseHeavyLane(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextRelease()
 }

@@ -19,7 +19,7 @@ export function readModelNotice(
   const activeTimezone = diagnostics?.activeRevisionTimezone ||
     device.activeTimezone || device.timezone
   if (diagnostics?.activeRevision === 0 || diagnostics?.revisionReason === 'initial_build') {
-    return 'Инициализация оборудования: создаётся первый согласованный read model для Syslog, CDR, RADIUS и AntiFraud. Приём данных продолжается, таблицы появятся после атомарной активации.'
+    return 'Инициализация оборудования: создаётся первый согласованный read model для Syslog, CDR и Custom AntiFraud. Приём данных продолжается, таблицы появятся после атомарной активации.'
   }
   if (diagnostics?.revisionReason === 'timezone_change' ||
       device.timezone !== activeTimezone) {

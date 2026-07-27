@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"collector/internal/archive"
+	"collector/internal/redact"
 	"collector/internal/store"
 )
 
@@ -45,7 +46,7 @@ func (h *Health) recordFailure(err error) {
 		return
 	}
 	h.consecutiveFailures.Add(1)
-	h.lastError.Store(err.Error())
+	h.lastError.Store(redact.Text(err.Error()))
 }
 
 func (h *Health) Available(maxAge time.Duration) bool {
@@ -183,13 +184,19 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 	slog.Info("async export started", "job", job.ID, "device", job.DeviceID,
 		"dataset", job.Dataset, "queueAge", time.Since(job.CreatedAt))
 	fail := func(failure error) error {
+		safeFailure := errors.New(redact.Text(failure.Error()))
 		_ = w.Store.FinishExportJob(
-			context.WithoutCancel(ctx), job.ID, w.WorkerID, "failed", failure.Error(),
+			context.WithoutCancel(ctx), job.ID, w.WorkerID, "failed", safeFailure.Error(),
 		)
 		slog.Warn("async export failed", "job", job.ID, "device", job.DeviceID,
-			"dataset", job.Dataset, "duration", time.Since(started), "error", failure)
+			"dataset", job.Dataset, "duration", time.Since(started), "error", safeFailure)
 		return failure
 	}
+	releaseHeavy, err := w.Store.AcquireClickHouseHeavyLane(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	defer releaseHeavy()
 	file, err := os.CreateTemp(w.SpoolDir, "collector-export-*.part")
 	if err != nil {
 		return fail(err)
@@ -266,7 +273,9 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 		if errors.Is(renderErr, context.Canceled) {
 			status = "cancelled"
 		}
-		_ = w.Store.FinishExportJob(context.WithoutCancel(ctx), job.ID, w.WorkerID, status, renderErr.Error())
+		_ = w.Store.FinishExportJob(
+			context.WithoutCancel(ctx), job.ID, w.WorkerID, status, redact.Text(renderErr.Error()),
+		)
 		return renderErr
 	}
 	if err = file.Sync(); err != nil {
@@ -290,7 +299,7 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 		if cleanupErr != nil {
 			_ = w.Store.FinishExportJobWithArtifact(
 				context.WithoutCancel(ctx), job.ID, w.WorkerID, "failed",
-				err.Error()+"; artifact cleanup pending: "+cleanupErr.Error(), objectKey,
+				redact.Text(err.Error()+"; artifact cleanup pending: "+cleanupErr.Error()), objectKey,
 			)
 			return err
 		}
@@ -304,11 +313,11 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 		if cleanupErr != nil {
 			_ = w.Store.FinishExportJobWithArtifact(
 				context.WithoutCancel(ctx), job.ID, w.WorkerID, "cancelled",
-				err.Error()+"; artifact cleanup pending: "+cleanupErr.Error(), objectKey,
+				redact.Text(err.Error()+"; artifact cleanup pending: "+cleanupErr.Error()), objectKey,
 			)
 		} else {
 			_ = w.Store.FinishExportJob(
-				context.WithoutCancel(ctx), job.ID, w.WorkerID, "cancelled", err.Error(),
+				context.WithoutCancel(ctx), job.ID, w.WorkerID, "cancelled", redact.Text(err.Error()),
 			)
 		}
 	}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import main from './main.tsx?raw'
 import {
-  defaultSourceDataset, fallbackTemplates, normalizeTemplate, sourceDatasets, templatesFor,
+  defaultSourceDataset, deviceSurfaces, fallbackTemplates, normalizeTemplate, sourceDatasets, templatesFor,
 } from './equipment'
 
 describe('equipment templates', () => {
@@ -25,6 +25,21 @@ describe('equipment templates', () => {
     })
     expect(sourceDatasets(template)).toEqual(['calls'])
     expect(defaultSourceDataset(template)).toBe('calls')
+  })
+
+  it('shows exactly three enabled and two disabled Eltex surfaces', () => {
+    const template = fallbackTemplates[0]
+    expect(deviceSurfaces({ ...template, antifraudEnabled: true }))
+      .toEqual(['calls', 'syslog', 'antifraud'])
+    expect(deviceSurfaces({ ...template, antifraudEnabled: false }))
+      .toEqual(['calls', 'syslog'])
+  })
+
+  it('does not expose legacy Syslog category surfaces', () => {
+    expect(main).not.toContain("id: 'alarms'")
+    expect(main).not.toContain("id: 'radius'")
+    expect(main).not.toContain('category=${')
+    expect(main).toContain("label: 'Сообщения Syslog'")
   })
 
   it('exposes Satel RTU as the only softswitch template', () => {
@@ -62,10 +77,11 @@ describe('equipment templates', () => {
     expect(main).not.toContain('Satel RTU активирован')
   })
 
-  it('removes the softswitch file page but keeps the backend pipeline implicit', () => {
+  it('removes the softswitch file page but keeps ingest-files for CDR admin banner', () => {
     expect(main).not.toContain('function CdrFilesPage')
     expect(main).not.toContain('rawCdrNavigation')
-    expect(main).not.toContain('/ingest-files')
+    expect(main).toContain('/ingest-files?limit=20')
+    expect(main).toContain('CdrIngestBannerLoader')
   })
 
   it('opens Dashboard from the logo without a separate sidebar item', () => {

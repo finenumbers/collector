@@ -17,16 +17,16 @@ import (
 )
 
 const (
-	exportPageSize    = uint64(10000)
-	excelMaximumRows  = 1048576
-	defaultExportName = "export"
+	defaultExportPageSize = uint64(1000)
+	excelMaximumRows      = 1048576
+	defaultExportName     = "export"
 )
 
-var exportEventCategories = map[string]struct{}{
-	"all": {}, "alarms": {}, "call_trace": {}, "sip": {}, "isup": {}, "q931": {},
-	"h323": {}, "rtp": {}, "hardware": {}, "ivr": {}, "ip_network": {},
-	"ip_connections": {}, "ip_modules": {}, "radius": {}, "config_history": {},
-	"auth_log": {}, "system_journal": {}, "unknown": {},
+func (s *Server) exportPageSize() uint64 {
+	if s.Config.ExportPageSize <= 0 {
+		return defaultExportPageSize
+	}
+	return uint64(s.Config.ExportPageSize)
 }
 
 type exportRequest struct {
@@ -42,13 +42,17 @@ func parseExportRequest(values url.Values) (exportRequest, error) {
 		Search:   values.Get("q"),
 	}
 	switch result.Dataset {
-	case "calls", "antifraud":
+	case "calls":
 		if result.Category != "" {
-			return exportRequest{}, fmt.Errorf("category is only valid for the events dataset")
+			return exportRequest{}, fmt.Errorf("category is not supported")
 		}
-	case "events":
-		if _, ok := exportEventCategories[result.Category]; !ok {
-			return exportRequest{}, fmt.Errorf("invalid events category")
+	case "syslog":
+		if result.Category != "" {
+			return exportRequest{}, fmt.Errorf("category is not supported for raw Syslog messages")
+		}
+	case "antifraud":
+		if result.Category != "" {
+			return exportRequest{}, fmt.Errorf("category is not supported")
 		}
 	default:
 		return exportRequest{}, fmt.Errorf("invalid export dataset")

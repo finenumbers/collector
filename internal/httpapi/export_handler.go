@@ -25,9 +25,18 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	if export.Dataset == "events" && export.Category == "all" {
+	if export.Dataset == "syslog" && export.Search == "" {
 		writeError(writer, http.StatusRequestEntityTooLarge,
 			"All Syslog exports must be queued through /export-jobs")
+		return
+	}
+	if export.Dataset == "antifraud" {
+		if !s.Config.CustomProjectionEnabled {
+			writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
+			return
+		}
+		writeError(writer, http.StatusRequestEntityTooLarge,
+			"AntiFraud exports must be queued through /export-jobs")
 		return
 	}
 	deviceID, ok := parseDeviceID(writer, request)
@@ -56,9 +65,7 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 		} else {
 			workbook, err = s.exportEltexCalls(request, deviceID, export.Search, location)
 		}
-	case "antifraud":
-		workbook, err = s.exportAntifraud(request, deviceID, export.Search, location)
-	case "events":
+	case "syslog":
 		workbook, err = s.exportEvents(
 			request, deviceID, export.Category, export.Search, location,
 		)
@@ -95,13 +102,7 @@ func validateExportCapability(writer http.ResponseWriter, dataset string, device
 				"typed CDR calls are not supported by this source template")
 			return false
 		}
-	case "antifraud":
-		if !device.Capabilities.Antifraud || !device.Capabilities.Radius {
-			writeError(writer, http.StatusConflict,
-				"AntiFraud/RADIUS is not supported by this source template")
-			return false
-		}
-	case "events":
+	case "syslog":
 		if !device.Capabilities.Syslog {
 			writeError(writer, http.StatusConflict,
 				"Syslog events are not supported by this source template")
@@ -138,11 +139,11 @@ func (s *Server) exportEltexCalls(
 		if asynchronous {
 			page, err = s.Analytics.ListExportCallsPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
+				search, s.exportPageSize(), cursor, exportJobTimeRange(asyncJob),
 			)
 		} else {
 			page, err = s.Analytics.ListCallsPage(
-				request.Context(), deviceID, search, exportPageSize, cursor,
+				request.Context(), deviceID, search, s.exportPageSize(), cursor,
 			)
 		}
 		if err != nil {
@@ -228,11 +229,11 @@ func (s *Server) exportSatelCalls(
 		if asynchronous {
 			page, err = s.Analytics.ListExportSatelRTUCallsPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
+				search, s.exportPageSize(), cursor, exportJobTimeRange(asyncJob),
 			)
 		} else {
 			page, err = s.Analytics.ListSatelRTUCallsPage(
-				request.Context(), deviceID, search, exportPageSize, cursor,
+				request.Context(), deviceID, search, s.exportPageSize(), cursor,
 			)
 		}
 		if err != nil {
@@ -301,116 +302,21 @@ func (s *Server) exportSatelCalls(
 	}
 }
 
-func (s *Server) exportAntifraud(
-	request *http.Request, deviceID uuid.UUID, search string, location *time.Location,
-) (*exportWorkbook, error) {
-	headers := []any{
-		"Первое событие", "Последнее событие", "Call context", "Acct-Session-Id",
-		"Операция", "Запрос", "Ответ", "Решение", "Причина", "RADIUS server",
-		"Latency, мс", "Повторы", "Calling", "Called", "Номер A вход", "Номер B вход",
-		"Номер A выход", "Номер B выход", "Входящий trunk", "Исходящий trunk",
-		"Accounting", "Q.850", "Полнота", "CDR legs", "Атрибуты", "CDR setup",
-		"CDR Acct-Session-Id", "Метод корреляции", "Confidence", "Delta, мс",
-		"Неоднозначность",
-	}
-	workbook, err := newExportWorkbook(headers, excelMaximumRows)
-	if err != nil {
-		return nil, err
-	}
-	var cursor *analytics.AntifraudCursor
-	asyncJob, progress, asynchronous := asyncExportJob(request.Context())
-	if asynchronous && asyncJob.RawHighWatermark != nil {
-		cursor = &analytics.AntifraudCursor{
-			LastEventAt:   asyncJob.RawHighWatermark.Add(time.Microsecond),
-			TransactionID: maxUUID(),
-		}
-	}
-	for {
-		if err := request.Context().Err(); err != nil {
-			return workbook, err
-		}
-		var page analytics.AntifraudPage
-		if asynchronous {
-			page, err = s.Analytics.ListExportAntifraudPage(
-				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
-			)
-		} else {
-			page, err = s.Analytics.ListAntifraudPage(
-				request.Context(), deviceID, search, exportPageSize, cursor,
-			)
-		}
-		if err != nil {
-			return workbook, fmt.Errorf("query AntiFraud: %w", err)
-		}
-		stop := false
-		for _, row := range page.Items {
-			if asynchronous && exportRowAfterSnapshot(
-				row.LastEventAt, row.TransactionID,
-				asyncJob.RawHighWatermark, asyncJob.RawHighWatermarkID,
-			) {
-				continue
-			}
-			if asynchronous && asyncJob.RangeTo != nil && !row.LastEventAt.Before(*asyncJob.RangeTo) {
-				continue
-			}
-			if asynchronous && asyncJob.RangeFrom != nil && row.LastEventAt.Before(*asyncJob.RangeFrom) {
-				stop = true
-				break
-			}
-			attributes, err := json.Marshal(row.Attributes)
-			if err != nil {
-				return workbook, fmt.Errorf("encode AntiFraud attributes: %w", err)
-			}
-			err = workbook.AddRow(request.Context(), []any{
-				formatTimeInLocation(&row.FirstEventAt, location),
-				formatTimeInLocation(&row.LastEventAt, location), row.CallContext,
-				row.AcctSessionID, row.RequestType, row.RequestCode, row.ResponseCode,
-				row.Decision, row.DecisionReason, row.ServerAddress, row.LatencyMS,
-				row.Retries, row.CallingStationID, row.CalledStationID, row.SrcNumberIn,
-				row.DstNumberIn, row.SrcNumberOut, row.DstNumberOut, row.InTrunkgroupLabel,
-				row.OutTrunkgroupLabel, row.AccountingStatus, row.Q850Cause,
-				row.Completeness, row.LegCount, string(attributes),
-				formatTimeInLocation(row.CDRSetupTime, location), row.CDRSessionID,
-				row.CorrelationMethod, row.CorrelationConfidence,
-				row.CorrelationTimeDeltaMS, row.AmbiguityReason,
-			})
-			if err != nil {
-				return workbook, err
-			}
-		}
-		if asynchronous {
-			if err = progress(int64(workbook.totalRows)); err != nil {
-				return workbook, err
-			}
-		} else if workbook.totalRows > syncExportRowLimit {
-			return workbook, errSyncExportTooLarge
-		}
-		if stop || !page.HasMore || len(page.Items) == 0 {
-			return workbook, nil
-		}
-		last := page.Items[len(page.Items)-1]
-		cursor = &analytics.AntifraudCursor{
-			LastEventAt: last.LastEventAt, TransactionID: last.TransactionID,
-		}
-	}
-}
-
 func (s *Server) exportEvents(
-	request *http.Request, deviceID uuid.UUID, category, search string, location *time.Location,
+	request *http.Request, deviceID uuid.UUID, _ string, search string, location *time.Location,
 ) (*exportWorkbook, error) {
 	headers := []any{
-		"Получено", "Раздел", "Компонент", "Сообщение", "Исходный Syslog",
-		"Статус", "Атрибуты",
+		"Event ID", "Device ID", "Received UTC", "Source IP", "Source port",
+		"Transport", "Payload", "Payload SHA-256",
 	}
 	workbook, err := newExportWorkbook(headers, excelMaximumRows)
 	if err != nil {
 		return nil, err
 	}
-	var cursor *analytics.EventCursor
+	var cursor *analytics.SyslogMessageCursor
 	asyncJob, progress, asynchronous := asyncExportJob(request.Context())
 	if asynchronous && asyncJob.RawHighWatermark != nil {
-		cursor = &analytics.EventCursor{
+		cursor = &analytics.SyslogMessageCursor{
 			ReceivedAt: asyncJob.RawHighWatermark.Add(time.Microsecond), EventID: maxUUID(),
 		}
 	}
@@ -418,17 +324,13 @@ func (s *Server) exportEvents(
 		if err := request.Context().Err(); err != nil {
 			return workbook, err
 		}
-		var page analytics.EventPage
+		timeRange := (*analytics.TimeRange)(nil)
 		if asynchronous {
-			page, err = s.Analytics.ListExportEventsPage(
-				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				category, search, exportPageSize, cursor, exportJobTimeRange(asyncJob),
-			)
-		} else {
-			page, err = s.Analytics.ListEventsPage(
-				request.Context(), deviceID, category, search, exportPageSize, cursor,
-			)
+			timeRange = exportJobTimeRange(asyncJob)
 		}
+		page, err := s.Analytics.ListSyslogMessagesPage(
+			request.Context(), deviceID, search, s.exportPageSize(), cursor, timeRange,
+		)
 		if err != nil {
 			return workbook, fmt.Errorf("query events: %w", err)
 		}
@@ -446,17 +348,9 @@ func (s *Server) exportEvents(
 				stop = true
 				break
 			}
-			attributes, err := json.Marshal(row.Attributes)
-			if err != nil {
-				return workbook, fmt.Errorf("encode event attributes: %w", err)
-			}
-			eventTime := row.EventTime
-			if eventTime == nil {
-				eventTime = &row.ReceivedAt
-			}
 			err = workbook.AddRow(request.Context(), []any{
-				formatTimeInLocation(eventTime, location), row.Category, row.Component,
-				row.Message, row.RawPayload, row.Status, string(attributes),
+				row.EventID, row.DeviceID, formatTimeInLocation(&row.ReceivedAt, time.UTC),
+				row.SourceIP, row.SourcePort, row.Transport, row.Payload, row.PayloadSHA256,
 			})
 			if err != nil {
 				return workbook, err
@@ -473,6 +367,6 @@ func (s *Server) exportEvents(
 			return workbook, nil
 		}
 		last := page.Items[len(page.Items)-1]
-		cursor = &analytics.EventCursor{ReceivedAt: last.ReceivedAt, EventID: last.EventID}
+		cursor = &analytics.SyslogMessageCursor{ReceivedAt: last.ReceivedAt, EventID: last.EventID}
 	}
 }

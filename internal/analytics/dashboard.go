@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"collector/internal/redact"
+	"collector/internal/workload"
+
 	"github.com/google/uuid"
 )
 
@@ -13,8 +16,6 @@ type DashboardDevice struct {
 	Calls               uint64     `json:"calls"`
 	FailedCalls         uint64     `json:"failedCalls"`
 	AverageTalkMS       float64    `json:"averageTalkMs"`
-	Alarms              uint64     `json:"alarms"`
-	Unknown             uint64     `json:"unknown"`
 	Antifraud           uint64     `json:"antifraud"`
 	AntifraudRejected   uint64     `json:"antifraudRejected"`
 	AntifraudIncomplete uint64     `json:"antifraudIncomplete"`
@@ -34,6 +35,12 @@ type DashboardAnalytics struct {
 
 func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardAnalytics {
 	result := DashboardAnalytics{Devices: make(map[uuid.UUID]*DashboardDevice)}
+	ctx, release, err := c.queryContext(ctx, workload.Interactive)
+	if err != nil {
+		result.Diagnostics = append(result.Diagnostics, redact.Text(err.Error()))
+		return result
+	}
+	defer release()
 	seconds := uint64(window / time.Second)
 	device := func(id uuid.UUID) *DashboardDevice {
 		if result.Devices[id] == nil {
@@ -100,31 +107,8 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		}
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT i.device_id,countIf(i.category='alarms'),
-		countIf(i.category='unknown')
-		FROM collector.syslog_interpretations AS i FINAL
-		INNER JOIN collector.raw_syslog AS r
-			ON r.device_id=i.device_id AND r.event_id=i.event_id
-		WHERE i.parser_version=? AND r.received_at>=now()-toIntervalSecond(?)
-		GROUP BY i.device_id`, SyslogParserVersion, seconds)
-	if err != nil {
-		result.Diagnostics = append(result.Diagnostics, "syslog: "+err.Error())
-	} else {
-		for rows.Next() {
-			var id uuid.UUID
-			var alarms, unknown uint64
-			if scanErr := rows.Scan(&id, &alarms, &unknown); scanErr != nil {
-				result.Diagnostics = append(result.Diagnostics, "syslog: "+scanErr.Error())
-				break
-			}
-			target := device(id)
-			target.Alarms, target.Unknown = alarms, unknown
-		}
-		_ = rows.Close()
-	}
-
 	rows, err = c.Conn.Query(ctx, `SELECT device_id,max(received_at)
-		FROM collector.raw_syslog
+		FROM collector.syslog_messages FINAL
 		WHERE received_at>=now()-toIntervalSecond(?)
 		GROUP BY device_id`, seconds)
 	if err != nil {
@@ -144,60 +128,31 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		_ = rows.Close()
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT l.device_id,count(),
-		countIf(l.decision IN ('reject','verification_reject')),
-		countIf(l.completeness!='complete')
-		FROM collector.antifraud_lifecycles AS l FINAL
-		INNER JOIN (
-			SELECT device_id,maxIf(revision,status='active') AS revision
-			FROM collector.device_derived_revisions FINAL GROUP BY device_id
-		) AS d ON d.device_id=l.device_id AND d.revision=l.timezone_revision
-		WHERE l.is_antifraud=1 AND l.last_event_at>=now()-toIntervalSecond(?)
-		GROUP BY l.device_id`, seconds)
+	rows, err = c.Conn.Query(ctx, `SELECT device_id,count(),countIf(status='blocked'),
+		countIf(status IN ('unavailable_fallback','ambiguous_indeterminate','pending','open'))
+		FROM collector.custom_antifraud_calls_current
+		WHERE first_seen_at>=now()-toIntervalSecond(?)
+		GROUP BY device_id`, seconds)
 	if err != nil {
-		result.Diagnostics = append(result.Diagnostics, "antifraud: "+err.Error())
+		result.Diagnostics = append(result.Diagnostics, "custom antifraud calls: "+err.Error())
 	} else {
 		for rows.Next() {
 			var id uuid.UUID
 			var total, rejected, incomplete uint64
 			if scanErr := rows.Scan(&id, &total, &rejected, &incomplete); scanErr != nil {
-				result.Diagnostics = append(result.Diagnostics, "antifraud: "+scanErr.Error())
+				result.Diagnostics = append(
+					result.Diagnostics, "custom antifraud calls: "+scanErr.Error(),
+				)
 				break
 			}
 			target := device(id)
-			target.Antifraud, target.AntifraudRejected, target.AntifraudIncomplete =
-				total, rejected, incomplete
+			target.Antifraud = total
+			target.AntifraudRejected = rejected
+			target.AntifraudIncomplete = incomplete
 		}
 		_ = rows.Close()
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT device_id,
-		maxIf(revision,status='active'),maxIf(revision,status IN ('building','cutover','ready')),
-		argMax(status,updated_at),
-		argMaxIf(timezone,updated_at,status='active'),
-		argMaxIf(reason,updated_at,status IN ('building','cutover','ready'))
-		FROM collector.device_derived_revisions FINAL GROUP BY device_id`)
-	if err != nil {
-		result.Diagnostics = append(result.Diagnostics, "revisions: "+err.Error())
-	} else {
-		for rows.Next() {
-			var id uuid.UUID
-			var active, building uint64
-			var status string
-			var activeTimezone, reason string
-			if scanErr := rows.Scan(
-				&id, &active, &building, &status, &activeTimezone, &reason,
-			); scanErr != nil {
-				result.Diagnostics = append(result.Diagnostics, "revisions: "+scanErr.Error())
-				break
-			}
-			target := device(id)
-			target.ActiveRevision, target.BuildingRevision, target.RevisionStatus =
-				active, building, status
-			target.ActiveTimezone, target.RevisionReason = activeTimezone, reason
-		}
-		_ = rows.Close()
-	}
 	if result.Diagnostics == nil {
 		result.Diagnostics = []string{}
 	}

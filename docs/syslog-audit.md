@@ -15,16 +15,20 @@
 
 ## Проверенные входные файлы 2026-07-26
 
+Исторический аудит. Имена файлов отражают legacy UI labels («Все Syslog» /
+«Нераспознанное»), которые больше не являются продуктовыми вкладками; текущий
+контракт — immutable `syslog_messages` и Custom AntiFraud coverage.
+
 Файлы проверены по внутренней XLSX schema, каждой строке и SHA-256:
 
-- `Eltex SMG-1016M 3.23.2 (Все Syslog).xlsx`:
+- `Eltex SMG-1016M 3.23.2 (Все Syslog).xlsx` (historical filename):
   SHA-256 `016bd2dd7f7d15f594d1cf236daf6c74d4e0eb048c8ffc3cbc3c3df032b11091`,
   5 152 data rows. Фактически это Eltex CDR export: 12 колонок от
   `Установка` до `UniqueTag`, без raw Syslog.
-- `Eltex SMG-1016M 3.410 (Все Syslog).xlsx`:
+- `Eltex SMG-1016M 3.410 (Все Syslog).xlsx` (historical filename):
   SHA-256 `f868dac79d793811ff9704b5fc2205a69480030ef0a9e263bdae76035e0180cf`,
   376 data rows. Фактически это Eltex CDR export той же schema.
-- `Eltex SMG-1016M 3.410 (Нераспознанное).xlsx`:
+- `Eltex SMG-1016M 3.410 (Нераспознанное).xlsx` (historical filename):
   SHA-256 `b246a5375ba2f54075d53cbcbdb13483a245cb6415a70c991c08a8b6531d1b82`,
   27 data rows. Все строки имеют message `b=AS:82`, category `unknown`,
   component пустой и корректно разобранный Eltex trace envelope.
@@ -66,10 +70,10 @@ MGCP и H.248 не добавляются предположительно: их
 
 ## Обязательная повторная проверка после deployment
 
-1. Выгрузить `Все Syslog` и `Нераспознанное` для обоих template key.
+Исторический checklist периода legacy parser UI. Для текущего Custom rebuild:
+
+1. Выгрузить dataset `syslog` (`syslog_messages`) для обоих template key.
 2. Проверить export metadata, schema, row count и отсутствие ограничения 50 000.
-3. Построить распределение envelope/component/category/parse status.
-4. Для каждого `unknown` сохранить соседние datagram и временные интервалы.
-5. Обезличить по одному полному burst каждого уникального семейства и добавить
-   в golden fixtures.
-6. Сравнить старую и новую parser version до переключения read model.
+3. При включённом `antifraudEnabled` сверить coverage states и operational diagnostics.
+4. Обезличить representative bursts и сохранить как projection fixtures.
+5. Перед upgrade выполнить `migration-preflight` и не продолжать без `copyVerified`.

@@ -1,11 +1,8 @@
 export type ExportNavigationDataset =
-  'calls' | 'syslog_all' | 'antifraud' | 'alarms' | 'call_trace' | 'sip' | 'isup' |
-  'q931' | 'h323' | 'rtp' | 'hardware' | 'ivr' | 'ip_network' | 'ip_connections' |
-  'ip_modules' | 'radius' | 'config_history' | 'auth_log' | 'system_journal' | 'unknown'
+  'calls' | 'syslog' | 'syslog_all' | 'antifraud'
 
 export type ExportTarget = {
-  dataset: 'calls' | 'antifraud' | 'events'
-  category?: string
+  dataset: 'calls' | 'syslog' | 'antifraud'
 }
 
 export type ExportJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'expired'
@@ -41,10 +38,7 @@ export type CreateExportJobRequest = ExportTarget & {
 
 export function exportTarget(dataset: ExportNavigationDataset): ExportTarget {
   if (dataset === 'calls' || dataset === 'antifraud') return { dataset }
-  return {
-    dataset: 'events',
-    category: dataset === 'syslog_all' ? 'all' : dataset,
-  }
+  return { dataset: 'syslog' }
 }
 
 export function createExportRequest(
@@ -205,6 +199,5 @@ export function exportURL(
 ): string {
   const target = exportTarget(navigationDataset)
   const parameters = new URLSearchParams({ dataset: target.dataset, q: query })
-  if (target.category) parameters.set('category', target.category)
   return `/api/devices/${deviceID}/export.xlsx?${parameters.toString()}`
 }

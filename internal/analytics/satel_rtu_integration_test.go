@@ -23,7 +23,9 @@ func TestSatelRTUInsertListStatsAndIdempotency(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := client.Migrate(ctx, "../../migrations/clickhouse"); err != nil {
+	if err := client.Migrate(ctx, "../../migrations/clickhouse", MigrationOptions{
+		LegacyParserJobsChecked: true,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	deviceID, fileID := uuid.New(), uuid.New()
@@ -71,13 +73,13 @@ func TestSatelRTUInsertListStatsAndIdempotency(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("idempotent insert produced %d FINAL rows", count)
 	}
-	if err := client.writeDeviceRevisionJob(ctx, DeviceRevisionJob{
-		DeviceID: deviceID, Revision: 1, Timezone: "Europe/Moscow",
-		Status: "active", UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
+	selectedDay := &TimeRange{
+		From: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		To:   time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC),
 	}
-	page, err := client.ListSatelRTUCallsPage(ctx, deviceID, "searchable", 10, nil)
+	page, err := client.ListSatelRTUCallsPageRange(
+		ctx, deviceID, "searchable", 10, nil, selectedDay,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,10 +88,6 @@ func TestSatelRTUInsertListStatsAndIdempotency(t *testing.T) {
 		page.Items[0].LNPServer != "lnp.synthetic.invalid" ||
 		page.Items[0].RouteRetries == nil || *page.Items[0].RouteRetries != 2 {
 		t.Fatalf("unexpected Satel page: %+v", page)
-	}
-	selectedDay := &TimeRange{
-		From: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
-		To:   time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC),
 	}
 	datedPage, err := client.ListSatelRTUCallsPageRange(
 		ctx, deviceID, "searchable", 10, nil, selectedDay,

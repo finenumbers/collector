@@ -152,13 +152,21 @@ services:
       SFTPGO_URL: http://sftpgo:8080
       SFTPGO_ADMIN: collector
       SFTPGO_ADMIN_PASSWORD: ${SFTPGO_ADMIN_PASSWORD}
-      SYSLOG_CONSTRUCTS_ENABLED: ${SYSLOG_CONSTRUCTS_ENABLED:-false}
-      SYSLOG_REPLAY_PAUSED: ${SYSLOG_REPLAY_PAUSED:-false}
-      SYSLOG_REPLAY_BATCH_SIZE: ${SYSLOG_REPLAY_BATCH_SIZE:-250}
-      SYSLOG_REPLAY_SLEEP: ${SYSLOG_REPLAY_SLEEP:-500ms}
-      SYSLOG_REPLAY_MAX_THREADS: ${SYSLOG_REPLAY_MAX_THREADS:-1}
-      SYSLOG_REPLAY_MAX_MEMORY_BYTES: ${SYSLOG_REPLAY_MAX_MEMORY_BYTES:-268435456}
       SECURE_COOKIES: ${SECURE_COOKIES:-true}
+      CUSTOM_PROJECTION_ENABLED: ${CUSTOM_PROJECTION_ENABLED:-true}
+      CUSTOM_PROJECTION_BATCH_SIZE: ${CUSTOM_PROJECTION_BATCH_SIZE:-128}
+      CUSTOM_PROJECTION_MAX_EVENTS: ${CUSTOM_PROJECTION_MAX_EVENTS:-20000}
+      CUSTOM_PROJECTION_THREADS: ${CUSTOM_PROJECTION_THREADS:-1}
+      CUSTOM_PROJECTION_MAX_MEMORY_BYTES: ${CUSTOM_PROJECTION_MAX_MEMORY_BYTES:-134217728}
+      CUSTOM_PROJECTION_SLEEP: ${CUSTOM_PROJECTION_SLEEP:-1s}
+      CUSTOM_PAIRING_HORIZON: ${CUSTOM_PAIRING_HORIZON:-5m}
+      CUSTOM_RETRY_HORIZON: ${CUSTOM_RETRY_HORIZON:-168h}
+      CLICKHOUSE_ADMISSION_CAPACITY: ${CLICKHOUSE_ADMISSION_CAPACITY:-8}
+      EXPORT_PAGE_SIZE: ${EXPORT_PAGE_SIZE:-1000}
+      CDR_COVERAGE_EXPECTED_GRACE: ${CDR_COVERAGE_EXPECTED_GRACE:-5m}
+      CDR_COVERAGE_LATE_THRESHOLD: ${CDR_COVERAGE_LATE_THRESHOLD:-5m}
+      CDR_COVERAGE_MISSING_TERMINAL: ${CDR_COVERAGE_MISSING_TERMINAL:-30m}
+      CDR_COVERAGE_RETRY_HORIZON: ${CDR_COVERAGE_RETRY_HORIZON:-168h}
       TZ: ${TZ:-UTC}
     volumes:
       - cdr_data:/data/cdr
@@ -173,7 +181,65 @@ services:
       proxy:
         aliases:
           - smg-collector
+    deploy:
+      resources:
+        limits:
+          cpus: "${COLLECTOR_CPUS:-4}"
+          memory: ${COLLECTOR_MEMORY:-4G}
     restart: unless-stopped
+
+  # Split-role deployment: start with
+  # docker compose --profile split up --scale collector=0
+  # so the all-in-one service cannot duplicate listeners or workers.
+  collector-api-ingest:
+    extends:
+      service: collector
+    profiles: ["split"]
+    environment:
+      COLLECTOR_ROLE: api-ingest
+      CLICKHOUSE_USER: ${CLICKHOUSE_API_USER:-collector}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_API_PASSWORD:-${CLICKHOUSE_PASSWORD}}
+    deploy:
+      resources:
+        limits:
+          cpus: "${COLLECTOR_API_CPUS:-2}"
+          memory: ${COLLECTOR_API_MEMORY:-2G}
+
+  collector-export:
+    extends:
+      service: collector
+    profiles: ["split"]
+    depends_on:
+      collector-api-ingest: { condition: service_healthy }
+    environment:
+      COLLECTOR_ROLE: export
+      CLICKHOUSE_USER: ${CLICKHOUSE_EXPORT_USER:-collector}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_EXPORT_PASSWORD:-${CLICKHOUSE_PASSWORD}}
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          cpus: "${COLLECTOR_EXPORT_CPUS:-2}"
+          memory: ${COLLECTOR_EXPORT_MEMORY:-2G}
+
+  collector-maintenance:
+    extends:
+      service: collector
+    profiles: ["split"]
+    depends_on:
+      collector-api-ingest: { condition: service_healthy }
+    environment:
+      COLLECTOR_ROLE: maintenance
+      CLICKHOUSE_USER: ${CLICKHOUSE_MAINTENANCE_USER:-collector}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_MAINTENANCE_PASSWORD:-${CLICKHOUSE_PASSWORD}}
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          cpus: "${COLLECTOR_MAINTENANCE_CPUS:-2}"
+          memory: ${COLLECTOR_MAINTENANCE_MEMORY:-2G}
 
 volumes:
   postgres_data:

@@ -13,33 +13,24 @@ type retentionTable struct {
 
 var retentionTables = map[string][]retentionTable{
 	"syslog": {
-		{name: "raw_syslog", timeExpr: "received_at"},
-		{name: "syslog_interpretations", timeExpr: "interpreted_at"},
-		{name: "syslog_facts", timeExpr: "received_at"},
-		{name: "syslog_fragment_links", timeExpr: "linked_at"},
-		{name: "syslog_constructs", timeExpr: "started_at"},
-		{name: "syslog_construct_members", timeExpr: "linked_at"},
-		{name: "syslog_hourly", timeExpr: "hour"},
+		{name: "syslog_messages", timeExpr: "received_at"},
+		{name: "custom_radius_packets", timeExpr: "first_seen_at"},
+		{name: "custom_radius_packet_members", timeExpr: "received_at"},
+		{name: "custom_radius_exchanges", timeExpr: "occurred_at"},
+		{name: "custom_antifraud_calls", timeExpr: "first_seen_at"},
+		{name: "custom_antifraud_call_packets", timeExpr: "occurred_at"},
+		{name: "custom_radius_session_events", timeExpr: "received_at"},
 	},
 	"cdr": {
 		{name: "cdr_records", timeExpr: "coalesce(setup_time, ingested_at)"},
 		{name: "cdr_time_interpretations", timeExpr: "interpreted_at"},
 		{name: "cdr_time_facts", timeExpr: "interpreted_at"},
+		{name: "cdr_antifraud_coverage", timeExpr: "expected_at"},
+		{name: "cdr_antifraud_assignments", timeExpr: "assigned_at"},
 	},
 	"softswitch_cdr": {
 		{name: "satel_rtu_cdr", timeExpr: "coalesce(setup_time, cdr_date, ingested_at)"},
 		{name: "satel_rtu_cdr_time_facts", timeExpr: "interpreted_at"},
-	},
-	"derived": {
-		{name: "radius_events", timeExpr: "occurred_at"},
-		{name: "antifraud_transactions", timeExpr: "first_event_at"},
-		{name: "call_event_links", timeExpr: "linked_at"},
-		{name: "call_correlation_candidates", timeExpr: "created_at"},
-		{name: "antifraud_call_links", timeExpr: "linked_at"},
-		{name: "correlation_runs", timeExpr: "ran_at"},
-		{name: "radius_fragments", timeExpr: "occurred_at"},
-		{name: "antifraud_lifecycles", timeExpr: "first_event_at"},
-		{name: "call_assignments", timeExpr: "updated_at"},
 	},
 }
 

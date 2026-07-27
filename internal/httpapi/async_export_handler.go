@@ -24,6 +24,7 @@ type createExportInput struct {
 	From     string `json:"from"`
 	To       string `json:"to"`
 	Format   string `json:"format"`
+	AllTime  bool   `json:"allTime"`
 }
 
 type exportJobResponse struct {
@@ -70,6 +71,10 @@ func parseExportDate(value string, location *time.Location, endExclusive bool) (
 
 func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Request) {
 	session := currentSession(request)
+	if !s.allowCostlyRequest(session.User.ID) {
+		writeError(writer, http.StatusTooManyRequests, "export request rate limit exceeded")
+		return
+	}
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
@@ -95,19 +100,35 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "format must be auto, xlsx, or csv_zip")
 		return
 	}
+	if validated.Dataset == "antifraud" && input.Format != "csv_zip" {
+		writeError(writer, http.StatusBadRequest, "AntiFraud export format must be csv_zip")
+		return
+	}
+	if validated.Dataset == "antifraud" && !s.Config.CustomProjectionEnabled {
+		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
+		return
+	}
 	device, ok := s.deviceWithCapability(writer, request, deviceID,
 		func(device store.Device) bool {
 			switch validated.Dataset {
 			case "calls":
 				return device.Capabilities.TypedCDR
 			case "antifraud":
-				return device.Capabilities.Antifraud && device.Capabilities.Radius
+				return device.Capabilities.Syslog && device.Capabilities.Antifraud &&
+					device.Capabilities.Radius && device.AntifraudEnabled
 			default:
 				return device.Capabilities.Syslog
 			}
 		}, "requested export dataset")
 	if !ok {
 		return
+	}
+	if validated.Dataset == "antifraud" {
+		ready, readyErr := s.Store.CustomAntifraudReady(request.Context(), deviceID)
+		if readyErr != nil || !ready {
+			writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud projection is rebuilding")
+			return
+		}
 	}
 	location, err := time.LoadLocation(device.ActiveTimezone)
 	if err != nil {
@@ -128,6 +149,27 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "from must not be after to")
 		return
 	}
+	if len(validated.Search) > 256 {
+		writeError(writer, http.StatusBadRequest, "search must not exceed 256 characters")
+		return
+	}
+	if validated.Search != "" && (rangeFrom == nil || rangeTo == nil) {
+		if !input.AllTime || session.User.Role != "admin" {
+			writeError(writer, http.StatusBadRequest,
+				"search requires from/to dates; administrators may request explicit allTime async exports")
+			return
+		}
+	}
+	if input.AllTime && (validated.Search == "" || session.User.Role != "admin") {
+		writeError(writer, http.StatusBadRequest,
+			"allTime is only valid for administrator search exports")
+		return
+	}
+	if validated.Search != "" && rangeFrom != nil && rangeTo != nil &&
+		rangeTo.Sub(*rangeFrom) > 31*24*time.Hour {
+		writeError(writer, http.StatusBadRequest, "search export date range must not exceed 31 days")
+		return
+	}
 	if s.Analytics == nil {
 		writeError(writer, http.StatusServiceUnavailable, "analytics unavailable")
 		return
@@ -138,10 +180,14 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	snapshot, err := s.Analytics.PinExportSnapshot(
-		request.Context(), deviceID, validated.Dataset, device.TemplateKey,
+		request.Context(), deviceID, uint64(device.ActiveTimezoneRevision),
+		validated.Dataset, device.TemplateKey, device.ActiveTimezone,
 		validated.Category, validated.Search, rangeFrom, rangeTo,
 	)
 	if err != nil {
+		if writeAdmissionError(writer, err) {
+			return
+		}
 		writeError(writer, http.StatusInternalServerError, "unable to pin export snapshot")
 		return
 	}

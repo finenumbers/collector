@@ -1,16 +1,22 @@
 # Развёртывание и эксплуатация
 
-## Retention and optional constructs
+Workload admission, split-role ownership, secret redaction, bounded
+responses/searches, diagnostics, and the staging load SLO are defined in the
+[security and performance operating contract](security-performance.md).
 
-`SYSLOG_CONSTRUCTS_ENABLED` defaults to `false`. While disabled, raw Syslog,
-parser interpretations/facts, lifecycle processing, and correlation continue
-normally, but construct assembly and construct-table inserts are skipped. The
-construct list/detail API returns a JSON `feature_disabled` 404 response.
+## Raw Syslog migration and retention
+
+Before upgrading an existing installation, follow the fail-closed
+[raw Syslog migration runbook](syslog-storage-migration.md). The JSON preflight
+copies and verifies `raw_syslog` before startup is allowed to remove any legacy
+Syslog-derived object.
 
 Administrators manage retention through `GET /api/system/retention` and
-`PATCH /api/system/retention`. The five independent policy classes are
-`syslog`, `cdr` (equipment), `softswitch_cdr`, `derived`, and
-`raw_cdr_archive`; each accepts 7–1095 days and defaults to 1095.
+`PATCH /api/system/retention`. The four independent policy classes are
+`syslog`, `cdr` (equipment), `softswitch_cdr`, and `raw_cdr_archive`; each
+accepts 7–1095 days and defaults to 1095.
+`syslog` controls only `collector.syslog_messages`; the removed `derived`
+policy is deleted during migration.
 `softswitch_cdr` currently controls both Satel RTU ClickHouse tables and is the
 contract for future typed softswitch parsers. Every valid change is effective
 immediately, and the PATCH waits for the advisory-locked reconciliation
@@ -106,25 +112,18 @@ Health endpoints:
 - `/health/ready` — PostgreSQL и ClickHouse.
 - `http://127.0.0.1:18081` на Docker-хосте — source-preserving ingress.
 
-В административной строке «Диагностика Syslog» отдельно показываются ingress
-accepted/handoff/spool, app accepted/rejected, classified/raw coverage, active/building
-timezone revision, Syslog/CDR replay counts, missing CDR time facts, lifecycle coverage
-и инвариант `exact + composite + ambiguous + orphan = total`. Также показываются
-read/ingest revision, newest raw/fact/lifecycle/assignment и возраст dirty queue.
-Durable integer cursor
-продолжает rebuild после рестарта. Обязательные алерты: container restart,
+Административная панель «Диагностика» (lazy `GET /api/system/diagnostics`) показывает
+очередь Custom projection (depth/lag/failed/backfill), coverage states и SLO,
+orphans/ambiguity, очередь reconciliation и export queued/running/oldest. Legacy
+category breakdown и lifecycle counters удалены. Обязательные алерты: container restart,
 оба local spool depth/size (`ingress.db`, `syslog.db`), handoff errors, NATS lag/storage,
-unknown source Syslog, unknown parser rate, persistent reprocess backlog, AntiFraud
-orphan/incomplete rate, CDR ingest age, disk >75/85%, ClickHouse insert errors,
-SFTPGo unavailable, backup age.
+projection lag >5 мин, coverage late+missing >1% после grace, CDR ingest age,
+disk >75/85%, ClickHouse insert errors, SFTPGo unavailable, backup age.
 
-IANA timezone выбирается из выпадающего списка в настройках конкретного SMG и одинаково
-применяется к CDR и Syslog wall clock этого устройства. Сохранение создаёт новую shadow revision и не
-удаляет текущие строки. UI продолжает использовать active revision, пока background
-rebuild пакетно пересобирает facts/lifecycle. Cutover фиксирует конечный watermark и не
-требует остановки Syslog. Контролируйте replay counts, revision alignment, ClickHouse
-read rows/CPU и correlation coverage
-`exact/composite/ambiguous/orphan`.
+IANA timezone выбирается из выпадающего списка в настройках конкретного SMG и применяется
+к CDR wall clock этого устройства. Сырой Syslog остаётся в `syslog_messages` с
+`received_at`; Custom AntiFraud и coverage пересобираются фоновыми bucket jobs без
+остановки приёма. Контролируйте projection lag, coverage SLO и ClickHouse read rows/CPU.
 
 ## Инциденты
 
@@ -133,22 +132,15 @@ read rows/CPU и correlation coverage
 - Основной Collector недоступен: `collector-ingress` продолжает принимать UDP в `ingress.db`; после восстановления handoff автоматически воспроизводит очередь с исходными IP/port.
 - Ingress не стартует с `address already in use`: освободите `${SYSLOG_PORT:-514}/udp` на Docker-хосте; не возвращайте bridge port mapping.
 - ClickHouse недоступен: JetStream удерживает Syslog; CDR-файл остаётся в volume и raw archive/ledger.
-- Unknown растёт после firmware upgrade: не удаляйте raw, зафиксируйте firmware и добавьте golden fixtures/versioned parser.
-- После bump `SyslogParserVersion` (например `eltex-smg-syslog-v15`): дождитесь лога
-  `historical Syslog reprocess completed` с новой `parser_version`; в UI diagnostics
-  `parserVersion` должен совпасть; «Нераспознанное» по корпусам 3.410 (bare SDP и
-  ISUP dotted-hex / `[No optional params]`) и 3.23.2 должно опустеть; `CONFIG:` без
-  timestamp — `parsed`/`config_history`; `SIPT Proc. … ISUP/SS7` остаётся в `sip`;
-  списки Syslog группируются по `call_context`.
+- Upgrade с legacy Syslog storage: остановите app container и выполните
+  `migration-preflight` до cleanup; не продолжайте при `copyVerified=false`.
 
-### Canary CDR ↔ AntiFraud
+### Canary CDR ↔ Custom AntiFraud
 
-1. Сначала оставьте активным одно SMG и дождитесь `correlationStatus=ready` в diagnostics.
-2. Для active revision проверьте, что pending buckets исчезают, а
-   `exact + composite + ambiguous + orphan = total`.
-3. Проверьте реальные пары в обе стороны по `acct_session_id_normalized`; несколько
-   AntiFraud lifecycle могут корректно ссылаться на один CDR.
-4. Во время historical replay контролируйте возраст oldest pending bucket и CPU:
-   replay не должен останавливать correlation, а live budget остаётся ограниченным.
-5. Только после успешного canary включайте остальные SMG; рост
-   `correlationAssignmentLag` или `no_candidate_meets_policy` является причиной остановки.
+1. Оставьте активным одно SMG с `antifraudEnabled=true` и дождитесь drain очереди projection.
+2. В diagnostics проверьте `coverageSloMet` / `projectionSloMet` и отсутствие роста orphans/ambiguity.
+3. Проверьте реальные пары по normalized `Acct-Session-Id`; разные session ID — разные вызовы.
+4. Во время replay контролируйте oldest projection/reconciliation age и CPU: live budget
+   не должен голодать.
+5. Только после успешного canary включайте остальные SMG; рост lag или доли
+   `late`/`missing`/`ambiguous` — причина остановки.

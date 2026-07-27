@@ -1,0 +1,26 @@
+{
+  "packets": [
+    {
+      "is_antifraud": true,
+      "family": "indication",
+      "radius_type": "access-request",
+      "phase": "unknown",
+      "decision": "info_only",
+      "confidence": "high",
+      "status": "paired",
+      "session": "golden"
+    },
+    {
+      "is_antifraud": true,
+      "family": "indication",
+      "radius_type": "access-accept",
+      "phase": "unknown",
+      "decision": "info_only",
+      "confidence": "high",
+      "status": "paired",
+      "session": "golden"
+    }
+  ],
+  "call_status": "pending",
+  "indicators": ["number"]
+}

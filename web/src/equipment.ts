@@ -1,5 +1,6 @@
 export type SourceCategory = 'equipment' | 'softswitch'
 export type SourceDataset = 'calls'
+export type DeviceSurface = 'calls' | 'syslog' | 'antifraud'
 
 export type SourceCapabilities = {
   syslog: boolean
@@ -86,4 +87,18 @@ export function defaultSourceDataset(value: {
   templateKey?: string
 }): SourceDataset {
   return sourceDatasets(value)[0] || 'calls'
+}
+
+export function deviceSurfaces(value: {
+  capabilities?: SourceCapabilities
+  templateKey?: string
+  antifraudEnabled?: boolean
+}): DeviceSurface[] {
+  const capabilities = sourceCapabilities(value)
+  const result: DeviceSurface[] = []
+  if (capabilities.typedCdr) result.push('calls')
+  if (capabilities.syslog) result.push('syslog')
+  if (capabilities.syslog && capabilities.antifraud && capabilities.radius &&
+    value.antifraudEnabled) result.push('antifraud')
+  return result
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"collector/internal/equipment"
+	"collector/internal/workload"
 
 	"github.com/google/uuid"
 )
@@ -29,32 +30,26 @@ const (
 // by a queued export. Estimates are deliberately capped by the caller's later
 // format decision; they are not used as correctness boundaries.
 func (c *Client) PinExportSnapshot(
-	ctx context.Context, deviceID uuid.UUID, dataset, template string,
+	ctx context.Context, deviceID uuid.UUID, revision uint64, dataset, template, timezone string,
 	category, search string, rangeFrom, rangeTo *time.Time,
 ) (ExportSnapshot, error) {
-	revision, err := c.ActiveDeviceRevision(ctx, deviceID)
+	ctx, release, err := c.queryContext(ctx, workload.Export)
 	if err != nil {
 		return ExportSnapshot{}, err
 	}
-	result := ExportSnapshot{Revision: revision, ParserVersion: SyslogParserVersion}
-	timezone, err := c.deviceRevisionTimezone(ctx, deviceID, revision)
-	if err != nil {
-		return ExportSnapshot{}, err
+	defer release()
+	result := ExportSnapshot{Revision: revision}
+	if timezone == "" {
+		timezone = "UTC"
 	}
 	high, id := time.Unix(0, 0).UTC(), uuid.Nil
 	snapshotCtx, cancelSnapshot := context.WithTimeout(ctx, exportSnapshotTimeout)
 	defer cancelSnapshot()
 	switch dataset {
-	case "events":
+	case "syslog":
 		err = c.Conn.QueryRow(snapshotCtx, `SELECT received_at,event_id
-			FROM collector.raw_syslog WHERE device_id=?
+			FROM collector.syslog_messages FINAL WHERE device_id=?
 			ORDER BY received_at DESC,event_id DESC LIMIT 1`, deviceID).Scan(&high, &id)
-	case "antifraud":
-		err = c.Conn.QueryRow(snapshotCtx, `SELECT last_event_at,transaction_id
-			FROM collector.antifraud_lifecycles FINAL
-			WHERE device_id=? AND timezone_revision=? AND is_antifraud=1
-			ORDER BY last_event_at DESC,transaction_id DESC LIMIT 1`,
-			deviceID, revision).Scan(&high, &id)
 	case "calls":
 		result.ParserVersion = template
 		if template == equipment.TemplateSatelRTUCDRV1 {
@@ -80,6 +75,10 @@ func (c *Client) PinExportSnapshot(
 				ORDER BY sort_time DESC,record_id DESC LIMIT 1`,
 				timezone, deviceID).Scan(&high, &id)
 		}
+	case "antifraud":
+		err = c.Conn.QueryRow(snapshotCtx, `SELECT first_seen_at,call_id
+			FROM collector.custom_antifraud_calls_current WHERE device_id=?
+			ORDER BY first_seen_at DESC,call_id DESC LIMIT 1`, deviceID).Scan(&high, &id)
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return ExportSnapshot{}, err
@@ -97,21 +96,16 @@ func (c *Client) estimateExportRows(
 	category, search, timezone string, rangeFrom, rangeTo *time.Time,
 	high time.Time, highID uuid.UUID,
 ) *int64 {
-	// Search and derived category predicates cannot be estimated cheaply.
-	if search != "" || (dataset == "events" && category != "" && category != "all") {
+	if search != "" {
 		return nil
 	}
 	var source, sortColumn, idColumn string
 	args := []any{}
 	switch dataset {
-	case "events":
-		source, sortColumn, idColumn = "collector.raw_syslog", "received_at", "event_id"
+	case "syslog":
+		source, sortColumn, idColumn = "collector.syslog_messages FINAL", "received_at", "event_id"
 		args = append(args, deviceID)
 		source += " WHERE device_id=?"
-	case "antifraud":
-		source, sortColumn, idColumn = "collector.antifraud_lifecycles FINAL", "last_event_at", "transaction_id"
-		args = append(args, deviceID, revision)
-		source += " WHERE device_id=? AND timezone_revision=? AND is_antifraud=1"
 	case "calls":
 		idColumn = "record_id"
 		if template == equipment.TemplateSatelRTUCDRV1 {
@@ -134,12 +128,15 @@ func (c *Client) estimateExportRows(
 				FROM collector.cdr_records WHERE device_id=?)`
 			args = append(args, timezone, deviceID)
 		}
+	case "antifraud":
+		source, sortColumn, idColumn = "collector.custom_antifraud_calls_current", "first_seen_at", "call_id"
+		args = append(args, deviceID)
+		source += " WHERE device_id=?"
 	default:
 		return nil
 	}
 	query := `SELECT count() FROM (SELECT 1 FROM ` + source + ` WHERE 1`
-	if dataset == "events" || dataset == "antifraud" {
-		// Those sources already include WHERE.
+	if dataset == "syslog" || dataset == "antifraud" {
 		query = `SELECT count() FROM (SELECT 1 FROM ` + source
 	}
 	if rangeFrom != nil {
@@ -167,29 +164,11 @@ func normalizeExportEstimate(count int64, err error) *int64 {
 	return &count
 }
 
-func (c *Client) ListExportEventsPage(
-	ctx context.Context, deviceID uuid.UUID, revision uint64, category, search string,
-	limit uint64, cursor *EventCursor, timeRange *TimeRange,
-) (EventPage, error) {
-	return c.listCurrentEventsPage(
-		ctx, deviceID, revision, category, search, limit, cursor, timeRange,
-	)
-}
-
 func (c *Client) ListExportCallsPage(
-	ctx context.Context, deviceID uuid.UUID, revision uint64, search string,
+	ctx context.Context, deviceID uuid.UUID, _ uint64, search string,
 	limit uint64, cursor *CallCursor, timeRange *TimeRange,
 ) (CallPage, error) {
-	return c.listCurrentCallsPage(ctx, deviceID, revision, search, limit, cursor, timeRange)
-}
-
-func (c *Client) ListExportAntifraudPage(
-	ctx context.Context, deviceID uuid.UUID, revision uint64, search string,
-	limit uint64, cursor *AntifraudCursor, timeRange *TimeRange,
-) (AntifraudPage, error) {
-	return c.listCurrentAntifraudPage(
-		ctx, deviceID, revision, search, limit, cursor, timeRange,
-	)
+	return c.ListCallsPageRange(ctx, deviceID, search, limit, cursor, timeRange)
 }
 
 func (c *Client) ListExportSatelRTUCallsPage(

@@ -10,36 +10,22 @@
 
 - изолированная регистрация нескольких SMG по IP-источнику Syslog и отдельной FTP-учётной записи;
 - host-network UDP ingress с сохранением реального source IP/port, отдельным durable handoff spool, JetStream без silent eviction, DLQ/quarantine и сохранением исходного payload;
-- parser `eltex-smg-syslog-v15`: Eltex trace/RFC3164/`CONFIG` envelope, firmware
-  dialect profiles 3.23.2/3.410, контекстные `# requestID`/`trunkID`/`Keep alive`/`cause`
-  continuations, RFC 4566 bare SDP (включая `b=`), ISUP dotted-hex / `[No optional params]`,
-  `SIPT Proc`, HostIPlist IPv4, все документированные alarm/calls/SIPT/ISUP/Q.931/H.323/RTP/
-  HW/MSP/SMVP/RADIUS/IVR/IPNET и системные журналы;
-- versioned `readable-syslog-v1` read model: SIP/SDP, ISUP, Q.931 и RADIUS datagram'ы
-  собираются в пагинируемые protocol constructs с durable parent links, provenance
-  exact/heuristic и полным raw drill-down;
+- минимальный immutable `collector.syslog_messages`: исходные ID, UTC microseconds,
+  source IP/port, transport, payload и SHA-256 без parser/category/derived полей;
+- fail-closed upgrade через `migration-preflight` с count/checksum copy verification до удаления
+  прежних Syslog/RADIUS/AntiFraud/construct/correlation объектов;
 - приём CDR через SFTPGo FTP, неизменяемый raw-архив MinIO, UTF-8/Windows-1251 и динамический порядок колонок;
 - отдельный header-driven Satel RTU parser, строгая автоактивация по immutable headers,
   versioned replay архивов из MinIO и специализированная CDR projection/UI без смешивания с Eltex;
 - нормализация полного CDR, включая Acct-Session-Id, UniqueTag, SIP Call-ID, GCR, CIC и исходные поля;
-- stateful сборка RADIUS AntiFraud request/reply/accounting lifecycle с
-  `check_call` Accept/Reject/timeout fail-open, server/latency/retry и completeness;
-- двусторонняя multi-operation корреляция CDR↔AntiFraud по device-scoped
-  Acct-Session-Id, exact SIP Call-ID/GCR и детерминированный composite matching:
-  одна AntiFraud-операция получает максимум один CDR, один вызов может содержать
-  несколько RADIUS/AntiFraud-операций; неоднозначность не auto-link;
-- IANA timezone каждого SMG — единое правило для CDR и Syslog wall clock этого
-  устройства; UI/API/XLSX показывают время конкретного SMG независимо от браузера
-  и timezone сервера Collector;
-- timezone revision и derived facts пересобираются пакетно в shadow-слое; активная
-  история остаётся видимой до проверки coverage и атомарного переключения;
-- lifecycle и correlation выполняются по durable dirty day buckets без
-  device-wide reconcile в ingestion hot path;
+- независимая IANA timezone-интерпретация CDR без Syslog-derived rebuild;
+- Custom-only AntiFraud projection из `syslog_messages` с per-device toggle `antifraudEnabled`
+  и coverage states `expected` / `late` / `matched` / `missing` / `ambiguous` / `not_applicable`;
 - ClickHouse для событий/вызовов, PostgreSQL для пользователей, устройств, ingest и аудита;
 - first-run создание администратора, Argon2id, серверные сессии, CSRF, lockout и RBAC;
-- компактный светлый русскоязычный интерфейс: отдельные RADIUS и AntiFraud lifecycle,
-  CDR legs/timeline, completeness/orphan, sticky-заголовки, infinite scroll по 100 строк,
-  «Все Syslog», raw payload, поиск и потоковый XLSX;
+- компактный светлый русскоязычный интерфейс: CDR, «Сообщения Syslog», Custom AntiFraud
+  (вкладка скрыта при `antifraudEnabled=false`), coverage/dialogue drawers, sticky-заголовки,
+  infinite scroll по 100 строк, поиск и потоковый CSV.zip;
 - Docker Compose/Portainer stack для существующего Nginx Proxy Manager, health checks и закрытые внутренние сервисы.
 
 ## Установка через Portainer
@@ -83,8 +69,15 @@ docker run --rm -v "$PWD:/app" -w /app golang:1.25-alpine go test ./...
 docker compose --env-file .env.example -f deploy/compose.yml config --quiet
 ```
 
+Перед upgrade существующей установки выполните fail-closed
+[`migration-preflight`](docs/syslog-storage-migration.md).
+
 Подробности: [архитектура](docs/architecture.md), [модель данных](docs/data-dictionary.md), [корреляция](docs/correlation.md), [развёртывание](docs/deployment.md).
 
 ## Важное ограничение Syslog
 
-Eltex не публикует исчерпывающую грамматику всех debug-сообщений 3.410. Collector всегда сохраняет принятый raw payload; все записи доступны в «Все Syslog», а неизвестные дополнительно видны в «Нераспознанное». Семантическое покрытие расширяется версионированными parser fixtures после накопления реального corpus. UDP не даёт подтверждения доставки, поэтому абсолютную полноту до точки приёма гарантировать невозможно.
+Eltex не публикует исчерпывающую грамматику всех debug-сообщений 3.410. Collector всегда
+сохраняет принятый raw payload в `syslog_messages` byte-for-byte. UI показывает эти
+immutable сообщения как есть; semantic coverage Custom AntiFraud строится отдельной
+фоновой проекцией и зависит от toggle `antifraudEnabled`. UDP не даёт подтверждения
+доставки, поэтому абсолютную полноту до точки приёма гарантировать невозможно.

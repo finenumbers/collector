@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,11 +27,13 @@ import (
 )
 
 type CDRWatcher struct {
-	Root      string
-	Store     *store.Store
-	Analytics CDRAnalytics
-	Archive   CDRArchive
-	MinAge    time.Duration
+	Root                    string
+	Store                   *store.Store
+	Analytics               CDRAnalytics
+	Archive                 CDRArchive
+	MinAge                  time.Duration
+	CoverageThresholds      analytics.CoverageThresholds
+	CustomProjectionEnabled bool
 
 	retryMu sync.Mutex
 	retries map[string]watcherRetry
@@ -58,6 +61,12 @@ type CDRArchive interface {
 type CDRAnalytics interface {
 	InsertCDRBatch(context.Context, []analytics.CDRRecord) error
 	InsertSatelRTUBatch(context.Context, []analytics.SatelRTURecord) error
+}
+
+type CDRCoverageAnalytics interface {
+	InsertCDRBatchWithCoverage(
+		context.Context, []analytics.CDRRecord, bool, uint64, analytics.CoverageThresholds,
+	) error
 }
 
 func (w *CDRWatcher) Run(ctx context.Context) error {
@@ -223,7 +232,24 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 			return fmt.Errorf("%w: CDR parse failed: %v", errTerminalIngest, parseErr)
 		}
 		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
-		err = insertCDRForTemplate(ctx, template, w.Analytics, result.Records)
+		if !w.CustomProjectionEnabled {
+			err = w.Analytics.InsertCDRBatch(ctx, result.Records)
+		} else {
+			policy, policyErr := w.Store.CustomAntifraudPolicy(ctx, device.ID)
+			if policyErr != nil {
+				err = policyErr
+			} else {
+				err = insertCDRForTemplate(
+					ctx, template, w.Analytics, result.Records, policy.Enabled, policy.Revision,
+					w.CoverageThresholds,
+				)
+				if err == nil && policy.Enabled {
+					err = w.Store.EnqueueCDRReconciliationBuckets(
+						ctx, device.ID, policy.Revision, cdrRecordBuckets(result.Records),
+					)
+				}
+			}
+		}
 	}
 	if err != nil {
 		_ = w.Store.CompleteIngestFile(ctx, fileID, "failed", rows, valid, err.Error())
@@ -424,7 +450,8 @@ func (w *CDRWatcher) completeTerminalReplay(
 }
 
 func insertCDRForTemplate(
-	ctx context.Context, template equipment.Template, client CDRAnalytics, records []analytics.CDRRecord,
+	ctx context.Context, template equipment.Template, client CDRAnalytics,
+	records []analytics.CDRRecord, policy ...any,
 ) error {
 	if !template.Capabilities.TypedCDR {
 		return nil
@@ -432,7 +459,46 @@ func insertCDRForTemplate(
 	if client == nil {
 		return errors.New("CDR analytics is unavailable")
 	}
+	antifraudEnabled := false
+	var policyRevision uint64
+	if len(policy) > 0 {
+		antifraudEnabled, _ = policy[0].(bool)
+	}
+	if len(policy) > 1 {
+		policyRevision, _ = policy[1].(uint64)
+	}
+	thresholds := analytics.CoverageThresholds{}
+	if len(policy) > 2 {
+		thresholds, _ = policy[2].(analytics.CoverageThresholds)
+	}
+	if coverage, ok := client.(CDRCoverageAnalytics); ok {
+		return coverage.InsertCDRBatchWithCoverage(
+			ctx, records, antifraudEnabled, policyRevision, thresholds,
+		)
+	}
 	return client.InsertCDRBatch(ctx, records)
+}
+
+func cdrRecordBuckets(records []analytics.CDRRecord) []time.Time {
+	unique := make(map[time.Time]struct{})
+	for _, record := range records {
+		eventTime := record.IngestedAt
+		for _, candidate := range []*time.Time{
+			record.SetupTime, record.ConnectTime, record.DisconnectTime,
+		} {
+			if candidate != nil {
+				eventTime = *candidate
+				break
+			}
+		}
+		unique[eventTime.UTC().Truncate(time.Hour)] = struct{}{}
+	}
+	result := make([]time.Time, 0, len(unique))
+	for bucket := range unique {
+		result = append(result, bucket)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Before(result[j]) })
+	return result
 }
 
 func insertSatelRTUForTemplate(

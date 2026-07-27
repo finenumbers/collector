@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,7 +57,8 @@ func TestHandoffPreservesSourceAndIsolatesDevices(t *testing.T) {
 	}
 	enqueueIngressDatagrams(t, ingressQueue, datagrams)
 
-	socketPath := filepath.Join(directory, "handoff.sock")
+	// Keep socket paths short: macOS sockaddr_un.sun_path is ~104 bytes.
+	socketPath := shortUnixSocket(t, "h1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	receiverErrors := make(chan error, 1)
@@ -132,7 +134,7 @@ func TestHandoffRetainsSpoolUntilAppReturns(t *testing.T) {
 	}
 	enqueueIngressDatagrams(t, ingressQueue, []IngressDatagram{datagram})
 
-	socketPath := filepath.Join(directory, "handoff.sock")
+	socketPath := shortUnixSocket(t, "h2")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	metrics := &Metrics{}
@@ -161,6 +163,16 @@ func TestHandoffRetainsSpoolUntilAppReturns(t *testing.T) {
 	cancel()
 	assertStopped(t, receiverErrors)
 	assertStopped(t, publisherErrors)
+}
+
+func shortUnixSocket(t *testing.T, label string) string {
+	t.Helper()
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("c-%s-%d.sock", label, os.Getpid()))
+	if len(path) > 100 {
+		t.Fatalf("unix socket path too long for macOS: %d bytes", len(path))
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
 }
 
 func enqueueIngressDatagrams(t *testing.T, queue *spool.Queue, datagrams []IngressDatagram) {

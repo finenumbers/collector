@@ -38,6 +38,7 @@ var (
 	accsHeader         = regexp.MustCompile(`(?i)\bAccs-(Request|Reply)\b(?:\s*\[(\d+)\])?`)
 	antifraudHeader    = regexp.MustCompile(`(?i)\bAntifraud-Auth-Request\b(?:\s*\[(\d+)\])?`)
 	antifraudRequestID = regexp.MustCompile(`(?i)\bRequest\s+ID\s*\[(\d+)\]\s+(?:process\s+)?Antifraud-Auth-Request\b`)
+	antifraudClgCld    = regexp.MustCompile(`(?i)\bAntifraud-Auth-Request\s+clg\s*<([^>]+)>\s*,\s*cld\s*<([^>]+)>`)
 	procReply          = regexp.MustCompile(`(?i)\bProc\s+Reply\.\s*Request\s+ID\s*\[(\d+)\]\s*Accs-Reply\s*\[(accept|reject)\]\.\s*Time\s*\[(\d+):(\d+)\]`)
 	procReplyLoose     = regexp.MustCompile(`(?i)\bProc\s+Reply\.?\s+Request\s+ID\s*(?:\[(\d+)\]|[:=]?\s*(\d+)).*?\[?(accept|reject)\]?`)
 	contextPattern     = regexp.MustCompile(`\[(C[A-Za-z0-9_.:-]+)\]`)
@@ -45,6 +46,7 @@ var (
 	acceptedStatus     = regexp.MustCompile(`(?i)\b(?:server\s+)?accepted\b`)
 	rejectedStatus     = regexp.MustCompile(`(?i)\b(?:server\s+)?rejected\b`)
 	falseCDRReject     = regexp.MustCompile(`(?i)\bserver rejected:\s*:0\s*\(replied 0\)`)
+	ignoreNonAFReply   = regexp.MustCompile(`(?i)process reply:\s*ignore for not antifraud`)
 )
 
 // DecodeEnvelope recognizes Eltex RADIUS forms without retaining the payload.
@@ -105,12 +107,31 @@ func DecodeEnvelope(event RawEvent) Envelope {
 		envelope.Identifier = parsePacketID(match[1], &envelope.Warnings)
 		return envelope
 	}
+	// Eltex emits calling/called on a dedicated line without RADIUS attr syntax.
+	if match := antifraudClgCld.FindStringSubmatch(text); match != nil {
+		envelope.Kind = EnvelopeHeader
+		envelope.RadiusType = "access-request"
+		envelope.Direction = DirectionRequest
+		envelope.ExplicitAF = true
+		calling := strings.TrimSpace(match[1])
+		called := strings.TrimSpace(match[2])
+		envelope.Attributes = append(envelope.Attributes,
+			newAttribute("calling-station-id", "clg", calling, calling, nil, event.EventID),
+			newAttribute("called-station-id", "cld", called, called, nil, event.EventID),
+		)
+		return envelope
+	}
 	if match := antifraudHeader.FindStringSubmatch(text); match != nil {
 		envelope.Kind = EnvelopeHeader
 		envelope.RadiusType = "access-request"
 		envelope.Direction = DirectionRequest
 		envelope.ExplicitAF = true
 		envelope.Identifier = parsePacketID(match[1], &envelope.Warnings)
+		return envelope
+	}
+	if ignoreNonAFReply.MatchString(text) {
+		envelope.Kind = EnvelopeOther
+		envelope.Attributes = nil
 		return envelope
 	}
 	if match := standardHeader.FindStringSubmatch(text); match != nil {

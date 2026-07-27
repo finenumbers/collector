@@ -272,6 +272,7 @@ func (c *Client) writeCustomPackets(ctx context.Context, snapshot customprojecti
 			}{
 				{kind: "acct_session_id", value: packet.CallKey.AcctSessionID},
 				{kind: "h323_conf_id", value: packet.CallKey.H323ConfID},
+				{kind: "call_context", value: packet.CallKey.Context},
 			} {
 				if identity.value == "" {
 					continue
@@ -633,6 +634,9 @@ func customContractKey(key customradius.CallKey) string {
 	}
 	if key.H323ConfID != "" {
 		return "h323:" + key.H323ConfID
+	}
+	if key.Context != "" {
+		return "context:" + key.Context
 	}
 	return ""
 }

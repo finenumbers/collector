@@ -81,6 +81,12 @@ func TestBuildTimelinePairsRequestResponse(t *testing.T) {
 	}
 }
 
+func TestDisplayRadiusTypeMapsEltexAccessResponseToAccept(t *testing.T) {
+	if got := displayRadiusType("access-response"); got != "Access-Accept" {
+		t.Fatalf("access-response display = %q", got)
+	}
+}
+
 func mustParseUUID(value string) uuid.UUID {
 	id, err := uuid.Parse(value)
 	if err != nil {

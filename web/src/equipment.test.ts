@@ -59,7 +59,15 @@ describe('equipment templates', () => {
     expect(main).toContain('<h4>Софтсвитчи</h4><span>Типизированные')
     expect(main).toContain('equipmentRows.map')
     expect(main).toContain('softswitchRows.map')
+    expect(main).not.toContain('Метрики Eltex за выбранный интервал')
     expect(main).not.toContain('(snapshot?.devices || []).map((row) => <tr')
+    // Dashboard order: services → softswitches → equipment.
+    const servicesAt = main.indexOf('<h4>Сервисы</h4>')
+    const softAt = main.indexOf('<h4>Софтсвитчи</h4><span>Типизированные')
+    const equipAt = main.indexOf('<h4>Оборудование</h4><span>Eltex')
+    expect(servicesAt).toBeGreaterThan(-1)
+    expect(softAt).toBeGreaterThan(servicesAt)
+    expect(equipAt).toBeGreaterThan(softAt)
   })
 
   it('selects the specialized Satel CDR table by template key', () => {

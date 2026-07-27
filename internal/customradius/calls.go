@@ -415,7 +415,9 @@ func overallStatus(packets []Packet) CallStatus {
 		}
 	}
 	for _, packet := range packets {
-		if packet.Decision == DecisionUnavailableFallback {
+		// Indication timeouts also set packet DecisionUnavailableFallback (fail-open
+		// pairing), but call-level unavailable is only meaningful for check_call.
+		if packet.Decision == DecisionUnavailableFallback && isVerificationPacket(packet) {
 			return CallUnavailable
 		}
 	}
@@ -425,7 +427,7 @@ func overallStatus(packets []Packet) CallStatus {
 		}
 	}
 	for _, packet := range packets {
-		if packet.Decision == DecisionAllow {
+		if packet.Decision == DecisionAllow && isVerificationPacket(packet) {
 			return CallVerified
 		}
 	}
@@ -441,6 +443,13 @@ func overallStatus(packets []Packet) CallStatus {
 		}
 	}
 	return CallPending
+}
+
+func isVerificationPacket(packet Packet) bool {
+	if packet.Family == FamilyVerification {
+		return true
+	}
+	return firstAttributeValue(packet.Attributes, "xpgk-request-type") == "check_call"
 }
 
 func statusExplanation(status CallStatus) Explanation {

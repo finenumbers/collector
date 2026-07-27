@@ -124,7 +124,7 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .page-heading h3 { margin: 0 0 4px; font-size: 17px; }
 .page-heading p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.dashboard-kpis { display: grid; grid-template-columns: repeat(4, minmax(145px, 1fr)); gap: 8px; }
+.dashboard-kpis { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; }
 .dashboard-category-heading { display: flex; align-items: baseline; gap: 9px; margin: 16px 0 7px; }
 .dashboard-category-heading:first-of-type { margin-top: 0; }
 .dashboard-category-heading h4 { margin: 0; font-size: 13px; }
@@ -365,7 +365,7 @@ tbody tr { cursor: pointer; }
   .export-panel { width: min(620px, calc(100vw - 220px)); }
   .export-create { grid-template-columns: 1fr 125px 125px; }
   .export-create > button { grid-column: 3; }
-  .dashboard-kpis { grid-template-columns: repeat(2, minmax(145px, 1fr)); }
+  .dashboard-kpis { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
   .retention-row { grid-template-columns: 1fr 120px; }
   .user-admin-row { display: flex; flex-wrap: wrap; }
   .user-admin-row > span:first-child, .user-admin-row .row-error { flex: 1 0 100%; }

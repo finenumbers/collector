@@ -58,6 +58,49 @@ func TestFinalDecisionNotApplicableWithoutCheckCall(t *testing.T) {
 	}
 }
 
+func TestIndicationTimeoutDoesNotMarkCallUnavailable(t *testing.T) {
+	device := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	pairedReq := uuid.New()
+	pairedResp := uuid.New()
+	timedOut := uuid.New()
+	packets := []Packet{
+		{
+			ID: pairedReq, IsAntifraud: true, Family: FamilyIndication, RadiusType: "access-request",
+			Direction: DirectionRequest, Status: PacketPaired, Decision: DecisionInfoOnly,
+			ResponseID: &pairedResp, FirstSeenAt: base, LastSeenAt: base,
+			CallKey: CallKey{AcctSessionID: "s1", H323ConfID: "s1", Calling: "A", Called: "B"},
+			Attributes: []Attribute{{Name: "xpgk-request-type", Value: "number", EventID: pairedReq}},
+			Provenance: []EventProvenance{{EventID: pairedReq, DeviceID: device, ReceivedAt: base}},
+		},
+		{
+			ID: pairedResp, IsAntifraud: true, Family: FamilyIndication, RadiusType: "access-response",
+			Direction: DirectionResponse, Status: PacketPaired, Decision: DecisionInfoOnly,
+			RequestID: &pairedReq, FirstSeenAt: base.Add(time.Millisecond), LastSeenAt: base.Add(time.Millisecond),
+			CallKey: CallKey{AcctSessionID: "s1", H323ConfID: "s1"},
+			Provenance: []EventProvenance{{EventID: pairedResp, DeviceID: device, ReceivedAt: base}},
+		},
+		{
+			ID: timedOut, IsAntifraud: true, Family: FamilyIndication, RadiusType: "access-request",
+			Direction: DirectionRequest, Status: PacketPending, Decision: DecisionUnavailableFallback,
+			FirstSeenAt: base.Add(2 * time.Second), LastSeenAt: base.Add(2 * time.Second),
+			CallKey: CallKey{AcctSessionID: "s2", H323ConfID: "s1"},
+			Attributes: []Attribute{{Name: "xpgk-request-type", Value: "number", EventID: timedOut}},
+			Provenance: []EventProvenance{{EventID: timedOut, DeviceID: device, ReceivedAt: base}},
+		},
+	}
+	call := buildCall("h323:s1", []int{0, 1, 2}, packets)
+	if call.FinalDecision != "not_applicable" {
+		t.Fatalf("finalDecision=%q, want not_applicable", call.FinalDecision)
+	}
+	if call.Status == CallUnavailable {
+		t.Fatalf("status=%q: indication timeout must not surface as unavailable_fallback", call.Status)
+	}
+	if call.Status != CallPending {
+		t.Fatalf("status=%q, want pending for indication-only call", call.Status)
+	}
+}
+
 func TestFinalDecisionBlockedOnCheckCallReject(t *testing.T) {
 	device := uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)

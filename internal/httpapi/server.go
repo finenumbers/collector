@@ -220,7 +220,20 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 
 func (s *Server) me(writer http.ResponseWriter, request *http.Request) {
 	session := currentSession(request)
-	writeJSON(writer, http.StatusOK, map[string]any{"user": session.User, "csrfToken": session.CSRF})
+	csrf := session.CSRF
+	if csrf == "" {
+		cookie, err := request.Cookie(sessionCookie)
+		if err != nil || cookie.Value == "" {
+			writeError(writer, http.StatusUnauthorized, "session expired")
+			return
+		}
+		csrf, err = s.Store.RotateSessionCSRF(request.Context(), cookie.Value)
+		if err != nil {
+			writeError(writer, http.StatusUnauthorized, "session expired")
+			return
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"user": session.User, "csrfToken": csrf})
 }
 
 func (s *Server) logout(writer http.ResponseWriter, request *http.Request) {

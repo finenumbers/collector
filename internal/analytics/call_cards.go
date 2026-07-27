@@ -1047,12 +1047,11 @@ func displayRadiusType(radiusType string) string {
 	switch strings.ToLower(radiusType) {
 	case "access-request":
 		return "Access-Request"
-	case "access-accept":
+	case "access-accept", "access-response":
+		// Eltex Custom often logs a generic Access-Response for Accept.
 		return "Access-Accept"
 	case "access-reject":
 		return "Access-Reject"
-	case "access-response":
-		return "Access-Response"
 	case "accounting-request":
 		return "Accounting-Request"
 	case "accounting-response":

@@ -23,6 +23,7 @@ import {
   exportJobURL, ExportNavigationDataset, exportStorageKey, isExportActive,
   localDateInTimezone, pollDelay, restoreExportTracking, serializeExportTracking,
 } from './export'
+import { formatAntifraudTranscript } from './antifraudTranscript'
 import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
@@ -420,13 +421,28 @@ type Dataset = ExportNavigationDataset
 let csrfToken = ''
 const PAGE_SIZE = 100
 
-async function api<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
-  const { timeoutMs, ...requestInit } = init || {}
+async function restoreCSRF(): Promise<boolean> {
+  try {
+    const response = await fetch('/api/auth/me', { credentials: 'same-origin' })
+    if (!response.ok) return false
+    const body = await response.json().catch(() => ({})) as { csrfToken?: string }
+    if (!body.csrfToken) return false
+    csrfToken = body.csrfToken
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function api<T>(path: string, init?: RequestInit & { timeoutMs?: number; retryOnCSRF?: boolean }): Promise<T> {
+  const { timeoutMs, retryOnCSRF = true, ...requestInit } = init || {}
   const controller = timeoutMs ? new AbortController() : undefined
   const timer = timeoutMs
     ? window.setTimeout(() => controller?.abort(), timeoutMs)
     : undefined
   try {
+    const method = (requestInit.method || 'GET').toUpperCase()
+    const mutating = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
     const response = await fetch(`/api${path}`, {
       credentials: 'same-origin',
       ...requestInit,
@@ -439,7 +455,13 @@ async function api<T>(path: string, init?: RequestInit & { timeoutMs?: number })
     })
     if (response.status === 204) return undefined as T
     const body = await response.json().catch(() => ({})) as { error?: string }
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+    if (!response.ok) {
+      if (response.status === 401 && body.error === 'session expired' &&
+        mutating && retryOnCSRF && await restoreCSRF()) {
+        return api<T>(path, { ...init, retryOnCSRF: false })
+      }
+      throw new Error(body.error || `HTTP ${response.status}`)
+    }
     return body as T
   } finally {
     if (timer !== undefined) window.clearTimeout(timer)
@@ -732,50 +754,16 @@ function DashboardPage({ devices, onSelectDevice }: {
       </select>
     </div>
     {error && <div className="form-error">{error}</div>}
-    <div className="dashboard-category-heading"><h4>Оборудование</h4><span>Eltex · Syslog, CDR и AntiFraud</span></div>
-    <div className="dashboard-kpis">
-      <DashboardKPI label="Оборудование"
-        value={`${equipmentTotals.activeSources} / ${equipmentTotals.totalSources}`}
-        detail="активно / всего" />
-      <DashboardKPI label="Вызовы" value={formatCount(equipmentTotals.calls)}
-        detail={`неуспешных ${formatCount(equipmentTotals.failed)}`}
-        tone={equipmentTotals.failed ? 'bad' : 'good'} />
-      <DashboardKPI label="ASR" value={formatPercent(equipmentTotals.calls, equipmentTotals.failed)}
-        detail="доля успешных вызовов" />
-      <DashboardKPI label="Средний разговор"
-        value={formatDurationAverage(equipmentTotals.averageTalkMs)} />
-      {equipmentRows.some((row) => row.antifraudEnabled) &&
-        <DashboardKPI label="AntiFraud" value={formatCount(equipmentTotals.antifraud)}
-          detail={`reject ${formatCount(equipmentTotals.rejects)}`} />}
-      <DashboardKPI label="Очередь"
-        value={formatCount(snapshot?.system?.natsStreamMessages)}
-        detail={`spool ${formatCount(snapshot?.system?.spoolDepth)}`}
-        tone={(snapshot?.system?.natsStreamMessages || snapshot?.system?.spoolDepth) ? 'warn' : 'good'} />
-    </div>
-    <section className="dashboard-panel fleet-panel">
-      <div className="panel-heading"><div><h4>Оборудование</h4><span>Метрики Eltex за выбранный интервал</span></div></div>
-      <table><thead><tr><th>Оборудование</th><th>Шаблон / timezone</th><th>Статус</th>
-        <th>Вызовы</th><th>Неуспешные</th><th>AntiFraud / reject</th>
-        <th>Последний приём Syslog</th><th>Revision</th></tr></thead>
-        <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
-          <td><strong>{row.name}</strong><small>{row.model}</small></td>
-          <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}
-            <small>Активный: {row.activeTimezone || row.timezone || 'UTC'}</small></td>
-          <td><span className={row.enabled ? 'healthy' : 'service-error'}>
-            {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
-          <td className="right">{formatCount(row.metrics.calls)}</td>
-          <td className="right">{formatCount(row.metrics.failedCalls)}</td>
-          <td className="right">{row.antifraudEnabled
-            ? `${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}` : '—'}</td>
-          <td className="mono">
-            {formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')}
-            <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
-          </td>
-          <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
-        </tr>)}</tbody></table>
-      {equipmentRows.length === 0 && <div className="table-empty">
-        <strong>Оборудование ещё не добавлено</strong>
-      </div>}
+    <section className="dashboard-panel">
+      <div className="panel-heading"><div><h4>Сервисы</h4>
+        <span>{snapshot?.system?.version || 'Collector'}</span></div>
+        <span>{snapshot?.diagnostics?.length ? `${snapshot.diagnostics.length} предупреждений` : 'Без ошибок'}</span></div>
+      <div className="service-grid">
+        {Object.entries(snapshot?.system?.services || {}).map(([name, healthy]) =>
+          <span key={name} className={healthy ? 'healthy' : 'service-error'}>
+            <i className={`status-dot ${healthy ? 'online' : ''}`} /> {name}
+          </span>)}
+      </div>
     </section>
     <div className="dashboard-category-heading"><h4>Софтсвитчи</h4><span>Типизированные и исходные CDR</span></div>
     <div className="dashboard-kpis">
@@ -793,7 +781,7 @@ function DashboardPage({ devices, onSelectDevice }: {
         detail={formatBytes(softswitchTotals.bytes)} />
     </div>
     <section className="dashboard-panel fleet-panel">
-      <div className="panel-heading"><div><h4>Софтсвитчи</h4><span>Метрики за выбранный интервал</span></div></div>
+      <div className="panel-heading"><div><h4>Софтсвитчи</h4></div></div>
       <table><thead><tr><th>Софтсвитч</th><th>Шаблон / timezone</th><th>Статус</th>
         <th>Вызовы</th><th>Успешные</th><th>Неуспешные</th><th>ASR</th>
         <th>Средний разговор</th><th>CDR-файлы</th><th>Объём файлов</th>
@@ -821,16 +809,45 @@ function DashboardPage({ devices, onSelectDevice }: {
         <strong>Софтсвитчи ещё не добавлены</strong>
       </div>}
     </section>
-    <section className="dashboard-panel">
-      <div className="panel-heading"><div><h4>Сервисы</h4>
-        <span>{snapshot?.system?.version || 'Collector'}</span></div>
-        <span>{snapshot?.diagnostics?.length ? `${snapshot.diagnostics.length} предупреждений` : 'Без ошибок'}</span></div>
-      <div className="service-grid">
-        {Object.entries(snapshot?.system?.services || {}).map(([name, healthy]) =>
-          <span key={name} className={healthy ? 'healthy' : 'service-error'}>
-            <i className={`status-dot ${healthy ? 'online' : ''}`} /> {name}
-          </span>)}
-      </div>
+    <div className="dashboard-category-heading"><h4>Оборудование</h4><span>Eltex · Syslog, CDR и AntiFraud</span></div>
+    <div className="dashboard-kpis">
+      <DashboardKPI label="Оборудование"
+        value={`${equipmentTotals.activeSources} / ${equipmentTotals.totalSources}`}
+        detail="активно / всего" />
+      <DashboardKPI label="Вызовы" value={formatCount(equipmentTotals.calls)}
+        detail={`неуспешных ${formatCount(equipmentTotals.failed)}`}
+        tone={equipmentTotals.failed ? 'bad' : 'good'} />
+      <DashboardKPI label="ASR" value={formatPercent(equipmentTotals.calls, equipmentTotals.failed)}
+        detail="доля успешных вызовов" />
+      <DashboardKPI label="Средний разговор"
+        value={formatDurationAverage(equipmentTotals.averageTalkMs)} />
+      <DashboardKPI label="AntiFraud" value={formatCount(equipmentTotals.antifraud)}
+        detail={`reject ${formatCount(equipmentTotals.rejects)}`} />
+    </div>
+    <section className="dashboard-panel fleet-panel">
+      <div className="panel-heading"><div><h4>Оборудование</h4></div></div>
+      <table><thead><tr><th>Оборудование</th><th>Шаблон / timezone</th><th>Статус</th>
+        <th>Вызовы</th><th>Неуспешные</th><th>AntiFraud / reject</th>
+        <th>Последний приём Syslog</th><th>Revision</th></tr></thead>
+        <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
+          <td><strong>{row.name}</strong><small>{row.model}</small></td>
+          <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}
+            <small>Активный: {row.activeTimezone || row.timezone || 'UTC'}</small></td>
+          <td><span className={row.enabled ? 'healthy' : 'service-error'}>
+            {row.enabled ? 'Приём активен' : 'Выключен'}</span></td>
+          <td className="right">{formatCount(row.metrics.calls)}</td>
+          <td className="right">{formatCount(row.metrics.failedCalls)}</td>
+          <td className="right">{row.antifraudEnabled
+            ? `${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}` : '—'}</td>
+          <td className="mono">
+            {formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')}
+            <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
+          </td>
+          <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
+        </tr>)}</tbody></table>
+      {equipmentRows.length === 0 && <div className="table-empty">
+        <strong>Оборудование ещё не добавлено</strong>
+      </div>}
     </section>
   </section>
 }
@@ -899,7 +916,11 @@ function dashboardCategoryTotals(
 }
 
 function formatDurationAverage(value?: number) {
-  return value ? `${(value / 1000).toFixed(1)} с` : '—'
+  return value ? `${Math.round(value / 1000)} с` : '—'
+}
+
+function formatDurationSeconds(value?: number) {
+  return value == null ? '—' : `${Math.round(value / 1000)} с`
 }
 
 function formatPercent(total?: number, failed?: number) {
@@ -1188,7 +1209,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         }} /></label>
       <span><small>Вызовов</small><strong>{stats ? stats.calls24h.toLocaleString('ru-RU') : '—'}</strong></span>
       <span><small>Неуспешных</small><strong>{stats ? stats.failedCalls24h.toLocaleString('ru-RU') : '—'}</strong></span>
-      <span><small>Средняя длительность</small><strong>{stats ? `${(stats.averageTalkMs / 1000).toFixed(1)} с` : '—'}</strong></span>
+      <span><small>Средняя длительность</small><strong>{stats ? formatDurationAverage(stats.averageTalkMs) : '—'}</strong></span>
       {!isSatel && <>
         <span><small>Syslog сообщений</small><strong>
           {stats ? stats.syslogMessages24h.toLocaleString('ru-RU') : '—'}
@@ -1381,7 +1402,7 @@ function CallsTable({ rows, timezone, onSelect }: {
     <td>{row.incomingDescription || '—'}</td><td>{row.outgoingDescription || '—'}</td>
     <td className="mono">{row.incomingCgpn || '—'}</td><td className="mono">{row.outgoingCgpn || '—'}</td>
     <td className="mono">{row.incomingCdpn || '—'}</td><td className="mono">{row.outgoingCdpn || '—'}</td>
-    <td className="right">{row.durationMs == null ? '—' : `${(row.durationMs / 1000).toFixed(3)} c`}</td>
+    <td className="right">{formatDurationSeconds(row.durationMs)}</td>
     <td className="right">{row.releaseCause ?? '—'}</td><td>
       <span className={`outcome-badge ${cdrOutcome(row.releaseCause)}`}>
         {outcomeLabel(cdrOutcome(row.releaseCause))}
@@ -1424,7 +1445,7 @@ function SatelCallsTable({ rows, timezone, onSelect }: {
       <td className="mono">{row.inAni || '—'}</td><td className="mono">{row.inDnis || '—'}</td>
       <td className="mono">{row.outAni || '—'}</td><td className="mono">{row.outDnis || '—'}</td>
       <td>{row.srcName || '—'}</td><td>{row.dstName || '—'}</td><td>{row.dpName || '—'}</td>
-      <td className="right">{row.durationMs == null ? '—' : `${(row.durationMs / 1000).toFixed(3)} c`}</td>
+      <td className="right">{formatDurationSeconds(row.durationMs)}</td>
       <td>{formatSatelProtocols(row)}</td><td>{row.disconnectText || '—'}</td>
       <td className="right">{row.disconnectCode ?? '—'}</td><td>{row.signalNodeName || row.sigNodeName || '—'}</td>
     </tr>
@@ -1444,7 +1465,7 @@ function SatelCallDrawer({ call, timezone, onClose }: {
       <span><small>Соединение</small><strong>{formatTime(call.connectTime, timezone)}</strong></span>
       <span><small>Завершение</small><strong>{formatTime(call.disconnectTime, timezone)}</strong></span>
       <span><small>Результат</small><strong>{call.outcome || (call.connectTime ? 'answered' : 'failed')}</strong></span>
-      <span><small>Длительность</small><strong>{call.durationMs == null ? '—' : `${(call.durationMs / 1000).toFixed(3)} c`}</strong></span>
+      <span><small>Длительность</small><strong>{formatDurationSeconds(call.durationMs)}</strong></span>
       <span><small>Разъединение</small><strong>{call.disconnectText || '—'} · {call.disconnectCode ?? '—'}</strong></span>
       <span><small>Инициатор</small><strong>{call.disconnectInitiator || '—'}</strong></span>
       <span><small>Сигнальный узел</small><strong>{call.signalNodeName || call.sigNodeName || '—'}</strong></span>
@@ -1589,7 +1610,7 @@ function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
     {!loading && !error && <>
       {cdr && <><h4>CDR</h4><div className="call-facts">
         <span><small>Установка · {timezone}</small><strong>{formatTime(cdr.setupTime, timezone)}</strong></span>
-        <span><small>Длительность</small><strong>{cdr.durationMs == null ? '—' : `${(cdr.durationMs / 1000).toFixed(3)} c`}</strong></span>
+        <span><small>Длительность</small><strong>{formatDurationSeconds(cdr.durationMs)}</strong></span>
         <span><small>Q.850</small><strong>{cdr.releaseCause ?? '—'} · {cdr.releaseInfo || '—'}</strong></span>
         <span><small>Acct-Session-Id</small><strong className="mono">{cdr.radiusSessionId || '—'}</strong></span>
         <span><small>Номер A</small><strong className="mono">{cdr.incomingCgpn || cdr.outgoingCgpn || '—'}</strong></span>
@@ -1648,30 +1669,21 @@ function omitEmptyRouting(routing?: Record<string, string>) {
 }
 
 function antifraudTranscript(value: AntifraudCallDetail, cdr?: CallRow): string {
-  const calling = value.participants?.callingNumber || value.calling || '—'
-  const called = value.participants?.calledNumber || value.called || '—'
-  const callLabel = value.acctSessionId || value.h323ConfId || value.callId
-  const lines = [
-    `CALL ${callLabel}`,
-    `A: ${calling}`,
-    `B: ${called}`,
-    '',
-  ]
-  const timeline = value.timeline?.length ? value.timeline : []
-  if (!timeline.length) {
-    lines.push('incomplete: нет шагов RADIUS')
-  } else {
-    timeline.forEach((event, index) => {
-      lines.push(`${index + 1}) ${event.phase}: ${event.summary}`)
-    })
-  }
-  const { durationSec, source: durationSource } = transcriptDuration(value, cdr)
-  const { cause, source: causeSource } = transcriptQ850(value, cdr)
-  lines.push('')
-  lines.push(`final_decision=${value.finalDecision || 'not_applicable'}`)
-  lines.push(`duration_sec=${durationSec ?? '—'}${durationSource === 'cdr' ? ' (cdr)' : ''}`)
-  lines.push(`disconnect_cause_q850=${cause ?? '—'}${causeSource === 'cdr' ? ' (cdr)' : ''}`)
-  return lines.join('\n')
+  const { durationSec } = transcriptDuration(value, cdr)
+  const { cause } = transcriptQ850(value, cdr)
+  const causeNumber = typeof cause === 'number' ? cause : Number(cause)
+  return formatAntifraudTranscript({
+    callId: value.callId,
+    acctSessionId: value.acctSessionId,
+    h323ConfId: value.h323ConfId,
+    calling: value.calling,
+    called: value.called,
+    participants: value.participants,
+    finalDecision: value.finalDecision,
+    durationSec,
+    disconnectCauseQ850: Number.isFinite(causeNumber) ? causeNumber : undefined,
+    timeline: value.timeline,
+  })
 }
 
 function antifraudSlimJSON(value: AntifraudCallDetail, cdr?: CallRow) {
@@ -2412,7 +2424,7 @@ function formatTime(value?: string, timezone = 'UTC') {
   if (!value) return '—'
   return new Intl.DateTimeFormat('ru-RU', {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit',
-    minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3,
+    minute: '2-digit', second: '2-digit',
     timeZone: timezone,
   }).format(new Date(value))
 }

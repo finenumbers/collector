@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Activity, CirclePlus, FileClock,
@@ -24,6 +24,9 @@ import {
   localDateInTimezone, pollDelay, restoreExportTracking, serializeExportTracking,
 } from './export'
 import { formatAntifraudTranscript } from './antifraudTranscript'
+import {
+  CDR_PRESETS, CdrColumnDef, cdrPresetStorageKey, defaultCdrPresetId, resolvePresetColumns,
+} from './cdrColumns'
 import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
 type User = { id: string; username: string; role: 'admin' | 'analyst' | 'viewer' }
@@ -206,28 +209,59 @@ type OperationalDiagnostics = {
 type CallRow = {
   recordId: string
   setupTime?: string
+  connectTime?: string
+  disconnectTime?: string
   setupTimeLocal?: string
   sourceTimezone?: string
+  sourceUtcOffsetMinutes?: number
   durationMs?: number
   releaseCause?: number
   releaseInfo: string
+  releaseSide?: string
+  incomingIp?: string
+  outgoingIp?: string
+  incomingType?: string
+  outgoingType?: string
   incomingCgpn: string
   outgoingCgpn: string
   incomingCdpn: string
   outgoingCdpn: string
+  incomingRedirectingNumber?: string
+  outgoingRedirectingNumber?: string
+  incomingNumplan?: string
+  outgoingNumplan?: string
+  callingNai?: string
+  calledNai?: string
+  incomingE1Stream?: string
+  incomingE1Channel?: string
+  outgoingE1Stream?: string
+  outgoingE1Channel?: string
+  incomingSipCallId?: string
+  outgoingSipCallId?: string
+  incomingSs7Cic?: number
+  outgoingSs7Cic?: number
   incomingDescription: string
   outgoingDescription: string
   radiusSessionId: string
+  radiusSessionIdNormalized?: string
+  globalCallref?: string
   uniqueTag: string
+  transferMark?: string
+  rejectingRadiusServer?: string
+  sequenceNumber?: string
+  bootEpoch?: string
+  sequence?: number
 }
 type SatelCdrRow = {
   recordId: string
   externalCdrId?: string
   cdrId?: string
+  cdrDate?: string
   setupTime?: string
   connectTime?: string
   disconnectTime?: string
   durationMs?: number
+  elapsedTime?: number
   outcome?: string
   inAni?: string
   inDnis?: string
@@ -235,9 +269,37 @@ type SatelCdrRow = {
   outDnis?: string
   billAni?: string
   billDnis?: string
+  srcUser?: string
+  dstUser?: string
+  radiusUser?: string
   srcName?: string
   dstName?: string
   dpName?: string
+  inCpc?: string
+  outCpc?: string
+  inZone?: string
+  outZone?: string
+  inOrigDnis?: string
+  outOrigDnis?: string
+  inAniTypeOfNumber?: string
+  inDnisTypeOfNumber?: string
+  outAniTypeOfNumber?: string
+  outDnisTypeOfNumber?: string
+  inOrigDnisTypeOfNumber?: string
+  outOrigDnisTypeOfNumber?: string
+  extAniTypeOfNumber?: string
+  extDnisTypeOfNumber?: string
+  extOrigDnisTypeOfNumber?: string
+  inAniScreening?: string
+  inAniPresentation?: string
+  outAniScreening?: string
+  outAniPresentation?: string
+  inLrn?: string
+  retrievedLrn?: string
+  lrn?: string
+  extLrn?: string
+  outLrn?: string
+  lnpServer?: string
   protocols?: string[] | string
   sigNodeName?: string
   signalNodeName?: string
@@ -251,10 +313,17 @@ type SatelCdrRow = {
   dstCallId?: string
   inLegCallId?: string
   outLegCallId?: string
+  srcInLegConfId?: string
+  srcInLegCallId?: string
+  srcOutLegCallId?: string
   disconnectCode?: string | number
   disconnectText?: string
   disconnectSuccess?: boolean
   disconnectInitiator?: string
+  srcDisconnectCodes?: string
+  dstDisconnectCodes?: string
+  srcDisconnectText?: string
+  dstDisconnectText?: string
   endpoints?: unknown
   codecs?: unknown
   timing?: unknown
@@ -294,6 +363,30 @@ type SatelCdrRow = {
   srcMaxJitter?: number
   dstMinJitter?: number
   dstMaxJitter?: number
+  routeRetries?: number
+  outgoingPulses?: number
+  incomingPulses?: number
+  loopingCycles?: number
+  proxyMode?: string
+  larFaultReason?: string
+  mediaGroup?: string
+  externalRouter?: string
+  radiusGroup?: string
+  sipRoutingGroup?: string
+  authDnis?: string
+  extAni?: string
+  extDnis?: string
+  extSigAddress?: string
+  inPartnerId?: string
+  outPartnerId?: string
+  inEncryption?: string
+  outEncryption?: string
+  recordType?: string
+  lastCdr?: boolean
+  parserVersion?: string
+  sourceTimezone?: string
+  sourceUtcOffsetMinutes?: number
+  setupTimeLocal?: string
   rawFields?: Record<string, unknown>
 }
 type CoverageSummary = {
@@ -1113,6 +1206,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const loadingRef = useRef(false)
   const generationRef = useRef(0)
   const isSatel = device.templateKey === 'satel-rtu-cdr-v1'
+  const presetStorageKey = cdrPresetStorageKey(device.id)
+  const [columnPresetId, setColumnPresetId] = useState(() =>
+    window.sessionStorage.getItem(presetStorageKey) || defaultCdrPresetId())
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     const base = dataset === 'calls'
@@ -1221,6 +1317,17 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     <div className="toolbar">
       <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
+        {dataset === 'calls' && <label className="cdr-preset">
+          <span>Пресет</span>
+          <select value={columnPresetId} onChange={(event) => {
+            const next = event.target.value || defaultCdrPresetId()
+            window.sessionStorage.setItem(presetStorageKey, next)
+            setColumnPresetId(next)
+          }}>
+            {CDR_PRESETS.map((preset) =>
+              <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+          </select>
+        </label>}
         <div className="search"><Search size={14} /><input placeholder="Поиск по данным…"
           value={query} onChange={(event) => setQuery(event.target.value)} /></div>
         <ExportButton key={`${dataset}:${date}:${query}`} deviceID={device.id}
@@ -1234,8 +1341,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           Повторить</button></div>}
       {dataset === 'calls' ? (isSatel
         ? <SatelCallsTable rows={rows as SatelCdrRow[]}
+          columns={resolvePresetColumns('satel', columnPresetId)}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedSatelCall} />
         : <CallsTable rows={rows as CallRow[]}
+          columns={resolvePresetColumns('eltex', columnPresetId)}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedCall} />) :
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
@@ -1387,28 +1496,48 @@ function AntifraudDrawer({ device, row, onClose }: {
   return <SharedCallCard device={device} callID={row.callId} onClose={onClose} />
 }
 
-function CallsTable({ rows, timezone, onSelect }: {
+function emptyCell(value: unknown): string {
+  if (value == null || value === '') return '—'
+  return String(value)
+}
+
+function eltexCallCell(row: CallRow, column: CdrColumnDef, timezone: string): ReactNode {
+  switch (column.key) {
+    case 'setupTime':
+      return formatTime(row.setupTime, timezone)
+    case 'connectTime':
+      return formatTime(row.connectTime, timezone)
+    case 'disconnectTime':
+      return formatTime(row.disconnectTime, timezone)
+    case 'durationMs':
+      return formatDurationSeconds(row.durationMs)
+    case 'releaseInfo':
+      return <>
+        <span className={`outcome-badge ${cdrOutcome(row.releaseCause)}`}>
+          {outcomeLabel(cdrOutcome(row.releaseCause))}
+        </span>{' '}{row.releaseInfo || '—'}
+      </>
+    default:
+      return emptyCell((row as unknown as Record<string, unknown>)[column.key])
+  }
+}
+
+function CallsTable({ rows, columns, timezone, onSelect }: {
   rows: CallRow[]
+  columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: CallRow) => void
 }) {
-  return <table><thead><tr>
-    <th>Установка</th><th>Входящий маршрут</th><th>Исходящий маршрут</th><th>Номер A: вход</th>
-    <th>Номер A: выход</th><th>Номер B: вход</th><th>Номер B: выход</th><th>Длит.</th>
-    <th>Q.850</th><th>Результат</th><th>Acct-Session-Id</th><th>UniqueTag</th>
+  return <table className="eltex-cdr-table"><thead><tr>
+    {columns.map((column) => <th key={column.key}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId}
     className={`outcome-row outcome-${cdrOutcome(row.releaseCause)}`}
     onClick={() => onSelect(row)}>
-    <td className="mono">{formatTime(row.setupTime, timezone)}</td>
-    <td>{row.incomingDescription || '—'}</td><td>{row.outgoingDescription || '—'}</td>
-    <td className="mono">{row.incomingCgpn || '—'}</td><td className="mono">{row.outgoingCgpn || '—'}</td>
-    <td className="mono">{row.incomingCdpn || '—'}</td><td className="mono">{row.outgoingCdpn || '—'}</td>
-    <td className="right">{formatDurationSeconds(row.durationMs)}</td>
-    <td className="right">{row.releaseCause ?? '—'}</td><td>
-      <span className={`outcome-badge ${cdrOutcome(row.releaseCause)}`}>
-        {outcomeLabel(cdrOutcome(row.releaseCause))}
-      </span> {row.releaseInfo || '—'}</td>
-    <td className="mono">{row.radiusSessionId || '—'}</td><td className="mono">{row.uniqueTag || '—'}</td>
+    {columns.map((column) => <td key={column.key}
+      className={[column.mono ? 'mono' : '', column.align === 'right' ? 'right' : '']
+        .filter(Boolean).join(' ') || undefined}>
+      {eltexCallCell(row, column, timezone)}
+    </td>)}
   </tr>)}</tbody></table>
 }
 
@@ -1425,30 +1554,60 @@ function formatSatelProtocols(row: SatelCdrRow) {
   return configured || [row.inLegProto, row.outLegProto].filter(Boolean).join(' → ') || '—'
 }
 
-function SatelCallsTable({ rows, timezone, onSelect }: {
+function satelCallCell(row: SatelCdrRow, column: CdrColumnDef, timezone: string): ReactNode {
+  switch (column.key) {
+    case 'setupTime':
+      return formatTime(row.setupTime, timezone)
+    case 'connectTime':
+      return formatTime(row.connectTime, timezone)
+    case 'disconnectTime':
+      return formatTime(row.disconnectTime, timezone)
+    case 'termSetupTime':
+      return formatTime(row.termSetupTime, timezone)
+    case 'termConnectTime':
+      return formatTime(row.termConnectTime, timezone)
+    case 'termDisconnectTime':
+      return formatTime(row.termDisconnectTime, timezone)
+    case 'cdrDate':
+      return formatTime(row.cdrDate, timezone)
+    case 'durationMs':
+      return formatDurationSeconds(row.durationMs)
+    case 'outcome': {
+      const outcome = satelCallOutcome(row)
+      return <span className={`outcome-badge ${outcome}`}>
+        {row.outcome || (row.connectTime ? 'answered' : 'failed')}
+      </span>
+    }
+    case 'protocols':
+      return formatSatelProtocols(row)
+    case 'signalNodeName':
+      return emptyCell(row.signalNodeName || row.sigNodeName)
+    case 'disconnectSuccess':
+      return row.disconnectSuccess == null ? '—' : (row.disconnectSuccess ? 'да' : 'нет')
+    case 'lastCdr':
+      return row.lastCdr == null ? '—' : (row.lastCdr ? 'да' : 'нет')
+    default:
+      return emptyCell((row as unknown as Record<string, unknown>)[column.key])
+  }
+}
+
+function SatelCallsTable({ rows, columns, timezone, onSelect }: {
   rows: SatelCdrRow[]
+  columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: SatelCdrRow) => void
 }) {
   return <table className="satel-cdr-table"><thead><tr>
-    <th>Установка</th><th>Соединение</th><th>Завершение</th><th>Результат</th><th>ANI вход</th><th>DNIS вход</th>
-    <th>ANI выход</th><th>DNIS выход</th><th>Src маршрут</th><th>Dst маршрут</th>
-    <th>DP маршрут</th><th>Длительность</th><th>Протоколы</th>
-    <th>Разъединение</th><th>Код</th><th>Узел</th>
+    {columns.map((column) => <th key={column.key}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => {
     const outcome = satelCallOutcome(row)
     return <tr key={row.recordId} className={`outcome-row outcome-${outcome}`}
       onClick={() => onSelect(row)}>
-      <td className="mono">{formatTime(row.setupTime, timezone)}</td>
-      <td className="mono">{formatTime(row.connectTime, timezone)}</td>
-      <td className="mono">{formatTime(row.disconnectTime, timezone)}</td>
-      <td><span className={`outcome-badge ${outcome}`}>{row.outcome || (row.connectTime ? 'answered' : 'failed')}</span></td>
-      <td className="mono">{row.inAni || '—'}</td><td className="mono">{row.inDnis || '—'}</td>
-      <td className="mono">{row.outAni || '—'}</td><td className="mono">{row.outDnis || '—'}</td>
-      <td>{row.srcName || '—'}</td><td>{row.dstName || '—'}</td><td>{row.dpName || '—'}</td>
-      <td className="right">{formatDurationSeconds(row.durationMs)}</td>
-      <td>{formatSatelProtocols(row)}</td><td>{row.disconnectText || '—'}</td>
-      <td className="right">{row.disconnectCode ?? '—'}</td><td>{row.signalNodeName || row.sigNodeName || '—'}</td>
+      {columns.map((column) => <td key={column.key}
+        className={[column.mono ? 'mono' : '', column.align === 'right' ? 'right' : '']
+          .filter(Boolean).join(' ') || undefined}>
+        {satelCallCell(row, column, timezone)}
+      </td>)}
     </tr>
   })}</tbody></table>
 }

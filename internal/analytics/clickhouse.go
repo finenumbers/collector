@@ -41,22 +41,51 @@ type TimeRange struct {
 }
 
 type CallRow struct {
-	RecordID            uuid.UUID  `json:"recordId"`
-	SetupTime           *time.Time `json:"setupTime"`
-	DurationMS          *uint64    `json:"durationMs"`
-	ReleaseCause        *uint16    `json:"releaseCause"`
-	ReleaseInfo         string     `json:"releaseInfo"`
-	IncomingCgPN        string     `json:"incomingCgpn"`
-	OutgoingCgPN        string     `json:"outgoingCgpn"`
-	IncomingCdPN        string     `json:"incomingCdpn"`
-	OutgoingCdPN        string     `json:"outgoingCdpn"`
-	IncomingDescription string     `json:"incomingDescription"`
-	OutgoingDescription string     `json:"outgoingDescription"`
-	RadiusSessionID     string     `json:"radiusSessionId"`
-	UniqueTag           string     `json:"uniqueTag"`
-	SetupTimeLocal      string     `json:"setupTimeLocal"`
-	SourceTimezone      string     `json:"sourceTimezone"`
-	SortTime            time.Time  `json:"-"`
+	RecordID                      uuid.UUID  `json:"recordId"`
+	SetupTime                     *time.Time `json:"setupTime"`
+	ConnectTime                   *time.Time `json:"connectTime,omitempty"`
+	DisconnectTime                *time.Time `json:"disconnectTime,omitempty"`
+	DurationMS                    *uint64    `json:"durationMs"`
+	ReleaseCause                  *uint16    `json:"releaseCause"`
+	ReleaseInfo                   string     `json:"releaseInfo"`
+	ReleaseSide                   string     `json:"releaseSide,omitempty"`
+	IncomingIP                    string     `json:"incomingIp,omitempty"`
+	OutgoingIP                    string     `json:"outgoingIp,omitempty"`
+	IncomingType                  string     `json:"incomingType,omitempty"`
+	OutgoingType                  string     `json:"outgoingType,omitempty"`
+	IncomingDescription           string     `json:"incomingDescription"`
+	OutgoingDescription           string     `json:"outgoingDescription"`
+	IncomingCgPN                  string     `json:"incomingCgpn"`
+	OutgoingCgPN                  string     `json:"outgoingCgpn"`
+	IncomingCdPN                  string     `json:"incomingCdpn"`
+	OutgoingCdPN                  string     `json:"outgoingCdpn"`
+	IncomingRedirectingNumber     string     `json:"incomingRedirectingNumber,omitempty"`
+	OutgoingRedirectingNumber     string     `json:"outgoingRedirectingNumber,omitempty"`
+	IncomingNumplan               string     `json:"incomingNumplan,omitempty"`
+	OutgoingNumplan               string     `json:"outgoingNumplan,omitempty"`
+	CallingNAI                    string     `json:"callingNai,omitempty"`
+	CalledNAI                     string     `json:"calledNai,omitempty"`
+	IncomingE1Stream              string     `json:"incomingE1Stream,omitempty"`
+	IncomingE1Channel             string     `json:"incomingE1Channel,omitempty"`
+	OutgoingE1Stream              string     `json:"outgoingE1Stream,omitempty"`
+	OutgoingE1Channel             string     `json:"outgoingE1Channel,omitempty"`
+	IncomingSIPCallID             string     `json:"incomingSipCallId,omitempty"`
+	OutgoingSIPCallID             string     `json:"outgoingSipCallId,omitempty"`
+	IncomingSS7CIC                *uint32    `json:"incomingSs7Cic,omitempty"`
+	OutgoingSS7CIC                *uint32    `json:"outgoingSs7Cic,omitempty"`
+	RadiusSessionID               string     `json:"radiusSessionId"`
+	RadiusSessionIDNormalized     string     `json:"radiusSessionIdNormalized,omitempty"`
+	GlobalCallref                 string     `json:"globalCallref,omitempty"`
+	UniqueTag                     string     `json:"uniqueTag"`
+	TransferMark                  string     `json:"transferMark,omitempty"`
+	RejectingRadiusServer         string     `json:"rejectingRadiusServer,omitempty"`
+	SequenceNumber                string     `json:"sequenceNumber,omitempty"`
+	BootEpoch                     string     `json:"bootEpoch,omitempty"`
+	Sequence                      uint64     `json:"sequence,omitempty"`
+	SetupTimeLocal                string     `json:"setupTimeLocal"`
+	SourceTimezone                string     `json:"sourceTimezone"`
+	SourceUTCOffsetMinutes        int16      `json:"sourceUtcOffsetMinutes,omitempty"`
+	SortTime                      time.Time  `json:"-"`
 }
 
 type CallCursor struct {
@@ -413,10 +442,22 @@ func (c *Client) ListCallsPageRange(
 	if limit == 0 || limit > 1000 {
 		limit = 200
 	}
-	query := `SELECT c.record_id,coalesce(t.setup_time,c.setup_time),c.duration_ms,
-		c.release_cause,c.release_info,c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,
-		c.outgoing_cdpn,c.incoming_description,c.outgoing_description,c.radius_session_id,
-		c.unique_tag,coalesce(t.setup_time,c.setup_time,c.ingested_at) AS sort_time
+	query := `SELECT c.record_id,
+		coalesce(t.setup_time,c.setup_time),
+		coalesce(t.connect_time,c.connect_time),
+		coalesce(t.disconnect_time,c.disconnect_time),
+		c.duration_ms,c.release_cause,c.release_info,c.release_side,
+		ifNull(toString(c.incoming_ip),''),ifNull(toString(c.outgoing_ip),''),
+		c.incoming_type,c.outgoing_type,c.incoming_description,c.outgoing_description,
+		c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,c.outgoing_cdpn,
+		c.incoming_redirecting_number,c.outgoing_redirecting_number,
+		c.incoming_numplan,c.outgoing_numplan,c.calling_nai,c.called_nai,
+		c.incoming_e1_stream,c.incoming_e1_channel,c.outgoing_e1_stream,c.outgoing_e1_channel,
+		c.incoming_sip_call_id,c.outgoing_sip_call_id,c.incoming_ss7_cic,c.outgoing_ss7_cic,
+		c.radius_session_id,c.radius_session_id_normalized,c.global_callref,c.unique_tag,
+		c.transfer_mark,c.rejecting_radius_server,c.sequence_number,c.boot_epoch,c.sequence,
+		c.source_timezone,c.source_utc_offset_minutes,
+		coalesce(t.setup_time,c.setup_time,c.ingested_at) AS sort_time
 		FROM collector.cdr_records AS c FINAL
 		LEFT JOIN collector.cdr_time_interpretations AS t FINAL
 			ON t.device_id=c.device_id AND t.record_id=c.record_id
@@ -451,12 +492,23 @@ func (c *Client) ListCallsPageRange(
 	result := make([]CallRow, 0)
 	for rows.Next() {
 		var row CallRow
-		if err := rows.Scan(&row.RecordID, &row.SetupTime, &row.DurationMS, &row.ReleaseCause,
-			&row.ReleaseInfo, &row.IncomingCgPN, &row.OutgoingCgPN, &row.IncomingCdPN,
-			&row.OutgoingCdPN, &row.IncomingDescription, &row.OutgoingDescription,
-			&row.RadiusSessionID, &row.UniqueTag, &row.SortTime); err != nil {
+		if err := rows.Scan(
+			&row.RecordID, &row.SetupTime, &row.ConnectTime, &row.DisconnectTime,
+			&row.DurationMS, &row.ReleaseCause, &row.ReleaseInfo, &row.ReleaseSide,
+			&row.IncomingIP, &row.OutgoingIP, &row.IncomingType, &row.OutgoingType,
+			&row.IncomingDescription, &row.OutgoingDescription,
+			&row.IncomingCgPN, &row.OutgoingCgPN, &row.IncomingCdPN, &row.OutgoingCdPN,
+			&row.IncomingRedirectingNumber, &row.OutgoingRedirectingNumber,
+			&row.IncomingNumplan, &row.OutgoingNumplan, &row.CallingNAI, &row.CalledNAI,
+			&row.IncomingE1Stream, &row.IncomingE1Channel, &row.OutgoingE1Stream, &row.OutgoingE1Channel,
+			&row.IncomingSIPCallID, &row.OutgoingSIPCallID, &row.IncomingSS7CIC, &row.OutgoingSS7CIC,
+			&row.RadiusSessionID, &row.RadiusSessionIDNormalized, &row.GlobalCallref, &row.UniqueTag,
+			&row.TransferMark, &row.RejectingRadiusServer, &row.SequenceNumber, &row.BootEpoch,
+			&row.Sequence, &row.SourceTimezone, &row.SourceUTCOffsetMinutes, &row.SortTime,
+		); err != nil {
 			return CallPage{}, err
 		}
+		row.SetupTimeLocal = localRFC3339(row.SetupTime, row.SourceTimezone)
 		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {

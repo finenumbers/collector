@@ -664,7 +664,8 @@ func extractCallKey(attributes []Attribute) CallKey {
 }
 
 func normalizeIdentity(value string) string {
-	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+	// Compact form must match CDR radius_session_id_normalized and reconciliation.
+	return strings.ToLower(strings.Join(strings.Fields(value), ""))
 }
 
 func attributeValue(attributes []Attribute, names ...string) string {

@@ -296,7 +296,8 @@ type SatelCdrRow = {
   rawFields?: Record<string, unknown>
 }
 type CoverageSummary = {
-  state: 'matched' | 'expected' | 'late' | 'missing' | 'ambiguous' | 'not_applicable' | 'unmatched'
+  state: 'matched' | 'expected' | 'late' | 'missing' | 'ambiguous' | 'not_applicable' |
+    'unmatched' | 'awaiting_cdr'
   method?: string
   reason?: string
   deltaMs?: number
@@ -304,6 +305,22 @@ type CoverageSummary = {
   ambiguityReason?: string
   evidence?: Record<string, unknown>
   linkedCdrIds: string[]
+}
+type ChainCompleteness = {
+  state: string
+  missingStages?: string[]
+  missingResponses?: string[]
+  notes?: string[]
+}
+type TimelineEvent = {
+  ts: string
+  phase: string
+  radiusType: string
+  xpgkRequestType?: string
+  acctStatusType?: string
+  decision?: string
+  summary: string
+  packetId: string
 }
 type AntifraudRow = {
   callId: string
@@ -318,6 +335,7 @@ type AntifraudRow = {
   packetCount: number
   explanationCodes: string[]
   coverage: CoverageSummary
+  chainCompleteness?: ChainCompleteness
 }
 type OrderedAttribute = { name: string; value: unknown }
 type AntifraudPacket = {
@@ -342,6 +360,17 @@ type AntifraudPacket = {
   members: { eventId: string; receivedAt: string; sourceIp: string; sourcePort: number }[]
 }
 type AntifraudCallDetail = AntifraudRow & {
+  participants?: { callingNumber?: string; calledNumber?: string }
+  finalDecision?: string
+  timeline?: TimelineEvent[]
+  accounting?: {
+    setupTime?: string
+    connectTime?: string
+    disconnectTime?: string
+    disconnectCause?: string
+    sessionTimeSec?: number
+    delayTimeSec?: number
+  }
   accountingStart?: string
   accountingStop?: string
   sessionDurationSeconds?: number
@@ -349,6 +378,7 @@ type AntifraudCallDetail = AntifraudRow & {
   unmatched?: unknown
   orphanPacketIds: string[]
   packets: AntifraudPacket[]
+  rawPackets?: AntifraudPacket[]
   exchanges: {
     exchangeId: string
     requestId: string
@@ -1300,14 +1330,15 @@ function AntifraudTable({ rows, timezone, onSelect }: {
   onSelect: (row: AntifraudRow) => void
 }) {
   return <table><thead><tr>
-    <th>Начало</th><th>Номер A</th><th>Номер B</th><th>Фазы</th><th>Статус</th>
-    <th>Покеты</th><th>Покрытие CDR</th><th>Acct-Session-Id</th><th>H323 Conf ID</th>
+    <th>Начало</th><th>Номер A</th><th>Номер B</th><th>Фазы</th><th>Цепочка</th><th>Статус</th>
+    <th>Пакеты</th><th>Покрытие CDR</th><th>Acct-Session-Id</th><th>H323 Conf ID</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.callId}
     onClick={() => onSelect(row)}>
     <td className="mono">{formatTime(row.firstSeenAt, timezone)}</td>
     <td className="mono">{row.calling || '—'}</td>
     <td className="mono">{row.called || '—'}</td>
     <td>{row.phases?.join(' → ') || '—'}</td>
+    <td><ChainCompletenessBadge value={row.chainCompleteness} /></td>
     <td><span className={`parse-status ${row.status}`}>{row.status}</span></td>
     <td className="right">{row.packetCount}</td>
     <td><CoverageBadge coverage={row.coverage} /></td>
@@ -1469,10 +1500,25 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
 function CoverageBadge({ coverage }: { coverage: CoverageSummary }) {
   const state = coverage.ambiguous ? 'ambiguous' : coverage.state
   const labels: Record<string, string> = {
-    matched: 'Связан', expected: 'Ожидается', late: 'Опаздывает', missing: 'Отсутствует',
+    matched: 'Связан', awaiting_cdr: 'Ожидает CDR', expected: 'Ожидается CDR',
+    late: 'CDR опаздывает', missing: 'CDR отсутствует',
     ambiguous: 'Неоднозначно', not_applicable: 'Не применяется', unmatched: 'CDR не найден',
   }
   return <span className={`parse-status ${state}`} title={coverage.reason || coverage.ambiguityReason}>
+    {labels[state] || state}
+  </span>
+}
+
+function ChainCompletenessBadge({ value }: { value?: ChainCompleteness }) {
+  const state = value?.state || 'minimal'
+  const labels: Record<string, string> = {
+    complete: 'Полная', partial: 'Неполная', minimal: 'Минимальная',
+  }
+  const title = [
+    ...(value?.missingStages || []).map((stage) => `нет: ${stage}`),
+    ...(value?.notes || []),
+  ].join('; ')
+  return <span className={`parse-status ${state}`} title={title || undefined}>
     {labels[state] || state}
   </span>
 }
@@ -1555,27 +1601,64 @@ function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
 }
 
 function AntiFraudCallBody({ value, timezone }: { value: AntifraudCallDetail; timezone: string }) {
+  const calling = value.participants?.callingNumber || value.calling || '—'
+  const called = value.participants?.calledNumber || value.called || '—'
+  const packets = value.rawPackets?.length ? value.rawPackets : value.packets
+  const timeline = value.timeline?.length ? value.timeline : []
+  const completeness = value.chainCompleteness
   return <section aria-label="Полный цикл AntiFraud">
-    <h4>Цикл Custom AntiFraud</h4>
+    <h4>Цепочка AntiFraud</h4>
     <div className="call-facts">
-      <span><small>Начало</small><strong>{formatTime(value.firstSeenAt, timezone)}</strong></span>
-      <span><small>Завершение</small><strong>{formatTime(value.lastSeenAt, timezone)}</strong></span>
+      <span><small>CALL</small><strong className="mono">{value.acctSessionId || value.callId}</strong></span>
+      <span><small>A → B</small><strong className="mono">{calling} → {called}</strong></span>
       <span><small>Статус</small><strong>{value.status}</strong></span>
+      <span><small>Final</small><strong>{value.finalDecision || '—'}</strong></span>
       <span><small>Фазы</small><strong>{value.phases?.join(' → ') || '—'}</strong></span>
-      <span><small>Номера A / B</small><strong className="mono">{value.calling || '—'} / {value.called || '—'}</strong></span>
-      <span><small>Session / H323</small><strong className="mono">{value.acctSessionId || '—'} / {value.h323ConfId || '—'}</strong></span>
+      <span><small>Полнота цепочки</small><strong><ChainCompletenessBadge value={completeness} /></strong></span>
+      <span><small>Покрытие CDR</small><strong><CoverageBadge coverage={value.coverage} /></strong></span>
+      <span><small>H323</small><strong className="mono">{value.h323ConfId || '—'}</strong></span>
+      <span><small>Длительность</small><strong>
+        {value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds ?? '—'}
+        {(value.accounting?.sessionTimeSec != null || value.sessionDurationSeconds != null) ? ' c' : ''}
+      </strong></span>
+      <span><small>Cause</small><strong>{value.accounting?.disconnectCause || '—'}</strong></span>
     </div>
+    {completeness?.state && completeness.state !== 'complete' && <p className="warning-text" role="status">
+      Цепочка неполная
+      {completeness.missingStages?.length ? `: нет ${completeness.missingStages.join(', ')}` : ''}
+      {completeness.notes?.length ? `. ${completeness.notes.join('; ')}` : '.'}
+    </p>}
+    <div className="timeline">{timeline.map((event, index) =>
+      <div className="timeline-item" key={`${event.packetId}-${index}`}>
+        <div className="call-facts">
+          <span><small>{index + 1}. {event.phase}</small>
+            <strong>{event.radiusType}{event.xpgkRequestType ? ` · ${event.xpgkRequestType}` : ''}
+              {event.acctStatusType ? ` · ${event.acctStatusType}` : ''}</strong></span>
+          <span><small>Время</small><strong className="mono">{formatTime(event.ts, timezone)}</strong></span>
+          <span><small>Решение</small><strong>{event.decision || '—'}</strong></span>
+          <span><small>Смысл</small><strong>{event.summary}</strong></span>
+        </div>
+      </div>)}
+    </div>
+
+    <h4>Пакеты и атрибуты ({packets?.length || 0})</h4>
     {value.truncated && <p className="warning-text" role="alert">
       Ответ сокращён: {value.warnings?.join('; ')}</p>}
+    <div className="call-facts">
+      <span><small>Setup</small><strong>{formatTime(value.accounting?.setupTime || value.accountingStart, timezone)}</strong></span>
+      <span><small>Disconnect</small><strong>{formatTime(value.accounting?.disconnectTime || value.accountingStop, timezone)}</strong></span>
+      <span><small>Delay</small><strong>{value.accounting?.delayTimeSec ?? '—'}
+        {value.accounting?.delayTimeSec != null ? ' c' : ''}</strong></span>
+    </div>
     <details><summary>Атрибуты вызова ({value.attributes?.length || 0})</summary>
       <pre className="raw-payload">{JSON.stringify(redactDisplayValue(value.attributes || []), null, 2)}</pre></details>
     <details><summary>Обмены request / response ({value.exchanges?.length || 0})</summary>
       <pre className="raw-payload">{JSON.stringify(redactDisplayValue(value.exchanges || []), null, 2)}</pre></details>
-    <h4>Пакеты и обмены ({value.packets?.length || 0})</h4>
-    <div className="timeline">{value.packets?.map((packet) =>
+    <div className="timeline">{packets?.map((packet) =>
       <details className="timeline-item" key={packet.packetId}>
         <summary><span className="mono">{formatTime(packet.firstSeenAt, timezone)}</span>
-          {' '}{packet.phase} · {packet.direction} · {packet.status} · {packet.decision || 'без решения'}</summary>
+          {' '}{packet.family || packet.phase} · {packet.radiusType} · {packet.direction} · {packet.status}
+          {' '}· {packet.decision || 'без решения'}</summary>
         <div className="call-facts">
           <span><small>Request / response</small><strong className="mono">
             {packet.requestId || '—'} / {packet.responseId || '—'}</strong></span>

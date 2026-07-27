@@ -666,7 +666,7 @@ func boolByte(value bool) uint8 {
 }
 
 func normalizeIdentity(value string) string {
-	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+	return strings.ToLower(strings.Join(strings.Fields(value), ""))
 }
 
 func redactAttributes(attributes []customradius.Attribute) []customradius.Attribute {

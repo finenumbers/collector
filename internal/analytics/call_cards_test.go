@@ -3,6 +3,7 @@ package analytics
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSafeOrderedAttributesRedactsSecretsAndKeepsOrder(t *testing.T) {
@@ -29,6 +30,27 @@ func TestSafeOrderedAttributesRedactsSecretsAndKeepsOrder(t *testing.T) {
 func TestSafeJSONValueRejectsRawNonJSONPayload(t *testing.T) {
 	if got := safeJSONValue(`User-Password=secret`); got != nil {
 		t.Fatalf("raw payload escaped JSON boundary: %#v", got)
+	}
+}
+
+func TestOrderedFamiliesAndCompleteness(t *testing.T) {
+	phases := orderedFamilies([]string{"accounting", "unknown", "indication", "verification", "indication"})
+	if strings.Join(phases, ",") != "indication,verification,accounting" {
+		t.Fatalf("phases=%v", phases)
+	}
+	complete := chainCompletenessFromSummary(phases, 0, 0, "completed")
+	if complete.State != "complete" {
+		t.Fatalf("complete=%+v", complete)
+	}
+	partial := chainCompletenessFromSummary([]string{"indication"}, 1, 0, "pending")
+	if partial.State != "partial" && partial.State != "minimal" {
+		t.Fatalf("partial=%+v", partial)
+	}
+	if deriveAFCoverageState(true, false, time.Now().UTC(), time.Now().UTC()) != "matched" {
+		t.Fatal("matched coverage")
+	}
+	if deriveAFCoverageState(false, false, time.Now().UTC().Add(-40*time.Minute), time.Now().UTC()) != "missing" {
+		t.Fatal("missing coverage")
 	}
 }
 

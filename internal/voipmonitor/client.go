@@ -99,8 +99,8 @@ func mapVMCalls(rows []map[string]any) []VMCall {
 			SIPCalledIP:     firstString(row, "sipcalledip", "calledip"),
 			Duration:        firstInt64(row, "duration"),
 			ConnectDuration: firstInt64(row, "connect_duration", "connectduration"),
-			LastSIPResponse: int(firstInt64(row, "lastSIPresponseNum", "lastsipresponsenum")),
-			SensorID:        int(firstInt64(row, "id_sensor", "sensor_id")),
+			LastSIPResponse: firstInt64(row, "lastSIPresponseNum", "lastsipresponsenum"),
+			SensorID:        firstInt64(row, "id_sensor", "sensor_id"),
 		}
 		call.CallDate = firstTime(row, "calldate", "callDate", "start")
 		call.CallEnd = firstTime(row, "callend", "callEnd", "end")

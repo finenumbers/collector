@@ -118,8 +118,8 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"SELECT count() FROM collector.schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 29 {
-		t.Fatalf("got %d applied migrations, want 29", applied)
+	if applied != 30 {
+		t.Fatalf("got %d applied migrations, want 30", applied)
 	}
 	rows, err := client.Conn.Query(ctx, `SELECT name FROM system.tables
 		WHERE database='collector' ORDER BY name`)
@@ -141,7 +141,7 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"cdr_antifraud_assignments", "cdr_antifraud_assignments_current",
 		"cdr_antifraud_coverage", "cdr_antifraud_coverage_current",
 		"cdr_reconciliation_dirty_buckets", "cdr_records", "cdr_time_facts",
-		"cdr_time_interpretations",
+		"cdr_time_interpretations", "cdr_voipmonitor_links", "cdr_voipmonitor_links_current",
 		"custom_antifraud_call_packets", "custom_antifraud_call_packets_current",
 		"custom_antifraud_calls", "custom_antifraud_calls_current",
 		"custom_projection_dirty_buckets", "custom_projection_state",
@@ -150,6 +150,7 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		"custom_radius_packets", "custom_radius_packets_current",
 		"custom_radius_session_events", "custom_radius_session_events_current", "satel_rtu_cdr",
 		"satel_rtu_cdr_time_facts", "schema_migrations", "syslog_messages",
+		"voipmonitor_dirty_buckets",
 	}
 	if !slices.Equal(tables, want) {
 		t.Fatalf("remaining tables=%v, want %v", tables, want)

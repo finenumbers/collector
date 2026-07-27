@@ -48,8 +48,8 @@ type VMCall struct {
 	Called           string
 	SIPCallerIP      string
 	SIPCalledIP      string
-	LastSIPResponse  int
-	SensorID         int
+	LastSIPResponse  int64
+	SensorID         int64
 }
 
 type MatchResult struct {

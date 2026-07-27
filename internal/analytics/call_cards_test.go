@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestSafeOrderedAttributesRedactsSecretsAndKeepsOrder(t *testing.T) {
@@ -52,6 +54,41 @@ func TestOrderedFamiliesAndCompleteness(t *testing.T) {
 	if deriveAFCoverageState(false, false, time.Now().UTC().Add(-40*time.Minute), time.Now().UTC()) != "missing" {
 		t.Fatal("missing coverage")
 	}
+}
+
+func TestBuildTimelinePairsRequestResponse(t *testing.T) {
+	requestID := mustParseUUID("11111111-1111-4111-8111-111111111111")
+	responseID := mustParseUUID("22222222-2222-4222-8222-222222222222")
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	events := buildTimeline([]AntifraudPacket{
+		{
+			PacketID: requestID, FirstSeenAt: base, Family: "indication",
+			RadiusType: "access-request", Direction: "request", Status: "paired",
+			ResponseID: &responseID,
+			Attributes: []OrderedAttribute{{Name: "xpgk-request-type", Value: "number"}},
+		},
+		{
+			PacketID: responseID, FirstSeenAt: base.Add(time.Millisecond), Family: "indication",
+			RadiusType: "access-accept", Direction: "response", Status: "paired",
+			RequestID: &requestID, Decision: "info_only",
+		},
+	})
+	if len(events) != 1 {
+		t.Fatalf("events=%d, want one paired step: %+v", len(events), events)
+	}
+	if !strings.Contains(events[0].Summary, "Access-Request") ||
+		!strings.Contains(events[0].Summary, "-> Access-Accept") ||
+		events[0].Phase != "indication" {
+		t.Fatalf("paired summary unexpected: %+v", events[0])
+	}
+}
+
+func mustParseUUID(value string) uuid.UUID {
+	id, err := uuid.Parse(value)
+	if err != nil {
+		panic(err)
+	}
+	return id
 }
 
 func TestCallDetailByteBoundPreservesFullAggregateOutcome(t *testing.T) {

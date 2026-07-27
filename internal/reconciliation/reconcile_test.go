@@ -101,6 +101,23 @@ func TestPolicyRevisionMismatchNeverMatches(t *testing.T) {
 	}
 }
 
+func TestLogicalCallMatchesAnySessionLeg(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	callID := uuid.New()
+	result := Reconcile(Config{}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, IngestedAt: now,
+		AcctSessionID: "session-b", Calling: "100", Called: "200",
+		Enabled: true, PolicyRevision: 1,
+	}}, []Call{{
+		ID: callID, DeviceID: device, EventTime: now, AcctSessionID: "session-a",
+		AcctSessionIDs: []string{"session-a", "session-b"}, H323ConfID: "conf",
+		Calling: "100", Called: "200", PolicyRevision: 1,
+	}})
+	if len(result.Assignments) != 1 || result.Assignments[0].CallID != callID {
+		t.Fatalf("CDR session-b did not match logical call legs: %+v", result.Assignments)
+	}
+}
+
 func TestCompactSessionMatchesSpacedEltexID(t *testing.T) {
 	device, now := uuid.New(), time.Now().UTC()
 	spaced := "11000307 6a62aaa9 c9f5297a 4f6a3001"

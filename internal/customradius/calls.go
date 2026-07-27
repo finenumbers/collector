@@ -15,7 +15,6 @@ type callAccumulator struct {
 }
 
 func aggregateCalls(packets []Packet, unmatched []UnmatchedFact) ([]Call, []UnmatchedFact) {
-	h323Sessions := make(map[string]map[string]struct{})
 	requestByID := make(map[uuid.UUID]int)
 	for index := range packets {
 		packet := &packets[index]
@@ -24,12 +23,6 @@ func aggregateCalls(packets []Packet, unmatched []UnmatchedFact) ([]Call, []Unma
 		}
 		if packet.Direction == DirectionRequest {
 			requestByID[packet.ID] = index
-		}
-		if packet.CallKey.H323ConfID != "" && packet.CallKey.AcctSessionID != "" {
-			if h323Sessions[packet.CallKey.H323ConfID] == nil {
-				h323Sessions[packet.CallKey.H323ConfID] = make(map[string]struct{})
-			}
-			h323Sessions[packet.CallKey.H323ConfID][packet.CallKey.AcctSessionID] = struct{}{}
 		}
 	}
 
@@ -40,29 +33,25 @@ func aggregateCalls(packets []Packet, unmatched []UnmatchedFact) ([]Call, []Unma
 		if !packet.IsAntifraud {
 			continue
 		}
-		identity := ""
-		if packet.CallKey.AcctSessionID != "" {
-			identity = "session:" + packet.CallKey.AcctSessionID
-		} else if packet.RequestID != nil {
+		identity := logicalCallIdentity(*packet)
+		if identity == "" && packet.RequestID != nil {
 			if requestIndex, exists := requestByID[*packet.RequestID]; exists {
-				identity = callIdentityForPacket(packets[requestIndex], h323Sessions)
+				identity = logicalCallIdentity(packets[requestIndex])
 				if identity != "" {
-					packet.CallKey = packets[requestIndex].CallKey
+					mergeCallKey(&packet.CallKey, packets[requestIndex].CallKey)
 				}
 			}
-		} else {
-			identity = callIdentityForPacket(*packet, h323Sessions)
 		}
 		if identity == "" {
 			packet.Status = PacketAmbiguous
 			packet.Explanations = append(packet.Explanations, explanation(
 				"custom.call.missing_or_ambiguous_key",
-				"The packet had no authoritative session or uniquely mapped H323 identity."))
+				"The packet had no h323-conf-id or Acct-Session-Id for a logical call."))
 			for _, source := range packet.Provenance {
 				callUnmatched = append(callUnmatched, UnmatchedFact{
 					Provenance: source, Reason: "ambiguous_call_identity",
 					Explanation: explanation("custom.call.ambiguous",
-						"The event could not be assigned to a strict Custom call."),
+						"The event could not be assigned to a logical Custom call."),
 				})
 			}
 			continue
@@ -124,22 +113,16 @@ func unmatchedContextKey(fact UnmatchedFact) string {
 		"\x00" + fact.CallContext
 }
 
-func callIdentityForPacket(packet Packet, h323Sessions map[string]map[string]struct{}) string {
+// logicalCallIdentity groups Eltex legs that share h323-conf-id into one call.
+// Without h323, identity falls back to Acct-Session-Id. Numbers/[C…] never key a call.
+func logicalCallIdentity(packet Packet) string {
+	if packet.CallKey.H323ConfID != "" {
+		return "h323:" + packet.CallKey.H323ConfID
+	}
 	if packet.CallKey.AcctSessionID != "" {
 		return "session:" + packet.CallKey.AcctSessionID
 	}
-	if packet.CallKey.H323ConfID == "" {
-		return ""
-	}
-	sessions := h323Sessions[packet.CallKey.H323ConfID]
-	if len(sessions) > 1 {
-		return ""
-	}
-	for session := range sessions {
-		return "session:" + session
-	}
-	// Lone h323 is allowed only as a provisional key; never calling/called or [C…].
-	return "h323:" + packet.CallKey.H323ConfID
+	return ""
 }
 
 func buildCall(identity string, indexes []int, packets []Packet) Call {
@@ -166,10 +149,14 @@ func buildCall(identity string, indexes []int, packets []Packet) Call {
 	}
 	indicatorSet := make(map[string]struct{})
 	attributeSet := make(map[string]struct{})
+	sessionSet := make(map[string]struct{})
 	for _, index := range indexes {
 		packet := packets[index]
 		call.Packets = append(call.Packets, packet)
 		mergeCallKey(&call.Key, packet.CallKey)
+		if packet.CallKey.AcctSessionID != "" {
+			sessionSet[packet.CallKey.AcctSessionID] = struct{}{}
+		}
 		if call.Participants.Calling == "" {
 			call.Participants.Calling = packet.CallKey.Calling
 		}
@@ -201,6 +188,13 @@ func buildCall(identity string, indexes []int, packets []Packet) Call {
 		call.Indicators = append(call.Indicators, indicator)
 	}
 	sort.Strings(call.Indicators)
+	for session := range sessionSet {
+		call.AcctSessionIDs = append(call.AcctSessionIDs, session)
+	}
+	sort.Strings(call.AcctSessionIDs)
+	if call.Key.AcctSessionID == "" && len(call.AcctSessionIDs) > 0 {
+		call.Key.AcctSessionID = call.AcctSessionIDs[0]
+	}
 	call.Status = overallStatus(call.Packets)
 	call.Explanations = append(call.Explanations, statusExplanation(call.Status))
 	return call

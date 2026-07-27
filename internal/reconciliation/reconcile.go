@@ -71,6 +71,7 @@ type Call struct {
 	DeviceID       uuid.UUID
 	EventTime      time.Time
 	AcctSessionID  string
+	AcctSessionIDs []string
 	H323ConfID     string
 	Calling        string
 	Called         string
@@ -226,9 +227,11 @@ func candidatesFor(cdr CDR, calls []Call) ([]Call, string) {
 	if session != "" {
 		var matches []Call
 		for _, call := range calls {
-			if call.DeviceID == cdr.DeviceID &&
-				cdr.PolicyRevision != 0 && call.PolicyRevision == cdr.PolicyRevision &&
-				normalize(call.AcctSessionID) == session {
+			if call.DeviceID != cdr.DeviceID ||
+				cdr.PolicyRevision == 0 || call.PolicyRevision != cdr.PolicyRevision {
+				continue
+			}
+			if callHasSession(call, session) {
 				matches = append(matches, call)
 			}
 		}
@@ -253,6 +256,18 @@ func candidatesFor(cdr CDR, calls []Call) ([]Call, string) {
 		}
 	}
 	return matches, "h323_conf_id"
+}
+
+func callHasSession(call Call, session string) bool {
+	if normalize(call.AcctSessionID) == session {
+		return true
+	}
+	for _, candidate := range call.AcctSessionIDs {
+		if normalize(candidate) == session {
+			return true
+		}
+	}
+	return false
 }
 
 func validateSecondary(config Config, cdr CDR, call Call) (bool, string) {

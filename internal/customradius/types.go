@@ -124,7 +124,7 @@ type CallKey struct {
 	H323ConfID           string `json:"h323ConfId,omitempty"`
 	H323ConfIDDisplay    string `json:"h323ConfIdDisplay,omitempty"`
 	// Context is the Eltex SMG call lane ([C…]) for assembly/pairing only.
-	// It is never a Call identity key (identity is Acct-Session-Id, then h323).
+	// Logical Call identity prefers h323-conf-id, else Acct-Session-Id.
 	Context        string `json:"context,omitempty"`
 	ContextDisplay string `json:"contextDisplay,omitempty"`
 	Calling        string `json:"calling,omitempty"`
@@ -172,18 +172,19 @@ type Accounting struct {
 }
 
 type Call struct {
-	ID           uuid.UUID         `json:"id"`
-	Key          CallKey           `json:"key"`
-	Participants Participants      `json:"participants"`
-	Indicators   []string          `json:"indicators"`
-	Phases       []PacketPhase     `json:"phases"`
-	Attributes   []Attribute       `json:"attributes"`
-	Accounting   Accounting        `json:"accounting"`
-	Packets      []Packet          `json:"packets"`
-	Unmatched    []EventProvenance `json:"unmatched"`
-	Orphans      []uuid.UUID       `json:"orphans"`
-	Explanations []Explanation     `json:"explanations"`
-	Status       CallStatus        `json:"status"`
+	ID             uuid.UUID         `json:"id"`
+	Key            CallKey           `json:"key"`
+	AcctSessionIDs []string          `json:"acctSessionIds,omitempty"`
+	Participants   Participants      `json:"participants"`
+	Indicators     []string          `json:"indicators"`
+	Phases         []PacketPhase     `json:"phases"`
+	Attributes     []Attribute       `json:"attributes"`
+	Accounting     Accounting        `json:"accounting"`
+	Packets        []Packet          `json:"packets"`
+	Unmatched      []EventProvenance `json:"unmatched"`
+	Orphans        []uuid.UUID       `json:"orphans"`
+	Explanations   []Explanation     `json:"explanations"`
+	Status         CallStatus        `json:"status"`
 }
 
 type UnmatchedFact struct {

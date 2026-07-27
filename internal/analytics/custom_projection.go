@@ -380,10 +380,14 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 		}
 		attributes, _ := json.Marshal(redactAttributes(call.Attributes))
 		unmatched, _ := json.Marshal(call.Unmatched)
+		sessionIDs := append([]string(nil), call.AcctSessionIDs...)
+		if len(sessionIDs) == 0 && call.Key.AcctSessionID != "" {
+			sessionIDs = []string{call.Key.AcctSessionID}
+		}
 		calls = append(calls, callRow{args: []any{
 			snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 			snapshot.ProjectionSeq, call.ID, customContractKey(call.Key),
-			call.Key.AcctSessionID, call.Key.H323ConfID, call.Participants.Calling,
+			call.Key.AcctSessionID, sessionIDs, call.Key.H323ConfID, call.Participants.Calling,
 			call.Participants.Called, string(call.Status), "awaiting_cdr",
 			chTimePtr(call.Accounting.StartTime), chTimePtr(call.Accounting.StopTime),
 			call.Accounting.SessionDuration, string(attributes),
@@ -398,7 +402,8 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 	}
 	if err := c.withBatch(ctx, `INSERT INTO collector.custom_antifraud_calls
 		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,call_id,contract_key,
-		acct_session_id,h323_conf_id,calling,called,status,coverage_state,accounting_start,accounting_stop,
+		acct_session_id,acct_session_ids,h323_conf_id,calling,called,status,coverage_state,
+		accounting_start,accounting_stop,
 		session_duration_seconds,ordered_attributes_json,unmatched_provenance_json,
 		orphan_packet_ids,explanation_codes,first_seen_at,last_seen_at,deleted)`, func(batch driver.Batch) error {
 		for _, row := range calls {
@@ -634,11 +639,11 @@ func (c *Client) ListCustomDiagnostics(
 }
 
 func customContractKey(key customradius.CallKey) string {
-	if key.AcctSessionID != "" {
-		return "session:" + key.AcctSessionID
-	}
 	if key.H323ConfID != "" {
 		return "h323:" + key.H323ConfID
+	}
+	if key.AcctSessionID != "" {
+		return "session:" + key.AcctSessionID
 	}
 	return ""
 }

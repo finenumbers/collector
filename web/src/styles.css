@@ -324,8 +324,8 @@ tbody tr { cursor: pointer; }
 
 .drawer { position: fixed; z-index: 15; top: 48px; right: 0; bottom: 0; width: min(560px, calc(100vw - 226px));
   overflow: auto; background: #fff; border-left: 1px solid #c7d0dc; box-shadow: -12px 0 32px rgb(31 41 55 / 10%); }
-.drawer-header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 15px;
-  border-bottom: 1px solid var(--line); }
+.drawer-header { position: sticky; top: 0; z-index: 2; height: 56px; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 15px; border-bottom: 1px solid var(--line); background: #fff; }
 .drawer-header h3 { margin: 0 0 3px; font-size: 14px; }
 .drawer-header span { color: var(--muted); }
 .call-facts { display: grid; grid-template-columns: 1fr 1fr; margin: 12px 15px; border: 1px solid var(--line); }

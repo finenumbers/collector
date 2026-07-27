@@ -68,20 +68,21 @@ type TimelineEvent struct {
 }
 
 type AntifraudCallRow struct {
-	CallID             uuid.UUID          `json:"callId"`
-	FirstSeenAt        time.Time          `json:"firstSeenAt"`
-	LastSeenAt         time.Time          `json:"lastSeenAt"`
-	AcctSessionID      string             `json:"acctSessionId"`
-	H323ConfID         string             `json:"h323ConfId"`
-	Calling            string             `json:"calling"`
-	Called             string             `json:"called"`
-	Status             string             `json:"status"`
-	Phases             []string           `json:"phases"`
-	PacketCount        uint64             `json:"packetCount"`
-	ExplanationCodes   []string           `json:"explanationCodes"`
-	Coverage           CoverageSummary    `json:"coverage"`
-	ChainCompleteness  ChainCompleteness  `json:"chainCompleteness"`
-	SortTime           time.Time          `json:"-"`
+	CallID              uuid.UUID         `json:"callId"`
+	FirstSeenAt         time.Time         `json:"firstSeenAt"`
+	LastSeenAt          time.Time         `json:"lastSeenAt"`
+	AcctSessionID       string            `json:"acctSessionId"`
+	AcctSessionIDs      []string          `json:"acctSessionIds,omitempty"`
+	H323ConfID          string            `json:"h323ConfId"`
+	Calling             string            `json:"calling"`
+	Called              string            `json:"called"`
+	Status              string            `json:"status"`
+	Phases              []string          `json:"phases"`
+	PacketCount         uint64            `json:"packetCount"`
+	ExplanationCodes    []string          `json:"explanationCodes"`
+	Coverage            CoverageSummary   `json:"coverage"`
+	ChainCompleteness   ChainCompleteness `json:"chainCompleteness"`
+	SortTime            time.Time         `json:"-"`
 	storedCoverageState string            `json:"-"`
 }
 
@@ -204,7 +205,7 @@ func (c *Client) ListAntifraudCallsPage(
 		limit = 100
 	}
 	query := `SELECT call.call_id,call.first_seen_at,call.last_seen_at,call.acct_session_id,
-		call.h323_conf_id,call.calling,call.called,call.status,call.coverage_state,call.explanation_codes,
+		call.acct_session_ids,call.h323_conf_id,call.calling,call.called,call.status,call.coverage_state,call.explanation_codes,
 		ifNull(packet_summary.families,[]),ifNull(packet_summary.packet_count,0),
 		ifNull(packet_summary.unpaired,0),ifNull(packet_summary.fallback,0),
 		ifNull(assignment.method,''),ifNull(assignment.reason,''),assignment.delta_ms,
@@ -265,7 +266,7 @@ func (c *Client) ListAntifraudCallsPage(
 		var unpaired, fallback uint64
 		if err := rows.Scan(
 			&item.CallID, &item.FirstSeenAt, &item.LastSeenAt, &item.AcctSessionID,
-			&item.H323ConfID, &item.Calling, &item.Called, &item.Status,
+			&item.AcctSessionIDs, &item.H323ConfID, &item.Calling, &item.Called, &item.Status,
 			&item.storedCoverageState, &item.ExplanationCodes, &families, &item.PacketCount,
 			&unpaired, &fallback,
 			&item.Coverage.Method, &item.Coverage.Reason, &item.Coverage.DeltaMS,
@@ -303,12 +304,12 @@ func (c *Client) AntifraudCallDetail(
 	var detail AntifraudCallDetail
 	var attributes, unmatched string
 	err = c.Conn.QueryRow(ctx, `SELECT snapshot_id,contract_key,call_id,first_seen_at,last_seen_at,acct_session_id,
-		h323_conf_id,calling,called,status,coverage_state,explanation_codes,accounting_start,accounting_stop,
+		acct_session_ids,h323_conf_id,calling,called,status,coverage_state,explanation_codes,accounting_start,accounting_stop,
 		session_duration_seconds,ordered_attributes_json,unmatched_provenance_json,orphan_packet_ids
 		FROM collector.custom_antifraud_calls_current WHERE device_id=? AND call_id=? LIMIT 1`,
 		deviceID, callID).Scan(
 		&detail.SnapshotID, &detail.ContractKey, &detail.CallID, &detail.FirstSeenAt,
-		&detail.LastSeenAt, &detail.AcctSessionID,
+		&detail.LastSeenAt, &detail.AcctSessionID, &detail.AcctSessionIDs,
 		&detail.H323ConfID, &detail.Calling, &detail.Called, &detail.Status,
 		&detail.storedCoverageState, &detail.ExplanationCodes, &detail.AccountingStart, &detail.AccountingStop,
 		&detail.SessionDurationSeconds, &attributes, &unmatched, &detail.OrphanPacketIDs,
@@ -854,25 +855,66 @@ func finalDecisionFrom(detail *AntifraudCallDetail) string {
 }
 
 func buildTimeline(packets []AntifraudPacket) []TimelineEvent {
-	events := make([]TimelineEvent, 0, len(packets))
-	requestPhase := map[uuid.UUID]string{}
-	for _, packet := range packets {
-		if packet.Direction == "request" {
-			requestPhase[packet.PacketID] = timelinePhase(packet)
+	byID := make(map[uuid.UUID]AntifraudPacket, len(packets))
+	ordered := append([]AntifraudPacket(nil), packets...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].FirstSeenAt.Equal(ordered[j].FirstSeenAt) {
+			return ordered[i].PacketID.String() < ordered[j].PacketID.String()
 		}
+		return ordered[i].FirstSeenAt.Before(ordered[j].FirstSeenAt)
+	})
+	for _, packet := range ordered {
+		byID[packet.PacketID] = packet
 	}
-	for _, packet := range packets {
+	usedResponses := map[uuid.UUID]struct{}{}
+	events := make([]TimelineEvent, 0, len(ordered))
+	for _, packet := range ordered {
+		if packet.Direction != "request" {
+			continue
+		}
 		phase := timelinePhase(packet)
-		if packet.Direction == "response" && packet.RequestID != nil {
-			if parent, ok := requestPhase[*packet.RequestID]; ok && parent != "" {
-				phase = parent
+		xpgk := attributeString(packet.Attributes, "xpgk-request-type")
+		acct := attributeString(packet.Attributes, "acct-status-type")
+		responseLabel := ""
+		decision := packet.Decision
+		if packet.ResponseID != nil {
+			if response, ok := byID[*packet.ResponseID]; ok {
+				usedResponses[*packet.ResponseID] = struct{}{}
+				responseLabel = displayRadiusType(response.RadiusType)
+				if response.Decision != "" {
+					decision = response.Decision
+				}
 			}
+		}
+		summary := displayRadiusType(packet.RadiusType)
+		if xpgk != "" {
+			summary += " xpgk-request-type=" + xpgk
+		}
+		if acct != "" {
+			summary += " Acct-Status-Type=" + acct
+		}
+		if responseLabel != "" {
+			summary += " -> " + responseLabel
+		} else if packet.Status == "pending" || decision == "unavailable_fallback" {
+			summary += " -> (no response)"
 		}
 		events = append(events, TimelineEvent{
 			TS: packet.FirstSeenAt, Phase: phase, RadiusType: packet.RadiusType,
-			XpgkRequestType: attributeString(packet.Attributes, "xpgk-request-type"),
-			AcctStatusType:  attributeString(packet.Attributes, "acct-status-type"),
-			Decision:        packet.Decision, Summary: timelineSummary(packet, phase),
+			XpgkRequestType: xpgk, AcctStatusType: acct, Decision: decision,
+			Summary: summary, PacketID: packet.PacketID,
+		})
+	}
+	for _, packet := range ordered {
+		if packet.Direction != "response" {
+			continue
+		}
+		if _, used := usedResponses[packet.PacketID]; used {
+			continue
+		}
+		phase := timelinePhase(packet)
+		events = append(events, TimelineEvent{
+			TS: packet.FirstSeenAt, Phase: phase, RadiusType: packet.RadiusType,
+			Decision: packet.Decision, Summary: displayRadiusType(packet.RadiusType) + " (orphan)",
 			PacketID: packet.PacketID,
 		})
 	}
@@ -885,6 +927,28 @@ func buildTimeline(packets []AntifraudPacket) []TimelineEvent {
 	return events
 }
 
+func displayRadiusType(radiusType string) string {
+	switch strings.ToLower(radiusType) {
+	case "access-request":
+		return "Access-Request"
+	case "access-accept":
+		return "Access-Accept"
+	case "access-reject":
+		return "Access-Reject"
+	case "access-response":
+		return "Access-Response"
+	case "accounting-request":
+		return "Accounting-Request"
+	case "accounting-response":
+		return "Accounting-Response"
+	default:
+		if radiusType == "" {
+			return "RADIUS"
+		}
+		return radiusType
+	}
+}
+
 func timelinePhase(packet AntifraudPacket) string {
 	switch strings.ToLower(packet.Family) {
 	case "indication", "verification", "accounting":
@@ -895,35 +959,6 @@ func timelinePhase(packet AntifraudPacket) string {
 		}
 		return "unknown"
 	}
-}
-
-func timelineSummary(packet AntifraudPacket, phase string) string {
-	requestType := attributeString(packet.Attributes, "xpgk-request-type")
-	switch {
-	case packet.Direction == "request" && phase == "indication":
-		return "Outgoing call registration sent to AntiFraud (" + orDash(requestType) + ")."
-	case packet.Direction == "response" && phase == "indication":
-		return "AntiFraud accepted the information; call is allowed to continue."
-	case packet.Direction == "request" && phase == "verification":
-		return "Call verification request sent (" + orDash(requestType) + ")."
-	case packet.Direction == "response" && phase == "verification" && packet.Decision == "deny":
-		return "Verification denied the call."
-	case packet.Direction == "response" && phase == "verification":
-		return "Verification succeeded; call continues."
-	case packet.Direction == "request" && phase == "accounting":
-		return "Accounting record sent (" + orDash(attributeString(packet.Attributes, "acct-status-type")) + ")."
-	case packet.Direction == "response" && phase == "accounting":
-		return "Accounting record acknowledged."
-	default:
-		return packet.RadiusType + " · " + packet.Status
-	}
-}
-
-func orDash(value string) string {
-	if value == "" {
-		return "n/a"
-	}
-	return value
 }
 
 func attributeString(attributes []OrderedAttribute, name string) string {

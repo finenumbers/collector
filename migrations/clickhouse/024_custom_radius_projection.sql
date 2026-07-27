@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS collector.custom_antifraud_calls
     call_id UUID,
     contract_key String,
     acct_session_id String,
+    acct_session_ids Array(String) DEFAULT [],
     h323_conf_id String,
     calling String,
     called String,

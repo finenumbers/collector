@@ -98,14 +98,19 @@ button:disabled { opacity: .55; cursor: wait; }
 .device-nav button { display: flex; align-items: center; gap: 8px; width: 100%;
   min-height: var(--control-height); padding: 0 8px; text-align: left; color: #475467; }
 .device-nav button:hover { color: var(--text); background: #eef2f7; }
-.device-nav button.active { color: #174ea6; background: var(--accent-soft); }
+.device-nav button.active {
+  color: #0b3d91; background: #c7d9fc; font-weight: 600;
+}
 .device-nav svg { color: #7b8798; }
-.device-nav button.active svg { color: var(--accent); }
+.device-nav button.active svg { color: #174ea6; }
 .sidebar-footer { flex: none; margin-top: auto; border-top: 1px solid var(--line);
   padding: 7px; background: #f8fafc; }
 .sidebar-footer > button { display: flex; align-items: center; gap: 8px; width: 100%;
   min-height: var(--control-height); padding: 0 8px; color: var(--muted); }
-.sidebar-footer > button.active { color: #174ea6; background: var(--accent-soft); }
+.sidebar-footer > button.active {
+  color: #0b3d91; background: #c7d9fc; font-weight: 600;
+}
+.sidebar-footer > button.active svg { color: #174ea6; }
 .user-line { display: flex; align-items: center; justify-content: space-between; padding: 7px; }
 .user-line strong, .user-line small { display: block; font-size: 11px; }
 .user-line small { color: var(--muted); margin-top: 1px; }

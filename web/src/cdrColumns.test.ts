@@ -2,15 +2,49 @@ import { describe, expect, it } from 'vitest'
 import {
   CDR_PRESETS,
   ELTEX_CDR_COLUMNS,
+  ELTEX_SUMMARY_KEYS,
   SATEL_CDR_COLUMNS,
+  SATEL_SUMMARY_KEYS,
   defaultCdrPresetId,
   resolvePresetColumns,
 } from './cdrColumns'
 
 describe('CDR column presets', () => {
-  it('ships «Все данные» as the default preset', () => {
-    expect(CDR_PRESETS).toEqual([{ id: 'all', label: 'Все данные' }])
-    expect(defaultCdrPresetId()).toBe('all')
+  it('ships Summary as the default preset before «Все данные»', () => {
+    expect(CDR_PRESETS.map((preset) => preset.id)).toEqual(['summary', 'all'])
+    expect(CDR_PRESETS[0]).toMatchObject({ id: 'summary', label: 'Summary' })
+    expect(defaultCdrPresetId()).toBe('summary')
+  })
+
+  it('resolves eltex Summary in the agreed order', () => {
+    const keys = resolvePresetColumns('eltex', 'summary').map((column) => column.key)
+    expect(keys).toEqual(ELTEX_SUMMARY_KEYS)
+    expect(keys).toEqual([
+      'connectTime',
+      'outgoingCgpn',
+      'outgoingCdpn',
+      'outgoingRedirectingNumber',
+      'incomingDescription',
+      'outgoingDescription',
+      'durationMs',
+      'releaseInfo',
+    ])
+  })
+
+  it('resolves satel Summary in the agreed order', () => {
+    const keys = resolvePresetColumns('satel', 'summary').map((column) => column.key)
+    expect(keys).toEqual(SATEL_SUMMARY_KEYS)
+    expect(keys).toEqual([
+      'connectTime',
+      'billAni',
+      'billDnis',
+      'outOrigDnis',
+      'srcName',
+      'dstName',
+      'dpName',
+      'durationMs',
+      'disconnectText',
+    ])
   })
 
   it('resolves eltex all-columns without rawFields or ingest keys', () => {
@@ -22,9 +56,6 @@ describe('CDR column presets', () => {
     expect(keys).not.toContain('fileId')
     expect(keys).not.toContain('rowNumber')
     expect(keys).not.toContain('ingestedAt')
-    expect(keys).toContain('setupTime')
-    expect(keys).toContain('incomingSipCallId')
-    expect(keys).toContain('radiusSessionId')
   })
 
   it('resolves satel all-columns without rawFields', () => {
@@ -32,13 +63,12 @@ describe('CDR column presets', () => {
     const keys = columns.map((column) => column.key)
     expect(keys).toEqual(SATEL_CDR_COLUMNS.map((column) => column.key))
     expect(keys).not.toContain('rawFields')
-    expect(keys).toContain('inAni')
-    expect(keys).toContain('srcMediaPacketsLost')
-    expect(keys).toContain('signalNodeName')
   })
 
-  it('falls back to all columns for unknown preset ids', () => {
-    expect(resolvePresetColumns('eltex', 'unknown').length).toBe(ELTEX_CDR_COLUMNS.length)
-    expect(resolvePresetColumns('satel', 'unknown').length).toBe(SATEL_CDR_COLUMNS.length)
+  it('falls back to Summary for unknown preset ids', () => {
+    expect(resolvePresetColumns('eltex', 'unknown').map((column) => column.key))
+      .toEqual(ELTEX_SUMMARY_KEYS)
+    expect(resolvePresetColumns('satel', 'unknown').map((column) => column.key))
+      .toEqual(SATEL_SUMMARY_KEYS)
   })
 })

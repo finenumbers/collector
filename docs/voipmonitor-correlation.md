@@ -36,7 +36,7 @@ global `VOIPMONITOR_ENABLED` and per-device `devices.voipmonitor_enabled`.
 | Variable | Default | Role |
 |----------|---------|------|
 | `VOIPMONITOR_ENABLED` | `false` | Start match worker (app/maintenance) |
-| `VOIPMONITOR_API_URL` | | Base URL for `/php/api.php` |
+| `VOIPMONITOR_API_URL` | | GUI origin (e.g. `https://vm.example.com`); `/php/api.php` is appended. Also accepts `…/php` or a full `…/php/api.php` |
 | `VOIPMONITOR_USER` / `VOIPMONITOR_PASSWORD` | | API credentials |
 | `VOIPMONITOR_GUI_URL` | | GUI base for card deep-links |
 | `VOIPMONITOR_CARD_URL_TEMPLATE` | `{gui_base}/admin.php?cdr_filter={fcallid:"{voipmonitor_call_id}"}` | Deep-link template |

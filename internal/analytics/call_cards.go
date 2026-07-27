@@ -97,6 +97,7 @@ type AntifraudCallRow struct {
 	Calling             string            `json:"calling"`
 	Called              string            `json:"called"`
 	Status              string            `json:"status"`
+	RadiusOutcome       string            `json:"radiusOutcome"`
 	Phases              []string          `json:"phases"`
 	PacketCount         uint64            `json:"packetCount"`
 	ExplanationCodes    []string          `json:"explanationCodes"`
@@ -235,6 +236,7 @@ func (c *Client) ListAntifraudCallsPage(
 		call.acct_session_ids,call.h323_conf_id,call.calling,call.called,call.status,call.coverage_state,call.explanation_codes,
 		ifNull(packet_summary.families,[]),ifNull(packet_summary.packet_count,0),
 		ifNull(packet_summary.unpaired,0),ifNull(packet_summary.fallback,0),
+		ifNull(packet_summary.rejects,0),ifNull(packet_summary.accepts,0),
 		ifNull(assignment.method,''),ifNull(assignment.reason,''),assignment.delta_ms,
 		ifNull(assignment.ambiguous,0),ifNull(assignment.ambiguity_reason,''),
 		ifNull(assignment.evidence,'{}'),ifNull(assignment.cdr_ids,[])
@@ -249,7 +251,10 @@ func (c *Client) ListAntifraudCallsPage(
 			SELECT links.device_id,links.snapshot_id,links.call_id,
 				groupUniqArray(packet.family) families,count() packet_count,
 				countIf(packet.direction='request' AND packet.status IN ('pending','orphan','ambiguous')) unpaired,
-				countIf(packet.decision='unavailable_fallback') fallback
+				countIf(packet.decision='unavailable_fallback') fallback,
+				countIf(lower(packet.decision)='deny' OR lower(packet.radius_type)='access-reject') rejects,
+				countIf(lower(packet.decision)='allow'
+					OR lower(packet.radius_type) IN ('access-accept','access-response')) accepts
 			FROM collector.custom_antifraud_call_packets_current links
 			INNER JOIN collector.custom_radius_packets_current packet
 				ON packet.device_id=links.device_id AND packet.snapshot_id=links.snapshot_id
@@ -290,12 +295,12 @@ func (c *Client) ListAntifraudCallsPage(
 		var item AntifraudCallRow
 		var evidence string
 		var families []string
-		var unpaired, fallback uint64
+		var unpaired, fallback, rejects, accepts uint64
 		if err := rows.Scan(
 			&item.CallID, &item.FirstSeenAt, &item.LastSeenAt, &item.AcctSessionID,
 			&item.AcctSessionIDs, &item.H323ConfID, &item.Calling, &item.Called, &item.Status,
 			&item.storedCoverageState, &item.ExplanationCodes, &families, &item.PacketCount,
-			&unpaired, &fallback,
+			&unpaired, &fallback, &rejects, &accepts,
 			&item.Coverage.Method, &item.Coverage.Reason, &item.Coverage.DeltaMS,
 			&item.Coverage.Ambiguous, &item.Coverage.AmbiguityReason, &evidence,
 			&item.Coverage.LinkedCDRIDs,
@@ -304,6 +309,7 @@ func (c *Client) ListAntifraudCallsPage(
 		}
 		item.SortTime = item.FirstSeenAt
 		item.Phases = orderedFamilies(families)
+		item.RadiusOutcome = radiusOutcomeFromSummary(rejects > 0, accepts > 0)
 		item.ChainCompleteness = chainCompletenessFromSummary(item.Phases, unpaired, fallback, item.Status)
 		item.Coverage.State = deriveAFCoverageState(len(item.Coverage.LinkedCDRIDs) > 0,
 			item.Coverage.Ambiguous, item.FirstSeenAt, now)
@@ -798,6 +804,32 @@ func deriveAFCoverageState(matched, ambiguous bool, firstSeen, now time.Time) st
 	}
 }
 
+func radiusOutcomeFromSummary(hasReject, hasAccept bool) string {
+	switch {
+	case hasReject:
+		return "reject"
+	case hasAccept:
+		return "accept"
+	default:
+		return "no_response"
+	}
+}
+
+func radiusOutcomeFromPackets(packets []AntifraudPacket) string {
+	var hasReject, hasAccept bool
+	for _, packet := range packets {
+		radiusType := strings.ToLower(packet.RadiusType)
+		decision := strings.ToLower(packet.Decision)
+		if decision == "deny" || radiusType == "access-reject" {
+			hasReject = true
+		}
+		if decision == "allow" || radiusType == "access-accept" || radiusType == "access-response" {
+			hasAccept = true
+		}
+	}
+	return radiusOutcomeFromSummary(hasReject, hasAccept)
+}
+
 func chainCompletenessFromSummary(
 	phases []string, unpaired, fallback uint64, status string,
 ) ChainCompleteness {
@@ -939,6 +971,7 @@ func enrichAntifraudDetail(detail *AntifraudCallDetail) {
 		detail.VerificationResult = "no_response"
 		detail.FinalDecision = "unknown"
 	}
+	detail.RadiusOutcome = radiusOutcomeFromPackets(detail.Packets)
 	detail.ChainCompleteness = chainCompletenessFromSummary(detail.Phases, unpaired, fallback, detail.Status)
 }
 

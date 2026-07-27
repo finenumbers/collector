@@ -56,6 +56,35 @@ func TestOrderedFamiliesAndCompleteness(t *testing.T) {
 	}
 }
 
+func TestRadiusOutcomeFromSummary(t *testing.T) {
+	if got := radiusOutcomeFromSummary(true, true); got != "reject" {
+		t.Fatalf("reject wins over accept: %q", got)
+	}
+	if got := radiusOutcomeFromSummary(false, true); got != "accept" {
+		t.Fatalf("accept=%q", got)
+	}
+	if got := radiusOutcomeFromSummary(false, false); got != "no_response" {
+		t.Fatalf("no_response=%q", got)
+	}
+}
+
+func TestRadiusOutcomeFromPacketsCountsIndicationAccept(t *testing.T) {
+	got := radiusOutcomeFromPackets([]AntifraudPacket{
+		{Direction: "request", RadiusType: "access-request", Decision: "info_only"},
+		{Direction: "response", RadiusType: "access-response", Decision: "info_only"},
+	})
+	if got != "accept" {
+		t.Fatalf("indication Access-Response outcome=%q, want accept", got)
+	}
+	got = radiusOutcomeFromPackets([]AntifraudPacket{
+		{Direction: "request", RadiusType: "access-request", Decision: "deny"},
+		{Direction: "response", RadiusType: "access-reject", Decision: "deny"},
+	})
+	if got != "reject" {
+		t.Fatalf("Access-Reject outcome=%q, want reject", got)
+	}
+}
+
 func TestBuildTimelinePairsRequestResponse(t *testing.T) {
 	requestID := mustParseUUID("11111111-1111-4111-8111-111111111111")
 	responseID := mustParseUUID("22222222-2222-4222-8222-222222222222")

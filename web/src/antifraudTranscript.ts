@@ -51,40 +51,17 @@ function parseStep(summary: string): { request: string; response: string } {
   }
 }
 
-function responseRank(response: string): number {
-  switch (response) {
-    case 'Access-Reject':
-      return 40
-    case 'Access-Accept':
-      return 30
-    case 'Accounting-Response':
-      return 30
-    case 'no_response':
-      return 10
-    default:
-      return response ? 20 : 0
-  }
-}
-
-function pickPhaseStep(phase: Phase, events: TranscriptTimelineEvent[]): string | null {
-  if (!events.length) return null
-  let request = ''
-  let response = ''
-  for (const event of events) {
-    const parsed = parseStep(event.summary || '')
-    const requestLabel = event.xpgkRequestType ||
-      (phase === 'accounting' ? (event.acctStatusType || parsed.request) : parsed.request)
-    if (!request && requestLabel) request = requestLabel
-    if (responseRank(parsed.response) > responseRank(response)) {
-      response = parsed.response
-    }
-    if (!response && event.decision === 'unavailable_fallback') {
-      response = 'no_response'
-    }
+function formatAttemptStep(phase: Phase, event: TranscriptTimelineEvent): string {
+  const parsed = parseStep(event.summary || '')
+  let request = event.xpgkRequestType ||
+    (phase === 'accounting' ? (event.acctStatusType || parsed.request) : parsed.request)
+  let response = parsed.response
+  if (!response && event.decision === 'unavailable_fallback') {
+    response = 'no_response'
   }
   if (phase === 'indication') {
     if (!request) request = 'number'
-    if (!response) return null
+    if (!response) response = 'no_response'
     return `indication: ${request} -> ${response}`
   }
   if (phase === 'verification') {
@@ -97,22 +74,14 @@ function pickPhaseStep(phase: Phase, events: TranscriptTimelineEvent[]): string 
   return `accounting: ${request} -> ${response}`
 }
 
+/** One transcript step per RADIUS attempt (no phase collapse). */
 export function canonicalTranscriptSteps(timeline: TranscriptTimelineEvent[] = []): string[] {
-  const grouped: Record<Phase, TranscriptTimelineEvent[]> = {
-    indication: [],
-    verification: [],
-    accounting: [],
-  }
+  const steps: string[] = []
   for (const event of timeline) {
     const phase = event.phase?.toLowerCase()
     if (phase === 'indication' || phase === 'verification' || phase === 'accounting') {
-      grouped[phase].push(event)
+      steps.push(formatAttemptStep(phase, event))
     }
-  }
-  const steps: string[] = []
-  for (const phase of PHASE_ORDER) {
-    const step = pickPhaseStep(phase, grouped[phase])
-    if (step) steps.push(step)
   }
   return steps
 }
@@ -142,7 +111,7 @@ function transcriptQ850(value: TranscriptCall & {
   return null
 }
 
-/** Satel-style AntiFraud transcript: one line per logical RADIUS phase. */
+/** Satel-style AntiFraud transcript: one line per RADIUS attempt. */
 export function formatAntifraudTranscript(
   value: TranscriptCall & {
     durationSec?: number

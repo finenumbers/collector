@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { canonicalTranscriptSteps, formatAntifraudTranscript } from './antifraudTranscript'
 
 describe('canonical AntiFraud transcript', () => {
-  it('aggregates indication attempts into one Access-Accept step', () => {
+  it('keeps every indication attempt including no_response', () => {
     expect(canonicalTranscriptSteps([
       { phase: 'indication', summary: 'number -> Access-Response', xpgkRequestType: 'number' },
       { phase: 'indication', summary: 'number -> no_response', xpgkRequestType: 'number' },
     ])).toEqual([
       'indication: number -> Access-Accept',
+      'indication: number -> no_response',
     ])
   })
 
@@ -23,7 +24,7 @@ describe('canonical AntiFraud transcript', () => {
     ])
   })
 
-  it('renders the agreed Satel-style card text', () => {
+  it('renders the Satel-style card text with all attempts', () => {
     const text = formatAntifraudTranscript({
       callId: 'call-1',
       acctSessionId: 'session-1',
@@ -42,6 +43,7 @@ describe('canonical AntiFraud transcript', () => {
       'B: 79005556677',
       '',
       '1) indication: number -> Access-Accept',
+      '2) indication: number -> no_response',
       '',
       'final_decision=not_applicable',
       'duration_sec=12',

@@ -22,9 +22,7 @@ export type TranscriptCDR = {
   releaseCause?: number
 }
 
-const PHASE_ORDER = ['indication', 'verification', 'accounting'] as const
-
-type Phase = (typeof PHASE_ORDER)[number]
+type Phase = 'indication' | 'verification' | 'accounting'
 
 function normalizeResponseLabel(label: string): string {
   const trimmed = label.trim()

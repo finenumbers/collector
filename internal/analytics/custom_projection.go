@@ -384,13 +384,22 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 		if len(sessionIDs) == 0 && call.Key.AcctSessionID != "" {
 			sessionIDs = []string{call.Key.AcctSessionID}
 		}
+		accountingStart := call.Accounting.SetupTime
+		if accountingStart == nil {
+			accountingStart = call.Accounting.StartTime
+		}
+		accountingStop := call.Accounting.DisconnectTime
+		if accountingStop == nil {
+			accountingStop = call.Accounting.StopTime
+		}
 		calls = append(calls, callRow{args: []any{
 			snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
 			snapshot.ProjectionSeq, call.ID, customContractKey(call.Key),
 			call.Key.AcctSessionID, sessionIDs, call.Key.H323ConfID, call.Participants.Calling,
 			call.Participants.Called, string(call.Status), "awaiting_cdr",
-			chTimePtr(call.Accounting.StartTime), chTimePtr(call.Accounting.StopTime),
-			call.Accounting.SessionDuration, string(attributes),
+			chTimePtr(accountingStart), chTimePtr(accountingStop),
+			call.Accounting.SessionDuration, call.Accounting.DisconnectCauseQ850,
+			call.Accounting.DelayTimeSec, string(attributes),
 			string(unmatched), call.Orphans, explanationCodes(call.Explanations), first, last, uint8(0),
 		}})
 		for index, packet := range call.Packets {
@@ -404,7 +413,7 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 		(device_id,bucket_start,snapshot_id,policy_revision,projection_seq,call_id,contract_key,
 		acct_session_id,acct_session_ids,h323_conf_id,calling,called,status,coverage_state,
 		accounting_start,accounting_stop,
-		session_duration_seconds,ordered_attributes_json,unmatched_provenance_json,
+		session_duration_seconds,disconnect_cause_q850,delay_time_sec,ordered_attributes_json,unmatched_provenance_json,
 		orphan_packet_ids,explanation_codes,first_seen_at,last_seen_at,deleted)`, func(batch driver.Batch) error {
 		for _, row := range calls {
 			if err := batch.Append(row.args...); err != nil {

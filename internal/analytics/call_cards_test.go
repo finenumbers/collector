@@ -76,9 +76,7 @@ func TestBuildTimelinePairsRequestResponse(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events=%d, want one paired step: %+v", len(events), events)
 	}
-	if !strings.Contains(events[0].Summary, "Access-Request") ||
-		!strings.Contains(events[0].Summary, "-> Access-Accept") ||
-		events[0].Phase != "indication" {
+	if events[0].Summary != "number -> Access-Accept" || events[0].Phase != "indication" {
 		t.Fatalf("paired summary unexpected: %+v", events[0])
 	}
 }

@@ -48,12 +48,32 @@ type CallParticipants struct {
 }
 
 type CallAccounting struct {
-	SetupTime      *time.Time `json:"setupTime,omitempty"`
-	ConnectTime    *time.Time `json:"connectTime,omitempty"`
-	DisconnectTime *time.Time `json:"disconnectTime,omitempty"`
-	DisconnectCause string    `json:"disconnectCause,omitempty"`
-	SessionTimeSec *int64     `json:"sessionTimeSec,omitempty"`
-	DelayTimeSec   *int64     `json:"delayTimeSec,omitempty"`
+	SetupTime           *time.Time `json:"setupTime,omitempty"`
+	ConnectTime         *time.Time `json:"connectTime,omitempty"`
+	DisconnectTime      *time.Time `json:"disconnectTime,omitempty"`
+	EventTimestamp      *time.Time `json:"eventTimestamp,omitempty"`
+	DisconnectCause     string     `json:"disconnectCause,omitempty"`
+	DisconnectCauseQ850 *int64     `json:"disconnectCauseQ850,omitempty"`
+	SessionTimeSec      *int64     `json:"sessionTimeSec,omitempty"`
+	DelayTimeSec        *int64     `json:"delayTimeSec,omitempty"`
+}
+
+type CallRouting struct {
+	OriginatingIP      string `json:"originatingIp,omitempty"`
+	TerminationIP      string `json:"terminationIp,omitempty"`
+	SrcNumberIn        string `json:"srcNumberIn,omitempty"`
+	DstNumberIn        string `json:"dstNumberIn,omitempty"`
+	SrcNumberOut       string `json:"srcNumberOut,omitempty"`
+	DstNumberOut       string `json:"dstNumberOut,omitempty"`
+	RedirectNumber     string `json:"redirectNumber,omitempty"`
+	RemoteID           string `json:"remoteId,omitempty"`
+	OutTrunkgroupLabel string `json:"outTrunkgroupLabel,omitempty"`
+	InTrunkgroupLabel  string `json:"inTrunkgroupLabel,omitempty"`
+	CallOrigin         string `json:"callOrigin,omitempty"`
+	CallType           string `json:"callType,omitempty"`
+	NASPort            string `json:"nasPort,omitempty"`
+	NASPortType        string `json:"nasPortType,omitempty"`
+	FramedIPAddress    string `json:"framedIpAddress,omitempty"`
 }
 
 type TimelineEvent struct {
@@ -165,9 +185,16 @@ type AntifraudCallDetail struct {
 	SnapshotID             uuid.UUID           `json:"-"`
 	ContractKey            string              `json:"-"`
 	Participants           CallParticipants    `json:"participants"`
+	RequestTypes           []string            `json:"requestTypes,omitempty"`
+	IndicationAcked        bool                `json:"indicationAcked"`
+	VerificationResult     string              `json:"verificationResult,omitempty"`
+	AccountingAcked        bool                `json:"accountingAcked"`
 	FinalDecision          string              `json:"finalDecision,omitempty"`
+	DurationSec            *int64              `json:"durationSec,omitempty"`
+	DisconnectCauseQ850    *int64              `json:"disconnectCauseQ850,omitempty"`
 	Timeline               []TimelineEvent     `json:"timeline"`
 	Accounting             CallAccounting      `json:"accounting"`
+	Routing                CallRouting         `json:"routing,omitempty"`
 	AccountingStart        *time.Time          `json:"accountingStart,omitempty"`
 	AccountingStop         *time.Time          `json:"accountingStop,omitempty"`
 	SessionDurationSeconds *int64              `json:"sessionDurationSeconds,omitempty"`
@@ -811,10 +838,11 @@ func enrichAntifraudDetail(detail *AntifraudCallDetail) {
 		SetupTime: detail.AccountingStart, DisconnectTime: detail.AccountingStop,
 		SessionTimeSec: detail.SessionDurationSeconds,
 	}
-	detail.FinalDecision = finalDecisionFrom(detail)
 	detail.Timeline = buildTimeline(detail.Packets)
 	detail.RawPackets = detail.Packets
+	requestTypes := map[string]struct{}{}
 	var unpaired, fallback uint64
+	var hasCheck, sawAccept, sawReject, sawUnavailable, sawAmbiguous bool
 	for _, packet := range detail.Packets {
 		if packet.Direction == "request" &&
 			(packet.Status == "pending" || packet.Status == "orphan" || packet.Status == "ambiguous") {
@@ -823,39 +851,121 @@ func enrichAntifraudDetail(detail *AntifraudCallDetail) {
 		if packet.Decision == "unavailable_fallback" {
 			fallback++
 		}
+		requestType := attributeString(packet.Attributes, "xpgk-request-type")
+		if requestType != "" {
+			requestTypes[requestType] = struct{}{}
+		}
+		family := strings.ToLower(packet.Family)
+		isVerification := family == "verification" || requestType == "check_call"
+		isIndication := family == "indication" || requestType == "number" || requestType == "save_call"
+		if isIndication && (packet.Status == "paired" || packet.Decision == "info_only" ||
+			packet.RadiusType == "access-accept" || packet.RadiusType == "access-response") {
+			detail.IndicationAcked = true
+		}
+		if family == "accounting" && (packet.Status == "paired" || packet.Direction == "response") {
+			detail.AccountingAcked = true
+		}
+		if isVerification {
+			hasCheck = true
+			if packet.Status == "ambiguous" {
+				sawAmbiguous = true
+			}
+			switch packet.Decision {
+			case "deny":
+				sawReject = true
+			case "allow":
+				sawAccept = true
+			case "unavailable_fallback":
+				sawUnavailable = true
+			}
+			if packet.Direction == "request" &&
+				(packet.Status == "pending" || packet.Decision == "unavailable_fallback") {
+				sawUnavailable = true
+			}
+		}
 		if cause := attributeString(packet.Attributes, "acct-terminate-cause"); cause != "" {
 			detail.Accounting.DisconnectCause = cause
 		}
 		if delay := attributeInt64(packet.Attributes, "acct-delay-time"); delay != nil {
 			detail.Accounting.DelayTimeSec = delay
 		}
+		if setup := attributeTime(packet.Attributes, "h323-setup-time"); setup != nil {
+			detail.Accounting.SetupTime = setup
+		}
+		if connect := attributeTime(packet.Attributes, "h323-connect-time"); connect != nil {
+			detail.Accounting.ConnectTime = connect
+		}
+		if disconnect := attributeTime(packet.Attributes, "h323-disconnect-time"); disconnect != nil {
+			detail.Accounting.DisconnectTime = disconnect
+		}
+		if eventTS := attributeTime(packet.Attributes, "event-timestamp"); eventTS != nil {
+			detail.Accounting.EventTimestamp = eventTS
+		}
+		if q850 := attributeQ850(packet.Attributes, "h323-disconnect-cause"); q850 != nil {
+			detail.Accounting.DisconnectCauseQ850 = q850
+			detail.DisconnectCauseQ850 = q850
+		}
+		if session := attributeInt64(packet.Attributes, "acct-session-time"); session != nil {
+			detail.Accounting.SessionTimeSec = session
+			detail.SessionDurationSeconds = session
+		}
+		fillRouting(&detail.Routing, packet.Attributes)
+	}
+	for requestType := range requestTypes {
+		detail.RequestTypes = append(detail.RequestTypes, requestType)
+	}
+	sort.Strings(detail.RequestTypes)
+	detail.DurationSec = detail.Accounting.SessionTimeSec
+	if detail.DurationSec == nil {
+		detail.DurationSec = detail.SessionDurationSeconds
+	}
+	switch {
+	case !hasCheck:
+		detail.VerificationResult = "absent"
+		detail.FinalDecision = "not_applicable"
+	case sawReject:
+		detail.VerificationResult = "reject"
+		detail.FinalDecision = "blocked"
+	case sawUnavailable && !sawAccept:
+		detail.VerificationResult = "no_response"
+		detail.FinalDecision = "unavailable"
+	case sawAccept:
+		detail.VerificationResult = "accept"
+		detail.FinalDecision = "allowed"
+	case sawAmbiguous:
+		detail.VerificationResult = "no_response"
+		detail.FinalDecision = "unknown"
+	default:
+		detail.VerificationResult = "no_response"
+		detail.FinalDecision = "unknown"
 	}
 	detail.ChainCompleteness = chainCompletenessFromSummary(detail.Phases, unpaired, fallback, detail.Status)
 }
 
-func finalDecisionFrom(detail *AntifraudCallDetail) string {
-	switch detail.Status {
-	case "blocked":
-		return "denied"
-	case "verified", "completed":
-		return "allowed"
-	case "unavailable_fallback":
-		return "unavailable"
-	case "ambiguous_indeterminate":
-		return "indeterminate"
-	default:
-		for _, packet := range detail.Packets {
-			switch packet.Decision {
-			case "deny":
-				return "denied"
-			case "allow", "info_only":
-				return "allowed"
-			case "unavailable_fallback":
-				return "unavailable"
-			}
+func fillRouting(routing *CallRouting, attributes []OrderedAttribute) {
+	set := func(dst *string, name string) {
+		if *dst != "" {
+			return
 		}
-		return "pending"
+		if value := attributeString(attributes, name); value != "" {
+			*dst = value
+		}
 	}
+	set(&routing.OriginatingIP, "xpgk-origination-gateway-ip")
+	set(&routing.TerminationIP, "xpgk-termination-gateway-ip")
+	set(&routing.SrcNumberIn, "xpgk-src-number-in")
+	set(&routing.DstNumberIn, "xpgk-dst-number-in")
+	set(&routing.SrcNumberOut, "xpgk-src-number-out")
+	set(&routing.DstNumberOut, "xpgk-dst-number-out")
+	set(&routing.RedirectNumber, "h323-redirect-number")
+	set(&routing.RemoteID, "h323-remote-id")
+	set(&routing.OutTrunkgroupLabel, "out-trunkgroup-label")
+	set(&routing.InTrunkgroupLabel, "in-trunkgroup-label")
+	set(&routing.CallOrigin, "h323-call-origin")
+	set(&routing.CallType, "h323-call-type")
+	set(&routing.NASPort, "nas-port")
+	set(&routing.NASPortType, "nas-port-type")
+	set(&routing.FramedIPAddress, "framed-ip-address")
 }
 
 func buildTimeline(packets []AntifraudPacket) []TimelineEvent {
@@ -890,17 +1000,19 @@ func buildTimeline(packets []AntifraudPacket) []TimelineEvent {
 				}
 			}
 		}
-		summary := displayRadiusType(packet.RadiusType)
-		if xpgk != "" {
-			summary += " xpgk-request-type=" + xpgk
-		}
-		if acct != "" {
-			summary += " Acct-Status-Type=" + acct
+		summary := ""
+		switch {
+		case xpgk != "":
+			summary = xpgk
+		case acct != "":
+			summary = acct
+		default:
+			summary = displayRadiusType(packet.RadiusType)
 		}
 		if responseLabel != "" {
 			summary += " -> " + responseLabel
 		} else if packet.Status == "pending" || decision == "unavailable_fallback" {
-			summary += " -> (no response)"
+			summary += " -> no_response"
 		}
 		events = append(events, TimelineEvent{
 			TS: packet.FirstSeenAt, Phase: phase, RadiusType: packet.RadiusType,
@@ -991,4 +1103,37 @@ func attributeInt64(attributes []OrderedAttribute, name string) *int64 {
 		return nil
 	}
 	return &value
+}
+
+func attributeQ850(attributes []OrderedAttribute, name string) *int64 {
+	raw := strings.TrimSpace(attributeString(attributes, name))
+	if raw == "" {
+		return nil
+	}
+	base := 10
+	if strings.HasPrefix(strings.ToLower(raw), "0x") {
+		raw = raw[2:]
+		base = 16
+	}
+	value, err := strconv.ParseInt(raw, base, 64)
+	if err != nil || value < 0 {
+		return nil
+	}
+	return &value
+}
+
+func attributeTime(attributes []OrderedAttribute, name string) *time.Time {
+	raw := strings.TrimSpace(attributeString(attributes, name))
+	if raw == "" {
+		return nil
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano, time.RFC3339, "Jan 2 2006 15:04:05 MST",
+		"2006-01-02 15:04:05Z07:00", "2006-01-02 15:04:05",
+	} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return &parsed
+		}
+	}
+	return nil
 }

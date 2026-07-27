@@ -25,6 +25,18 @@ Custom call identity (строго):
 - семейство indication/verification задаёт только `xpgk-request-type`
   (`number`/`save_call` / `check_call`); ExplicitAF без типа не форсирует verification.
 
+`final_decision` (верификация входящего по Eltex Custom):
+- `blocked` — был `check_call` + Access-Reject;
+- `allowed` — был `check_call` + Access-Accept;
+- `unavailable` — был `check_call`, ответа нет / unavailable_fallback;
+- `not_applicable` — `check_call` не было (исходящая индикация `save_call`/`number`
+  и/или accounting без верификации — нормальный случай);
+- `unknown` — `check_call` был, но ответ неоднозначен.
+
+Accounting Stop нормализует `h323-setup/connect/disconnect-time`,
+`h323-disconnect-cause` (Q.850), `Acct-Session-Time`, `Acct-Delay-Time`,
+`Event-Timestamp`. `Acct-Terminate-Cause` хранится отдельно и не подменяет Q.850.
+
 Attribute-dump строки (`Acct-Session-Id`, `Eltex-AVPair`, `xpgk-request-type`) обязательны
 для полноценной сборки; они загружаются из `syslog_messages` даже без слова `RADIUS`
 в payload.

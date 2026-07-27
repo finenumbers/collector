@@ -362,16 +362,25 @@ type AntifraudPacket = {
 }
 type AntifraudCallDetail = AntifraudRow & {
   participants?: { callingNumber?: string; calledNumber?: string }
+  requestTypes?: string[]
+  indicationAcked?: boolean
+  verificationResult?: string
+  accountingAcked?: boolean
   finalDecision?: string
+  durationSec?: number
+  disconnectCauseQ850?: number
   timeline?: TimelineEvent[]
   accounting?: {
     setupTime?: string
     connectTime?: string
     disconnectTime?: string
+    eventTimestamp?: string
     disconnectCause?: string
+    disconnectCauseQ850?: number
     sessionTimeSec?: number
     delayTimeSec?: number
   }
+  routing?: Record<string, string>
   accountingStart?: string
   accountingStop?: string
   sessionDurationSeconds?: number
@@ -1607,58 +1616,68 @@ function linkedCDRForTranscript(value: AntifraudCallDetail, cdr?: CallRow): Call
   return value.linkedCdrs?.find((item) => item.recordId)
 }
 
-function transcriptDurationSec(value: AntifraudCallDetail, cdr?: CallRow): number | undefined {
-  const fromAF = value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds
-  if (fromAF != null) return fromAF
+function transcriptDuration(value: AntifraudCallDetail, cdr?: CallRow): {
+  durationSec?: number
+  source?: 'af' | 'cdr'
+} {
+  const fromAF = value.durationSec ?? value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds
+  if (fromAF != null) return { durationSec: fromAF, source: 'af' }
   const linked = linkedCDRForTranscript(value, cdr)
-  if (linked?.durationMs == null) return undefined
-  return Math.round(linked.durationMs / 1000)
+  if (linked?.durationMs == null) return {}
+  return { durationSec: Math.round(linked.durationMs / 1000), source: 'cdr' }
 }
 
-function transcriptCause(value: AntifraudCallDetail, cdr?: CallRow): string {
-  if (value.accounting?.disconnectCause) return value.accounting.disconnectCause
+function transcriptQ850(value: AntifraudCallDetail, cdr?: CallRow): {
+  cause?: number | string
+  source?: 'af' | 'cdr'
+} {
+  const fromAF = value.disconnectCauseQ850 ?? value.accounting?.disconnectCauseQ850
+  if (fromAF != null) return { cause: fromAF, source: 'af' }
   const linked = linkedCDRForTranscript(value, cdr)
-  if (linked?.releaseCause == null && !linked?.releaseInfo) return '—'
-  const parts = [
-    linked?.releaseCause != null ? String(linked.releaseCause) : '',
-    linked?.releaseInfo || '',
-  ].filter(Boolean)
-  return parts.join(' ') || '—'
+  if (linked?.releaseCause == null) return {}
+  return { cause: linked.releaseCause, source: 'cdr' }
+}
+
+function omitEmptyRouting(routing?: Record<string, string>) {
+  if (!routing) return undefined
+  const result: Record<string, string> = {}
+  Object.entries(routing).forEach(([key, value]) => {
+    if (value) result[key] = value
+  })
+  return Object.keys(result).length ? result : undefined
 }
 
 function antifraudTranscript(value: AntifraudCallDetail, cdr?: CallRow): string {
   const calling = value.participants?.callingNumber || value.calling || '—'
   const called = value.participants?.calledNumber || value.called || '—'
-  const callLabel = value.h323ConfId || value.acctSessionId || value.callId
+  const callLabel = value.acctSessionId || value.h323ConfId || value.callId
   const lines = [
-    `CALL ${callLabel} | ${calling} -> ${called} | status=${value.status}`,
+    `CALL ${callLabel}`,
+    `A: ${calling}`,
+    `B: ${called}`,
+    '',
   ]
   const timeline = value.timeline?.length ? value.timeline : []
   if (!timeline.length) {
     lines.push('incomplete: нет шагов RADIUS')
   } else {
     timeline.forEach((event, index) => {
-      const head = `${index + 1}) ${event.phase}: ${event.summary}`
-      lines.push(head)
+      lines.push(`${index + 1}) ${event.phase}: ${event.summary}`)
     })
   }
-  const duration = transcriptDurationSec(value, cdr)
-  const cause = transcriptCause(value, cdr)
-  const completeness = value.chainCompleteness
-  if (completeness?.state && completeness.state !== 'complete') {
-    const missing = completeness.missingStages?.length
-      ? `missing ${completeness.missingStages.join(',')}`
-      : completeness.state
-    lines.push(`incomplete: ${missing}`)
-  }
-  lines.push(`Final: ${value.finalDecision || 'pending'}, duration=${duration ?? '—'}s, cause=${cause}`)
+  const { durationSec, source: durationSource } = transcriptDuration(value, cdr)
+  const { cause, source: causeSource } = transcriptQ850(value, cdr)
+  lines.push('')
+  lines.push(`final_decision=${value.finalDecision || 'not_applicable'}`)
+  lines.push(`duration_sec=${durationSec ?? '—'}${durationSource === 'cdr' ? ' (cdr)' : ''}`)
+  lines.push(`disconnect_cause_q850=${cause ?? '—'}${causeSource === 'cdr' ? ' (cdr)' : ''}`)
   return lines.join('\n')
 }
 
 function antifraudSlimJSON(value: AntifraudCallDetail, cdr?: CallRow) {
   const packets = value.rawPackets?.length ? value.rawPackets : value.packets
-  const duration = transcriptDurationSec(value, cdr)
-  const cause = transcriptCause(value, cdr)
+  const { durationSec, source: durationSource } = transcriptDuration(value, cdr)
+  const { cause, source: causeSource } = transcriptQ850(value, cdr)
   return {
     callId: value.callId,
     acctSessionId: value.acctSessionId,
@@ -1670,26 +1689,37 @@ function antifraudSlimJSON(value: AntifraudCallDetail, cdr?: CallRow) {
       callingNumber: value.participants?.callingNumber || value.calling || '',
       calledNumber: value.participants?.calledNumber || value.called || '',
     },
+    requestTypes: value.requestTypes || [],
+    indicationAcked: Boolean(value.indicationAcked),
+    verificationResult: value.verificationResult || 'absent',
+    accountingAcked: Boolean(value.accountingAcked),
     status: value.status,
-    finalDecision: value.finalDecision,
-    timeline: (value.timeline || []).map((event) => ({
-      ts: event.ts,
-      phase: event.phase,
-      radiusType: event.radiusType,
-      ...(event.xpgkRequestType ? { xpgkRequestType: event.xpgkRequestType } : {}),
-      ...(event.acctStatusType ? { acctStatusType: event.acctStatusType } : {}),
-      summary: event.summary,
-    })),
+    finalDecision: value.finalDecision || 'not_applicable',
+    durationSec: durationSec ?? null,
+    ...(durationSource ? { durationSource } : {}),
+    disconnectCauseQ850: cause ?? null,
+    ...(causeSource ? { causeSource } : {}),
     accounting: {
       setupTime: value.accounting?.setupTime || value.accountingStart,
       connectTime: value.accounting?.connectTime,
       disconnectTime: value.accounting?.disconnectTime || value.accountingStop,
-      disconnectCause: cause === '—' ? value.accounting?.disconnectCause : cause,
-      sessionTimeSec: duration,
+      eventTimestamp: value.accounting?.eventTimestamp,
+      sessionTimeSec: value.accounting?.sessionTimeSec ?? value.sessionDurationSeconds ?? durationSec,
+      delayTimeSec: value.accounting?.delayTimeSec,
+      disconnectCauseQ850: value.accounting?.disconnectCauseQ850 ?? value.disconnectCauseQ850 ?? cause,
     },
+    ...(omitEmptyRouting(value.routing) ? { routing: omitEmptyRouting(value.routing) } : {}),
+    timeline: (value.timeline || []).map((event) => ({
+      ts: event.ts,
+      phase: event.phase,
+      ...(event.xpgkRequestType ? { requestType: event.xpgkRequestType } : {}),
+      ...(event.acctStatusType ? { acctStatusType: event.acctStatusType } : {}),
+      summary: event.summary,
+    })),
     rawPackets: (packets || []).map((packet) => ({
       packetId: packet.packetId,
       radiusType: packet.radiusType,
+      family: packet.family,
       ...(attributeDisplay(packet.attributes, 'xpgk-request-type')
         ? { xpgkRequestType: attributeDisplay(packet.attributes, 'xpgk-request-type') }
         : {}),

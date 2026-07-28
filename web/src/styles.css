@@ -257,6 +257,41 @@ tbody tr { cursor: pointer; }
 .parse-status.archived { color: #146c43; background: #e3f5eb; }
 .parse-status.incomplete, .parse-status.fragment { color: #975a00; background: #fff2d6; }
 .satel-cdr-table, .eltex-cdr-table { width: max-content; min-width: 0; }
+/* Full-viewport tables: columns share remaining width dynamically. */
+.table-fill {
+  width: 100%;
+  min-width: 100%;
+  max-width: none;
+  table-layout: auto;
+}
+.table-fill > thead > tr > th,
+.table-fill > tbody > tr > td {
+  width: auto;
+  max-width: none;
+}
+.antifraud-table.table-fill { width: 100%; min-width: 100%; }
+/* Syslog: content-sized meta columns; Payload absorbs leftover width. */
+.syslog-table {
+  width: 100%;
+  min-width: 100%;
+  max-width: none;
+  table-layout: auto;
+}
+.syslog-table > thead > tr > th:not(.col-payload),
+.syslog-table > tbody > tr > td:not(.message-cell) {
+  width: 1%;
+  max-width: none;
+  white-space: nowrap;
+}
+.syslog-table > thead > tr > th.col-payload,
+.syslog-table > tbody > tr > td.message-cell {
+  width: auto;
+  min-width: 12rem;
+  max-width: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .cdr-preset { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #475467; }
 .cdr-preset select { min-width: 140px; }
 .parse-status.matched { color: #146c43; background: #e3f5eb; }

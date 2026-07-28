@@ -287,15 +287,15 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 func (w *Worker) processBucket(
 	ctx context.Context, cfg Config, job Job, from, to time.Time,
 ) error {
-	// Prefer a single hour load. On overflow do NOT split-merge into one giant
-	// slice (that re-hits MaxMemory); rebuild the hour as independent windows.
+	// Prefer a single hour load. On overflow/CH memory pressure do NOT keep a giant
+	// merge — rebuild the hour as independent windows.
 	events, err := w.Warehouse.LoadCustomRadiusEvents(
 		ctx, job.DeviceID, from.Add(-cfg.PairingHorizon), to.Add(cfg.PairingHorizon), cfg.MaxEvents,
 	)
 	switch {
 	case err == nil && eventsExceedLimits(events, cfg) == nil:
 		return w.finishBucket(ctx, cfg, job, from, to, events)
-	case err != nil && !IsEventLimitError(err):
+	case err != nil && !IsEventLimitError(err) && !IsClickHouseResourceError(err):
 		return err
 	default:
 		return w.processBucketWindows(ctx, cfg, job, from, to)

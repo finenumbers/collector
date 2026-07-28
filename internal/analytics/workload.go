@@ -56,13 +56,15 @@ func (c *Client) queryContext(
 	queryCtx = clickhouse.Context(queryCtx,
 		clickhouse.WithQueryID("collector-"+string(class)+"-"+uuid.NewString()),
 		clickhouse.WithSettings(clickhouse.Settings{
-			"log_comment":          "collector workload=" + string(class),
-			"max_execution_time":   uint64(max(timeout/time.Second, 1)),
-			"max_threads":          threads,
-			"max_memory_usage":     memory,
-			"max_result_rows":      resultRows,
-			"max_result_bytes":     resultBytes,
-			"result_overflow_mode": "throw",
+			"log_comment":                        "collector workload=" + string(class),
+			"max_execution_time":                 uint64(max(timeout/time.Second, 1)),
+			"max_threads":                        threads,
+			"max_memory_usage":                   memory,
+			"max_result_rows":                    resultRows,
+			"max_result_bytes":                   resultBytes,
+			"result_overflow_mode":               "throw",
+			"max_bytes_before_external_group_by": uint64(64 << 20),
+			"max_bytes_before_external_sort":     uint64(64 << 20),
 		}),
 	)
 	return queryCtx, func() {
@@ -90,9 +92,9 @@ func workloadQueryLimits(class workload.Class) (time.Duration, uint64, uint64, u
 	case workload.Export:
 		return 45 * time.Second, 2, 512 << 20, 20_000, 64 << 20
 	case workload.CustomReplay:
-		// Dense SMG session expansion previously OOMed at 512MiB; keep headroom after
-		// the IN-subquery rewrite without starving the shared ClickHouse host.
-		return 90 * time.Second, 2, 768 << 20, 100_000, 128 << 20
+		// Dense SMG hour loads need headroom; single thread lowers peak memory on
+		// payload scans. Two-phase session fetch keeps per-query working set small.
+		return 90 * time.Second, 1, 1024 << 20, 100_000, 128 << 20
 	case workload.CustomReconcile:
 		return 30 * time.Second, 2, 256 << 20, 50_000, 64 << 20
 	case workload.Ingest:

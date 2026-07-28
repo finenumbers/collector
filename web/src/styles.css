@@ -257,22 +257,32 @@ tbody tr { cursor: pointer; }
 .parse-status.archived { color: #146c43; background: #e3f5eb; }
 .parse-status.incomplete, .parse-status.fragment { color: #975a00; background: #fff2d6; }
 .satel-cdr-table, .eltex-cdr-table { width: max-content; min-width: 0; }
-/* Full-viewport tables: columns share remaining width dynamically. */
-.table-fill {
-  width: 100%;
+/*
+ * Summary / AntiFraud: columns shrink-wrap to content (width:1% trick),
+ * table spans at least the panel; if wider — horizontal scroll in .table-shell.
+ * Do NOT force width:100% alone — browsers then compress columns and clip headers
+ * (e.g. VoIPmonitor → "VOIPMO").
+ */
+.table-fill,
+.satel-cdr-table.table-fill,
+.eltex-cdr-table.table-fill,
+.antifraud-table.table-fill {
+  width: max-content;
   min-width: 100%;
   max-width: none;
   table-layout: auto;
 }
 .table-fill > thead > tr > th,
 .table-fill > tbody > tr > td {
-  width: auto;
+  width: 1%;
   max-width: none;
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
 }
-.antifraud-table.table-fill { width: 100%; min-width: 100%; }
 /* Syslog: content-sized meta columns; Payload absorbs leftover width. */
 .syslog-table {
-  width: 100%;
+  width: max-content;
   min-width: 100%;
   max-width: none;
   table-layout: auto;

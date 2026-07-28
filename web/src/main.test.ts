@@ -37,6 +37,9 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('coverageSloMet')
     expect(main).toContain('Orphans / ambiguity')
     expect(main).toContain('Export · queued / running / oldest')
+    expect(main).toContain('projection/requeue-failed')
+    expect(main).toContain('Requeue failed')
+    expect(main).toContain('AF tip lag')
   })
 
   it('wires CDR ingest banner to the real ingest-files API', () => {

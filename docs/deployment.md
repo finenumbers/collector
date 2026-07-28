@@ -176,8 +176,11 @@ IANA timezone выбирается из выпадающего списка в �
    (сбрасывает `failed`→`pending` для устройства и overflow-failed глобально).
    Либо SQL: `UPDATE custom_projection_jobs SET status='pending', attempts=0,
    next_attempt_at=now(), last_error=NULL WHERE device_id=$1 AND status='failed'`.
-4. Worker при overflow сам режет час на окна 15m→5m; после релиза не оставляйте
-   terminal `failed` на пиках без requeue.
+4. Worker при overflow сам режет час на окна 5m (и при необходимости 1m) и
+   собирает snapshot по окнам без склейки всего часа в память; terminal `failed`
+   на пиках также периодически requeue’ится (каждые ~30с), даже если discover
+   держит очередь. После релиза нажмите «Requeue failed» в Диагностике, если
+   `failed>0`, и дождитесь drain.
 5. Если jobs complete, syslog lag мал, но `afAuthHeaders6h=0` и
    `classificationGap=true` — это не очередь: на SMG нет classifiable AF RADIUS
    (логирование AntiFraud / диалект), поднимать MaxEvents бесполезно.

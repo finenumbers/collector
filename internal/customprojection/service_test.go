@@ -307,10 +307,46 @@ func TestOverflowSplitsHourLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	if warehouse.loadCalls < 2 {
-		t.Fatalf("expected split loads after overflow, got %d", warehouse.loadCalls)
+		t.Fatalf("expected windowed loads after overflow, got %d", warehouse.loadCalls)
 	}
 	if len(warehouse.activations) != 1 {
-		t.Fatalf("split load should still activate once: %v", warehouse.activations)
+		t.Fatalf("windowed rebuild should still activate once: %v", warehouse.activations)
+	}
+}
+
+func TestDenseHourUsesWindowedRebuildWithoutMerging(t *testing.T) {
+	deviceID := uuid.New()
+	bucket := time.Date(2026, 7, 27, 4, 0, 0, 0, time.UTC)
+	queue := &projectionQueueMock{policy: Policy{DeviceID: deviceID, Enabled: true, Revision: 1}}
+	warehouse := &projectionWarehouseMock{
+		loadFn: func(from, to time.Time, limit int) ([]customradius.RawEvent, error) {
+			span := to.Sub(from)
+			if span >= time.Hour {
+				return nil, fmt.Errorf("custom projection bucket exceeds %d events", limit)
+			}
+			// Each sub-hour load stays under the limit; merging the hour would not.
+			count := limit
+			if span <= 5*time.Minute {
+				count = 1
+			}
+			out := make([]customradius.RawEvent, 0, count)
+			for index := 0; index < count; index++ {
+				out = append(out, projectionRaw(
+					deviceID, uuid.New(), from.Add(time.Duration(index)*time.Millisecond), "not radius",
+				))
+			}
+			return out, nil
+		},
+	}
+	worker := &Worker{Queue: queue, Warehouse: warehouse, Config: Config{MaxEvents: 10, MaxMemoryBytes: 1 << 20}}
+	if err := worker.process(context.Background(), worker.Config.normalized(), Job{
+		ID: uuid.New(), DeviceID: deviceID, PolicyRevision: 1, ProjectionSeq: 1,
+		Kind: JobBucket, BucketStart: bucket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(warehouse.activations) != 1 {
+		t.Fatalf("dense hour should activate once via windows: %v", warehouse.activations)
 	}
 }
 
@@ -320,6 +356,9 @@ func TestIsEventLimitError(t *testing.T) {
 	}
 	if IsEventLimitError(fmt.Errorf("clickhouse unavailable")) {
 		t.Fatal("non-overflow error misclassified")
+	}
+	if !IsMemoryBoundError(fmt.Errorf("bucket payload bytes 9 exceed memory bound 8")) {
+		t.Fatal("memory bound error not detected")
 	}
 }
 

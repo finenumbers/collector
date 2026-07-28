@@ -1569,6 +1569,7 @@ function OperationalDiagnosticsPanel() {
   const [value, setValue] = useState<OperationalDiagnostics | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [requeueBusy, setRequeueBusy] = useState('')
   const load = () => {
     setLoading(true)
     setError('')
@@ -1579,6 +1580,18 @@ function OperationalDiagnosticsPanel() {
         setError(reason instanceof Error ? reason.message : 'Диагностика недоступна')
       })
       .finally(() => setLoading(false))
+  }
+  const requeueFailed = async (deviceId: string) => {
+    setRequeueBusy(deviceId)
+    setError('')
+    try {
+      await api(`/devices/${deviceId}/projection/requeue-failed`, { method: 'POST', body: '{}' })
+      load()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Не удалось перепоставить failed jobs')
+    } finally {
+      setRequeueBusy('')
+    }
   }
   const queue = value?.projectionQueue
   const derived = value?.derived
@@ -1634,10 +1647,21 @@ function OperationalDiagnosticsPanel() {
         <strong>Projection по устройствам</strong>
         {devices.map((device) => <span key={device.deviceId}>
           {device.name}: lag {formatCount(device.projectionLagSeconds)} с ·
+          AF tip lag {formatCount(device.afCallLagSeconds)} с ·
+          activated {formatCount(device.activatedLagSeconds)} с ·
           failed {formatCount(device.failed)} ·
           SLO {device.projectionSloMet ? 'ok' : 'breach'}
           {device.classificationGap ? ' · classification gap' : ''}
           {device.lastError ? ` · ${device.lastError}` : ''}
+          {(device.failed || 0) > 0 && <button type="button" className="secondary"
+            disabled={requeueBusy === device.deviceId}
+            onClick={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              void requeueFailed(device.deviceId)
+            }}>
+            {requeueBusy === device.deviceId ? 'Requeue…' : 'Requeue failed'}
+          </button>}
         </span>)}
       </div>}
     </div>}

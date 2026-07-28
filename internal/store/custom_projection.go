@@ -402,8 +402,22 @@ func (s *Store) CutoverCustomProjection(
 	}
 	tag, err := tx.Exec(ctx, `UPDATE custom_projection_watermarks
 		SET previous_snapshot_id=active_snapshot_id,active_snapshot_id=$3,
-			watermark_received_at=NULLIF($4,'0001-01-01'::timestamptz),
-			watermark_event_id=NULLIF($5,'00000000-0000-0000-0000-000000000000'::uuid),
+			watermark_received_at=CASE
+				WHEN $4::timestamptz IS NULL OR $4::timestamptz='0001-01-01'::timestamptz
+					THEN watermark_received_at
+				WHEN watermark_received_at IS NULL OR $4::timestamptz>=watermark_received_at
+					THEN $4::timestamptz
+				ELSE watermark_received_at
+			END,
+			watermark_event_id=CASE
+				WHEN $4::timestamptz IS NULL OR $4::timestamptz='0001-01-01'::timestamptz
+					THEN watermark_event_id
+				WHEN watermark_received_at IS NULL OR $4::timestamptz>watermark_received_at
+					THEN NULLIF($5,'00000000-0000-0000-0000-000000000000'::uuid)
+				WHEN $4::timestamptz=watermark_received_at
+					THEN COALESCE(NULLIF($5,'00000000-0000-0000-0000-000000000000'::uuid), watermark_event_id)
+				ELSE watermark_event_id
+			END,
 			projection_seq=$6,state='active',updated_at=now()
 		WHERE device_id=$1 AND policy_revision=$2`,
 		job.DeviceID, job.PolicyRevision, snapshot.ID, snapshot.WatermarkTime,

@@ -18,6 +18,8 @@ type projectionQueueMock struct {
 	completed         int
 	failed            int
 	advanced          int
+	progressed        int
+	seq               uint64
 	enqueueErr        error
 	beforeLock        func()
 	deadlines         []time.Time
@@ -53,6 +55,25 @@ func (m *projectionQueueMock) ScheduleCustomProjectionDeadline(
 	_ context.Context, _ Job, deadline time.Time,
 ) error {
 	m.deadlines = append(m.deadlines, deadline)
+	return nil
+}
+func (m *projectionQueueMock) NextCustomProjectionSeq(context.Context) (uint64, error) {
+	m.seq++
+	return m.seq + 100, nil
+}
+func (m *projectionQueueMock) ProgressCustomProjection(
+	ctx context.Context, job Job, snapshot Snapshot, activate func(context.Context) error,
+) error {
+	if m.beforeLock != nil {
+		m.beforeLock()
+	}
+	if m.policy.Revision != job.PolicyRevision || !m.policy.Enabled {
+		return errors.New("policy changed")
+	}
+	if err := activate(ctx); err != nil {
+		return err
+	}
+	m.progressed++
 	return nil
 }
 func (m *projectionQueueMock) CutoverCustomProjection(
@@ -309,44 +330,47 @@ func TestOverflowSplitsHourLoad(t *testing.T) {
 	if warehouse.loadCalls < 2 {
 		t.Fatalf("expected windowed loads after overflow, got %d", warehouse.loadCalls)
 	}
-	if len(warehouse.activations) != 1 {
-		t.Fatalf("windowed rebuild should still activate once: %v", warehouse.activations)
+	if len(warehouse.activations) != 1 || queue.completed != 1 {
+		t.Fatalf("non-AF overflow rebuild should finalize once: activations=%v completed=%d",
+			warehouse.activations, queue.completed)
 	}
 }
 
-func TestDenseHourUsesWindowedRebuildWithoutMerging(t *testing.T) {
+func TestDenseHourProgressiveActivatesDuringWindowedRebuild(t *testing.T) {
 	deviceID := uuid.New()
 	bucket := time.Date(2026, 7, 27, 4, 0, 0, 0, time.UTC)
 	queue := &projectionQueueMock{policy: Policy{DeviceID: deviceID, Enabled: true, Revision: 1}}
 	warehouse := &projectionWarehouseMock{
 		loadFn: func(from, to time.Time, limit int) ([]customradius.RawEvent, error) {
-			span := to.Sub(from)
-			if span >= time.Hour {
+			if to.Sub(from) >= time.Hour {
 				return nil, fmt.Errorf("custom projection bucket exceeds %d events", limit)
 			}
-			// Each sub-hour load stays under the limit; merging the hour would not.
-			count := limit
-			if span <= 5*time.Minute {
-				count = 1
+			slot := from.UTC().Truncate(5 * time.Minute)
+			if slot.Before(bucket) {
+				slot = bucket
 			}
-			out := make([]customradius.RawEvent, 0, count)
-			for index := 0; index < count; index++ {
-				out = append(out, projectionRaw(
-					deviceID, uuid.New(), from.Add(time.Duration(index)*time.Millisecond), "not radius",
-				))
+			if !slot.Before(bucket.Add(time.Hour)) || !slot.Before(to) || slot.Before(from) {
+				return nil, nil
 			}
-			return out, nil
+			session := fmt.Sprintf("s-%d", slot.Unix())
+			req := projectionRaw(deviceID, uuid.NewSHA1(uuid.NameSpaceOID, []byte(session+"-req")),
+				slot.Add(time.Second),
+				"[C1] Access-Request [9] Cisco-AVPair='xpgk-request-type=check_call' Acct-Session-Id="+session)
+			acc := projectionRaw(deviceID, uuid.NewSHA1(uuid.NameSpaceOID, []byte(session+"-acc")),
+				slot.Add(2*time.Second), "[C1] Access-Accept [9]")
+			return []customradius.RawEvent{req, acc}, nil
 		},
 	}
 	worker := &Worker{Queue: queue, Warehouse: warehouse, Config: Config{MaxEvents: 10, MaxMemoryBytes: 1 << 20}}
 	if err := worker.process(context.Background(), worker.Config.normalized(), Job{
 		ID: uuid.New(), DeviceID: deviceID, PolicyRevision: 1, ProjectionSeq: 1,
-		Kind: JobBucket, BucketStart: bucket,
+		Kind: JobBucket, BucketStart: bucket, WorkerID: "test-worker",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(warehouse.activations) != 1 {
-		t.Fatalf("dense hour should activate once via windows: %v", warehouse.activations)
+	if len(warehouse.activations) < 2 || queue.progressed < 1 || queue.completed != 1 {
+		t.Fatalf("dense hour should progressive-activate then finalize: activations=%v progressed=%d completed=%d",
+			warehouse.activations, queue.progressed, queue.completed)
 	}
 }
 

@@ -778,8 +778,10 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [error, setError] = useState('')
 
   const loadDevices = useCallback(() => api<{ items: Device[] }>('/devices').then(({ items }) => {
-    setDevices(items || [])
-    setActiveDevice((current) => current || items?.[0]?.id || '')
+    const next = items || []
+    setDevices((current) =>
+      devicesPollFingerprint(current) === devicesPollFingerprint(next) ? current : next)
+    setActiveDevice((current) => current || next[0]?.id || '')
   }).catch((reason) => setError(reason.message)), [])
   useEffect(() => {
     void loadDevices()
@@ -3170,6 +3172,21 @@ function EmptyDevices({ category, canCreate, onCreate }: {
 
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="centered">{children}</div>
+}
+
+function devicesPollFingerprint(devices: Device[]) {
+  return devices.map((device) => [
+    device.id,
+    device.enabled ? '1' : '0',
+    device.purgeState || '',
+    device.timezoneRevision ?? 0,
+    device.activeTimezoneRevision ?? 0,
+    device.antifraudEnabled ? '1' : '0',
+    device.replay?.pending ?? 0,
+    device.replay?.processing ?? 0,
+    device.replay?.complete ?? 0,
+    device.replay?.failed ?? 0,
+  ].join(':')).join('|')
 }
 
 function activeDeviceTimezone(device: Device) {

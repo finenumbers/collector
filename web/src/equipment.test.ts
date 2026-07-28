@@ -150,6 +150,11 @@ describe('equipment templates', () => {
     expect(main).toContain('setDataset(defaultSourceDataset(device))')
   })
 
+  it('skips setDevices when the poll fingerprint is unchanged', () => {
+    expect(main).toContain('devicesPollFingerprint(current) === devicesPollFingerprint(next)')
+    expect(main).toContain('function devicesPollFingerprint(devices: Device[])')
+  })
+
   it('formats softswitch dashboard freshness in the device timezone', () => {
     const softswitchBlock = main.slice(
       main.indexOf('title="Последний CDR"'),

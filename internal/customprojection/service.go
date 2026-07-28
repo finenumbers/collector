@@ -352,6 +352,7 @@ func (w *Worker) processBucketWindows(
 		}
 		preliminary := customradius.BuildAtCutoff(engineConfig, events, windowCutoff)
 		identities := resultIdentities(preliminary)
+		result := preliminary
 		if len(identities) != 0 {
 			// Keep session expansion inside the local pairing neighborhood for dense
 			// hours; a 7-day scan per 5m window would starve ClickHouse.
@@ -374,6 +375,7 @@ func (w *Worker) processBucketWindows(
 				if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
 					return limitErr
 				}
+				result = customradius.BuildAtCutoff(engineConfig, events, windowCutoff)
 			}
 		}
 		for _, event := range events {
@@ -386,7 +388,6 @@ func (w *Worker) processBucketWindows(
 		if windowCutoff.IsZero() {
 			windowCutoff = watermarkTime
 		}
-		result := customradius.BuildAtCutoff(engineConfig, events, windowCutoff)
 		if result.NextDeadline != nil {
 			if nextDeadline == nil || result.NextDeadline.Before(*nextDeadline) {
 				deadline := *result.NextDeadline
@@ -515,6 +516,7 @@ func (w *Worker) finishBucket(
 	}
 	preliminary := customradius.BuildAtCutoff(engineConfig, events, cutoff)
 	identities := resultIdentities(preliminary)
+	result := preliminary
 	if len(identities) != 0 {
 		sessionEvents, loadErr := w.loadSessionEvents(
 			ctx, cfg, job.DeviceID, identities, from, to,
@@ -532,6 +534,7 @@ func (w *Worker) finishBucket(
 			if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
 				return w.processBucketWindows(ctx, cfg, job, from, to)
 			}
+			result = customradius.BuildAtCutoff(engineConfig, events, cutoff)
 		}
 	}
 	var watermarkTime time.Time
@@ -547,7 +550,6 @@ func (w *Worker) finishBucket(
 	if cutoff.IsZero() {
 		cutoff = watermarkTime
 	}
-	result := customradius.BuildAtCutoff(engineConfig, events, cutoff)
 	return w.publishBucket(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected)
 }
 

@@ -2966,8 +2966,8 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
           value={form.platform.exportPageSize}
           onChange={(e) => updatePlatform({ exportPageSize: Number(e.target.value) })} /></label>
       </div>
-      <p className="runtime-note">Admission capacity применяется при следующем перезапуске процесса;
-        остальные параметры подхватываются воркерами сразу.</p>
+      <p className="runtime-note">Admission capacity применяется сразу для новых запросов;
+        уже выполняющиеся запросы сохраняют прежние лимиты до завершения.</p>
     </article>
 
     <article className="runtime-card">

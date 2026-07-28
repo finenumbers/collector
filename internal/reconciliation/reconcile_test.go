@@ -184,3 +184,77 @@ func TestCallCoverageAgesWithoutCDR(t *testing.T) {
 		t.Fatalf("AF coverage=%q, want late", result.Calls[0].State)
 	}
 }
+
+func TestCDRSessionMatchesAFH323WhenNotInLegs(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	conf := "11000090 6a6859b0 e57728cd 3abf98a1"
+	result := Reconcile(Config{}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, IngestedAt: now,
+		AcctSessionID: conf, Calling: "100", Called: "200",
+		Enabled: true, PolicyRevision: 1,
+	}}, []Call{{
+		ID: uuid.New(), DeviceID: device, EventTime: now,
+		AcctSessionID: "leg-a", AcctSessionIDs: []string{"leg-a", "leg-b"},
+		H323ConfID: conf, Calling: "100", Called: "200", PolicyRevision: 1,
+	}})
+	if len(result.Assignments) != 1 {
+		t.Fatalf("assignments=%d, want CDR session→AF h323 match", len(result.Assignments))
+	}
+	if result.Assignments[0].Method != "cdr_session_as_h323" {
+		t.Fatalf("method=%q, want cdr_session_as_h323", result.Assignments[0].Method)
+	}
+}
+
+func TestUniqueTagMatchesAFSessionWhenCDRRadiusEmpty(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	tag := "110003076a62aaa9c9f5297a4f6a3001"
+	result := Reconcile(Config{}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, IngestedAt: now,
+		UniqueTag: tag, Calling: "100", Called: "200",
+		Enabled: true, PolicyRevision: 1,
+	}}, []Call{{
+		ID: uuid.New(), DeviceID: device, EventTime: now,
+		AcctSessionID: "11000307 6a62aaa9 c9f5297a 4f6a3001",
+		Calling:       "100", Called: "200", PolicyRevision: 1,
+	}})
+	if len(result.Assignments) != 1 {
+		t.Fatalf("assignments=%d, want UniqueTag→session match", len(result.Assignments))
+	}
+	if result.Assignments[0].Method != "unique_tag_as_session" {
+		t.Fatalf("method=%q, want unique_tag_as_session", result.Assignments[0].Method)
+	}
+}
+
+func TestUniqueTagAsH323WhenSessionMiss(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	conf := "aabbccdd11223344556677889900aabb"
+	result := Reconcile(Config{}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, IngestedAt: now,
+		AcctSessionID: "unrelated-session", UniqueTag: conf,
+		Calling: "100", Called: "200", Enabled: true, PolicyRevision: 1,
+	}}, []Call{{
+		ID: uuid.New(), DeviceID: device, EventTime: now,
+		AcctSessionID: "leg-1", AcctSessionIDs: []string{"leg-1"},
+		H323ConfID: conf, Calling: "100", Called: "200", PolicyRevision: 1,
+	}})
+	if len(result.Assignments) != 1 || result.Assignments[0].Method != "h323_conf_id" {
+		t.Fatalf("UniqueTag→h323 fallback failed: %+v", result.Assignments)
+	}
+}
+
+func TestDuplicateH323ViaCDRSessionRemainsAmbiguous(t *testing.T) {
+	device, now := uuid.New(), time.Now().UTC()
+	conf := "conf-shared"
+	result := Reconcile(Config{}, now, []CDR{{
+		ID: uuid.New(), DeviceID: device, EventTime: now, IngestedAt: now,
+		AcctSessionID: conf, Enabled: true, PolicyRevision: 1,
+	}}, []Call{
+		{ID: uuid.New(), DeviceID: device, EventTime: now, H323ConfID: conf,
+			AcctSessionID: "a", PolicyRevision: 1},
+		{ID: uuid.New(), DeviceID: device, EventTime: now, H323ConfID: conf,
+			AcctSessionID: "b", PolicyRevision: 1},
+	})
+	if len(result.Assignments) != 0 || !result.Coverage[0].Ambiguous {
+		t.Fatalf("duplicate h323 via CDR session must be ambiguous: %+v", result.Coverage[0])
+	}
+}

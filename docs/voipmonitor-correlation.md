@@ -39,7 +39,7 @@ global `VOIPMONITOR_ENABLED` and per-device `devices.voipmonitor_enabled`.
 | `VOIPMONITOR_API_URL` | | GUI origin (e.g. `https://vm.example.com`); `/php/api.php` is appended. Also accepts `…/php` or a full `…/php/api.php` |
 | `VOIPMONITOR_USER` / `VOIPMONITOR_PASSWORD` | | API credentials |
 | `VOIPMONITOR_GUI_URL` | | GUI base for card deep-links |
-| `VOIPMONITOR_CARD_URL_TEMPLATE` | `{gui_base}/admin.php?cdr_filter={fcallid:"{voipmonitor_call_id}"}` | Deep-link template |
+| `VOIPMONITOR_CARD_URL_TEMPLATE` | empty → `{gui_base}/admin.php?cdr_filter={fId:…}` | Deep-link template; default prefers numeric CDR id and URL-encodes `cdr_filter` |
 | `VOIPMONITOR_TIME_SKEW` | `5s` | Call-ID search window around setup |
 | `VOIPMONITOR_WORKER_SLEEP` | `5s` | Idle poll interval |
 | `VOIPMONITOR_LEASE` | `2m` | Per-device job lease |

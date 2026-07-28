@@ -247,16 +247,50 @@ func truncate(value string, limit int) string {
 }
 
 func BuildCardURL(template, guiBase string, parts CardURLParts) string {
-	base := strings.TrimRight(guiBase, "/")
-	if template == "" {
-		template = `{gui_base}/admin.php?cdr_filter={fcallid:"{voipmonitor_call_id}"}`
+	base := strings.TrimRight(strings.TrimSpace(guiBase), "/")
+	template = strings.Trim(strings.TrimSpace(template), `"'`)
+	if base == "" {
+		return ""
 	}
-	replacer := strings.NewReplacer(
+	if template == "" {
+		if parts.CDRID != "" {
+			return base + "/admin.php?cdr_filter=" + url.QueryEscape("{fId:"+parts.CDRID+"}")
+		}
+		if parts.CallID == "" {
+			return ""
+		}
+		return base + "/admin.php?cdr_filter=" +
+			url.QueryEscape(`{fcallid:"`+escapeJSONString(parts.CallID)+`"}`)
+	}
+	// Prefer stable numeric CDR id when the template still points at Call-ID only.
+	if parts.CDRID != "" && strings.Contains(template, "{voipmonitor_call_id}") &&
+		!strings.Contains(template, "{voipmonitor_cdr_id}") {
+		return base + "/admin.php?cdr_filter=" + url.QueryEscape("{fId:"+parts.CDRID+"}")
+	}
+	replaced := strings.NewReplacer(
 		"{gui_base}", base,
-		"{voipmonitor_cdr_id}", url.QueryEscape(parts.CDRID),
+		"{voipmonitor_cdr_id}", parts.CDRID,
 		"{voipmonitor_call_id}", escapeJSONString(parts.CallID),
-	)
-	return replacer.Replace(template)
+	).Replace(template)
+	return encodeCDRFilterQuery(replaced)
+}
+
+func encodeCDRFilterQuery(raw string) string {
+	const key = "cdr_filter="
+	index := strings.Index(raw, key)
+	if index < 0 {
+		return raw
+	}
+	prefix := raw[:index+len(key)]
+	value := strings.Trim(raw[index+len(key):], `"'`)
+	if value == "" {
+		return raw
+	}
+	// Avoid double-encoding already-escaped values.
+	if strings.Contains(value, "%7B") || strings.Contains(value, "%7b") {
+		return prefix + value
+	}
+	return prefix + url.QueryEscape(value)
 }
 
 func escapeJSONString(value string) string {

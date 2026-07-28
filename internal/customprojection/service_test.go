@@ -19,6 +19,8 @@ type projectionQueueMock struct {
 	failed            int
 	advanced          int
 	progressed        int
+	refreshed         int
+	lastProgressLease time.Duration
 	seq               uint64
 	enqueueErr        error
 	beforeLock        func()
@@ -61,8 +63,15 @@ func (m *projectionQueueMock) NextCustomProjectionSeq(context.Context) (uint64, 
 	m.seq++
 	return m.seq + 100, nil
 }
+func (m *projectionQueueMock) RefreshCustomProjectionLease(
+	_ context.Context, _ Job, _ time.Duration,
+) error {
+	m.refreshed++
+	return nil
+}
 func (m *projectionQueueMock) ProgressCustomProjection(
-	ctx context.Context, job Job, snapshot Snapshot, activate func(context.Context) error,
+	ctx context.Context, job Job, snapshot Snapshot, lease time.Duration,
+	activate func(context.Context) error,
 ) error {
 	if m.beforeLock != nil {
 		m.beforeLock()
@@ -73,6 +82,7 @@ func (m *projectionQueueMock) ProgressCustomProjection(
 	if err := activate(ctx); err != nil {
 		return err
 	}
+	m.lastProgressLease = lease
 	m.progressed++
 	return nil
 }
@@ -371,6 +381,21 @@ func TestDenseHourProgressiveActivatesDuringWindowedRebuild(t *testing.T) {
 	if len(warehouse.activations) < 2 || queue.progressed < 1 || queue.completed != 1 {
 		t.Fatalf("dense hour should progressive-activate then finalize: activations=%v progressed=%d completed=%d",
 			warehouse.activations, queue.progressed, queue.completed)
+	}
+	if queue.refreshed < len(warehouse.activations) {
+		t.Fatalf("expected lease refresh before each CH publish: refreshed=%d activations=%d",
+			queue.refreshed, len(warehouse.activations))
+	}
+	if queue.lastProgressLease != 2*time.Minute {
+		t.Fatalf(" progressive lease=%s, want default cfg.Lease", queue.lastProgressLease)
+	}
+	// CDR reconciliation must not run on progressive publishes (finalize only).
+	if len(queue.buckets) == 0 {
+		t.Fatal("finalize should enqueue CDR reconciliation")
+	}
+	if len(queue.buckets) > queue.progressed {
+		t.Fatalf("CDR reconciliation ran on progressive windows: stamps=%d progressed=%d",
+			len(queue.buckets), queue.progressed)
 	}
 }
 

@@ -76,9 +76,11 @@ type Queue interface {
 	FailCustomProjectionJob(context.Context, Job, error, time.Duration) error
 	ScheduleCustomProjectionDeadline(context.Context, Job, time.Time) error
 	NextCustomProjectionSeq(context.Context) (uint64, error)
+	// RefreshCustomProjectionLease extends ownership before slow CH writes.
+	RefreshCustomProjectionLease(context.Context, Job, time.Duration) error
 	// ProgressCustomProjection publishes a mid-hour active snapshot without
 	// completing the job or releasing the per-device lease.
-	ProgressCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
+	ProgressCustomProjection(context.Context, Job, Snapshot, time.Duration, func(context.Context) error) error
 	CutoverCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
 	EnqueueCDRReconciliationBuckets(context.Context, uuid.UUID, uint64, []time.Time) error
 }
@@ -612,6 +614,11 @@ func (w *Worker) publishBucketSnapshot(
 			return err
 		}
 	}
+	// Heartbeat before slow CH write/activate so dense progressive windows cannot
+	// expire the fixed cutover-only lease refresh mid-snapshot.
+	if err := w.Queue.RefreshCustomProjectionLease(ctx, job, cfg.Lease); err != nil {
+		return err
+	}
 	releaseHeavy, err := w.acquireHeavyLane(ctx)
 	if err != nil {
 		return err
@@ -640,12 +647,9 @@ func (w *Worker) publishBucketSnapshot(
 			cutoverCtx, job.DeviceID, job.PolicyRevision, allBuckets,
 		)
 	}
-	if err := w.Queue.ProgressCustomProjection(cutoverCtx, job, snapshot, activate); err != nil {
-		return err
-	}
-	return w.Queue.EnqueueCDRReconciliationBuckets(
-		cutoverCtx, job.DeviceID, job.PolicyRevision, allBuckets,
-	)
+	// Progressive publishes expose partial hour contents; CDR reconciliation,
+	// sibling-hour enqueue, and durable deadlines stay finalize-only.
+	return w.Queue.ProgressCustomProjection(cutoverCtx, job, snapshot, cfg.Lease, activate)
 }
 
 func resultEventIDs(result customradius.Result) []customradius.RawEvent {

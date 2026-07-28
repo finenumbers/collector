@@ -49,6 +49,12 @@ func TestDashboardWindowValidation(t *testing.T) {
 	}
 }
 
+func TestExportWorkerHealthyRequiresStoreWhenHealthNil(t *testing.T) {
+	if (&Server{}).exportWorkerHealthy(context.Background()) {
+		t.Fatal("nil ExportHealth and nil Store must not report healthy")
+	}
+}
+
 func TestDashboardDeviceRowExposesConfiguredAndActiveTimezones(t *testing.T) {
 	latest := time.Date(2026, 7, 26, 12, 30, 0, 0, time.UTC)
 	device := store.Device{

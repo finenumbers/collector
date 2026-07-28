@@ -210,8 +210,9 @@ func (s *Store) ClaimCustomProjectionJob(
 					WHEN kind='bucket'
 						AND bucket_start=date_trunc('hour', timezone('UTC', now()))
 					THEN 0
-					WHEN kind='bucket' THEN 1
-					ELSE 2
+					WHEN kind='discover' THEN 1
+					WHEN kind='bucket' THEN 2
+					ELSE 3
 				END,
 				updated_at,created_at
 		), picked AS (
@@ -367,9 +368,10 @@ func (s *Store) ProgressCustomProjection(
 	ctx context.Context,
 	job customprojection.Job,
 	snapshot customprojection.Snapshot,
+	lease time.Duration,
 	activate func(context.Context) error,
 ) error {
-	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, false)
+	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, false, lease)
 }
 
 func (s *Store) CutoverCustomProjection(
@@ -378,7 +380,39 @@ func (s *Store) CutoverCustomProjection(
 	snapshot customprojection.Snapshot,
 	activate func(context.Context) error,
 ) error {
-	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, true)
+	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, true, 0)
+}
+
+// RefreshCustomProjectionLease extends job + device leases while a progressive
+// windowed rebuild is still writing ClickHouse snapshots outside the cutover tx.
+func (s *Store) RefreshCustomProjectionLease(
+	ctx context.Context, job customprojection.Job, lease time.Duration,
+) error {
+	if lease <= 0 {
+		lease = 2 * time.Minute
+	}
+	tag, err := s.DB.Exec(ctx, `UPDATE custom_projection_jobs
+		SET lease_expires_at=now()+$3::interval,updated_at=now()
+		WHERE id=$1 AND status='running' AND COALESCE(worker_id,'')=$2
+			AND claimed_generation=$4`,
+		job.ID, job.WorkerID, lease.String(), job.Generation)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("projection lease changed before refresh")
+	}
+	tag, err = s.DB.Exec(ctx, `UPDATE custom_projection_device_leases
+		SET lease_expires_at=now()+$3::interval,updated_at=now()
+		WHERE device_id=$1 AND worker_id=$2`,
+		job.DeviceID, job.WorkerID, lease.String())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("projection device lease changed before refresh")
+	}
+	return nil
 }
 
 func (s *Store) applyCustomProjectionCutover(
@@ -387,6 +421,7 @@ func (s *Store) applyCustomProjectionCutover(
 	snapshot customprojection.Snapshot,
 	activate func(context.Context) error,
 	finalize bool,
+	lease time.Duration,
 ) error {
 	conn, err := s.DB.Acquire(ctx)
 	if err != nil {
@@ -480,14 +515,19 @@ func (s *Store) applyCustomProjectionCutover(
 	} else {
 		// Keep the hour job running and refresh leases so progressive publishes
 		// remain visible while later 5m windows continue.
+		if lease <= 0 {
+			lease = 2 * time.Minute
+		}
 		if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
-			SET lease_expires_at=now()+interval '2 minutes',updated_at=now()
-			WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
+			SET lease_expires_at=now()+$3::interval,updated_at=now()
+			WHERE id=$1 AND claimed_generation=$2`,
+			job.ID, job.Generation, lease.String()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE custom_projection_device_leases
-			SET lease_expires_at=now()+interval '2 minutes',updated_at=now()
-			WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
+			SET lease_expires_at=now()+$3::interval,updated_at=now()
+			WHERE device_id=$1 AND worker_id=$2`,
+			job.DeviceID, job.WorkerID, lease.String()); err != nil {
 			return err
 		}
 	}
@@ -497,7 +537,7 @@ func (s *Store) applyCustomProjectionCutover(
 func (s *Store) FailCustomProjectionJob(
 	ctx context.Context, job customprojection.Job, cause error, retryAfter time.Duration,
 ) error {
-	_, err := s.DB.Exec(ctx, `UPDATE custom_projection_jobs
+	tag, err := s.DB.Exec(ctx, `UPDATE custom_projection_jobs
 		SET status=CASE
 				WHEN kind='discover' THEN 'pending'
 				WHEN attempts>=20 THEN 'failed'
@@ -505,11 +545,16 @@ func (s *Store) FailCustomProjectionJob(
 			END,
 			last_error=$2,next_attempt_at=now()+$3::interval,
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
-		WHERE id=$1`, job.ID, redact.Text(cause.Error()), retryAfter.String())
-	if err == nil {
-		err = s.releaseCustomProjectionDeviceLease(ctx, job.DeviceID, job.WorkerID)
+		WHERE id=$1 AND COALESCE(worker_id,'')=$4 AND claimed_generation=$5`,
+		job.ID, redact.Text(cause.Error()), retryAfter.String(), job.WorkerID, job.Generation)
+	if err != nil {
+		return err
 	}
-	return err
+	if tag.RowsAffected() != 1 {
+		// Another worker already owns the job; do not touch its lease.
+		return nil
+	}
+	return s.releaseCustomProjectionDeviceLease(ctx, job.DeviceID, job.WorkerID)
 }
 
 func (s *Store) RequeueFailedProjectionJobs(

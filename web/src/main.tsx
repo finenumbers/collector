@@ -15,8 +15,8 @@ import {
 import { readModelNotice } from './readModelNotice'
 import { redactDisplayText, redactDisplayValue } from './redaction'
 import {
-  defaultSourceDataset, deviceSurfaces, EquipmentTemplate, fallbackTemplates, normalizeTemplate, sourceCapabilities,
-  sourceCategory, SourceCapabilities, SourceCategory, templatesFor,
+  defaultSourceDataset, deviceSurfaces, DeviceSurface, EquipmentTemplate, fallbackTemplates,
+  normalizeTemplate, sourceCapabilities, sourceCategory, SourceCapabilities, SourceCategory, templatesFor,
 } from './equipment'
 import {
   createExportRequest, ExportJob, exportDownloadURL, exportJobsURL, exportJobDisposition,
@@ -809,7 +809,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   const sourceList = (items: Device[], category: SourceCategory) => <>
     <div className="device-list">
       {items.map((device) => <button key={device.id}
-        className={`device-button ${device.id === activeDevice ? 'active' : ''}`}
+        className={`device-button ${activeView === 'device' && device.id === activeDevice ? 'active' : ''}`}
         onClick={() => selectSource(device)}>
         <span className={`status-dot ${device.enabled && device.purgeState !== 'purge_failed' ? 'online' : ''}`} />
         <span>
@@ -906,6 +906,9 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
       initialDeleting={editingDevice.purgeState === 'purge_failed'}
       onClose={() => setEditingDevice(null)} onSaved={(device) => {
         setDevices((current) => current.map((item) => item.id === device.id ? device : item))
+        if (device.id === activeDevice && !deviceSurfaces(device).includes(dataset as DeviceSurface)) {
+          setDataset(defaultSourceDataset(device))
+        }
         setEditingDevice(null)
       }} onDeleted={() => {
         setEditingDevice(null)
@@ -1008,7 +1011,10 @@ function DashboardPage({ devices, onSelectDevice }: {
             <td className="right">{formatCount(row.fileMetrics?.files)}</td>
             <td className="right">{formatBytes(row.fileMetrics?.bytes)}</td>
             <td className="mono col-flex">
-              {formatTime(row.fileMetrics?.latestAt || row.freshness.latestCdrAt, 'UTC')}</td>
+              {formatTime(
+                row.fileMetrics?.latestAt || row.freshness.latestCdrAt,
+                row.activeTimezone || row.timezone || 'UTC',
+              )}</td>
           </tr>
         })}</tbody></table>
       {softswitchRows.length === 0 && <div className="table-empty">

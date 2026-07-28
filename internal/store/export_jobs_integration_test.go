@@ -135,6 +135,72 @@ func TestExportJobClaimAndLeaseRecovery(t *testing.T) {
 	}
 }
 
+func TestExportWorkerAvailableFromJobHeartbeats(t *testing.T) {
+	databaseURL := os.Getenv("POSTGRES_TEST_URL")
+	if databaseURL == "" {
+		t.Skip("POSTGRES_TEST_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	control, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.DB.Close()
+	if err = control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	resetStoreIntegrationData(t, ctx, control)
+	actor, err := control.CreateInitialAdmin(ctx, "export-liveness-admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "export-liveness-device", TemplateKey: equipment.TemplateEltex3410,
+		Timezone: "UTC", SyslogSourceIP: "192.0.2.11",
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := control.ExportWorkerAvailable(ctx, ExportHeartbeatTimeout)
+	if err != nil || !ok {
+		t.Fatalf("idle queue available=%v err=%v", ok, err)
+	}
+	job, err := control.CreateExportJob(ctx, NewExportJob{
+		DeviceID: device.ID, Dataset: "syslog",
+		Format: "csv_zip", Timezone: "UTC", ActiveRevision: 1,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = control.DB.Exec(ctx, `UPDATE export_jobs
+		SET created_at=now()-interval '5 minutes' WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = control.ExportWorkerAvailable(ctx, time.Minute)
+	if err != nil || ok {
+		t.Fatalf("stale queued job available=%v err=%v", ok, err)
+	}
+	claimed, err := control.ClaimExportJob(ctx, "liveness-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err = control.ExportWorkerAvailable(ctx, ExportHeartbeatTimeout)
+	if err != nil || !ok {
+		t.Fatalf("fresh running job available=%v err=%v", ok, err)
+	}
+	if _, err = control.DB.Exec(ctx, `UPDATE export_jobs
+		SET heartbeat_at=now()-interval '5 minutes',
+			started_at=now()-interval '5 minutes' WHERE id=$1`, claimed.ID); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = control.ExportWorkerAvailable(ctx, time.Minute)
+	if err != nil || ok {
+		t.Fatalf("stale running job available=%v err=%v", ok, err)
+	}
+	_ = control.FinishExportJob(ctx, claimed.ID, "liveness-worker", "cancelled", "cleanup")
+}
+
 func TestClickHouseHeavyLaneSerializesAndCancels(t *testing.T) {
 	databaseURL := os.Getenv("POSTGRES_TEST_URL")
 	if databaseURL == "" {

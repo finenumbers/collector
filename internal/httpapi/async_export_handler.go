@@ -174,7 +174,7 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusServiceUnavailable, "analytics unavailable")
 		return
 	}
-	if s.ExportHealth != nil && !s.ExportHealth.Available(store.ExportHeartbeatTimeout) {
+	if !s.exportWorkerHealthy(request.Context()) {
 		writeError(writer, http.StatusServiceUnavailable,
 			"export worker is unavailable; retry in a few seconds")
 		return

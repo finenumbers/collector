@@ -100,6 +100,46 @@ func (s *Store) ExportQueueStats(ctx context.Context) (ExportQueueStats, error) 
 	return result, err
 }
 
+// ExportWorkerAvailable infers remote export-worker liveness from job heartbeats.
+// Idle queues report available; stale running jobs or queued jobs older than
+// maxAge without a fresh running heartbeat report unavailable.
+func (s *Store) ExportWorkerAvailable(ctx context.Context, maxAge time.Duration) (bool, error) {
+	if maxAge <= 0 {
+		maxAge = ExportHeartbeatTimeout
+	}
+	var runningFresh, runningStale, queuedStale int
+	err := s.DB.QueryRow(ctx, `SELECT
+		count(*) FILTER (
+			WHERE status='running'
+			  AND COALESCE(heartbeat_at,started_at,created_at)
+				>= now()-make_interval(secs=>$1)
+		),
+		count(*) FILTER (
+			WHERE status='running'
+			  AND COALESCE(heartbeat_at,started_at,created_at)
+				< now()-make_interval(secs=>$1)
+		),
+		count(*) FILTER (
+			WHERE status='queued'
+			  AND created_at < now()-make_interval(secs=>$1)
+		)
+		FROM export_jobs`, int64(maxAge/time.Second)).
+		Scan(&runningFresh, &runningStale, &queuedStale)
+	if err != nil {
+		return false, err
+	}
+	if runningStale > 0 {
+		return false, nil
+	}
+	if runningFresh > 0 {
+		return true, nil
+	}
+	if queuedStale > 0 {
+		return false, nil
+	}
+	return true, nil
+}
+
 func scanExportJob(row pgx.Row) (ExportJob, error) {
 	var job ExportJob
 	err := row.Scan(

@@ -1,5 +1,9 @@
 # GitHub repository governance
 
+Правила ветки `main`, тегов релизов, Dependabot и security features репозитория
+Collector. Настройки задаются rulesets/settings GitHub; workflow-файлы сами по
+себе repository settings не enforced.
+
 This document defines the repository settings and operating procedure for the
 default branch, release tags, dependency updates, and security features. Apply
 these controls through GitHub repository rulesets and settings; workflow files

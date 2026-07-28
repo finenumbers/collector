@@ -1,4 +1,8 @@
-# Architecture
+# Архитектура
+
+Пайплайны Collector: Syslog → ClickHouse, CDR → archive/CH, Custom AntiFraud,
+coverage, VoIPmonitor, export. Операции — [deployment.md](deployment.md);
+модель AF — [correlation.md](correlation.md).
 
 ```mermaid
 flowchart LR
@@ -23,104 +27,108 @@ flowchart LR
     API --> PG[(PostgreSQL control plane)]
 ```
 
-## Reliability boundary
+---
 
-UDP itself has no acknowledgement. Once ingress accepts a datagram, the same
-`event_id` passes through the ingress spool, acknowledged Unix handoff, app
-spool, and JetStream. Spool deletion happens only after the next durable
-boundary acknowledges it. `Nats-Msg-Id=event_id` suppresses duplicate publish
-after a crash.
+## Граница надёжности Syslog
 
-The NATS consumer writes the immutable transport record directly to
-`syslog_messages` and acknowledges NATS as soon as raw persistence succeeds.
-The durable PostgreSQL discovery job continuously scans the immutable table
-and idempotently enqueues new UTC-hour buckets for enabled devices. A temporary
-PostgreSQL enqueue failure therefore cannot force duplicate raw delivery or
-lose later projection. The transport consumer itself does no parsing.
+UDP сам по себе без ACK. После accept datagram один и тот же `event_id` проходит
+ingress spool → acknowledged Unix handoff → app spool → JetStream. Удаление из
+spool — только после ACK следующей durable-границы. `Nats-Msg-Id=event_id`
+подавляет дубликат publish после crash.
 
-## Storage boundaries
+Consumer пишет immutable transport-запись в `syslog_messages` и ACK NATS сразу
+после успешного raw persist. Парсинга в consumer **нет**. Durable discovery в
+PostgreSQL сканирует immutable-таблицу и идемпотентно ставит UTC-hour buckets
+для устройств с AntiFraud. Временный сбой enqueue в PG не дублирует raw и не
+теряет последующую проекцию.
 
-PostgreSQL stores users, sessions, devices, ingest/export ledgers, retention,
-and audit state. ClickHouse stores immutable Syslog, Eltex CDR, Satel RTU CDR,
-and CDR time interpretations. MinIO stores immutable source CDR files.
+---
 
-`syslog_messages` is the extension boundary for the pure `customradius`
-engine. PostgreSQL owns policy revisions, durable discovery/bucket jobs,
-generation counters, deadline cursors, per-device projection leases (≤1 running
-job per SMG), deployment-wide ClickHouse heavy-lane lock for snapshot
-write/cutover, and watermarks. Claim prefers devices with the oldest watermark
-and, per device, `open UTC-hour bucket → discover → older backlog buckets`
-so live tip stays fresh without starving lookback discovery behind every
-historical hour. Discover scans use the non-heavy `custom_reconcile`
-admission class so tiny cursor pages are not serialized behind hour payload
-loads or exports. Hour buckets that exceed runtime `projection.maxEvents`
-(Настройки → Параметры; env `CUSTOM_PROJECTION_MAX_EVENTS` only seeds an empty
-DB) are loaded via hour→15m→5m→1m split windows in-process so a dense SMG cannot
-terminal-fail the hour. Windowed rebuild keeps the previous active tip visible
-until a single finalize cutover (lease refreshed before the CH write) so call
-cards and CDR coverage stay consistent mid-rebuild; cutover then completes the
-job, enqueues CDR reconciliation and sibling hours, and schedules durable
-`NextDeadline`. Packets and calls are owned by the first-seen 5m window inside
-that hour, so a call that spans later windows may stay incomplete until the
-next full finalize of that hour — operators should treat the previous tip as
-authoritative during rebuild. Every arrival increments its bucket generation,
-including arrivals while a worker owns the lease.
-ClickHouse stores staged snapshots. An active marker is the visibility
-boundary; retries reuse the deterministic snapshot ID, superseded rows receive
-tombstones, and raw rows are never updated or deleted by replay.
+## Границы хранения
 
-Session recomputation uses exact engine identities plus
-`custom_radius_session_events` to expand bounded indexed windows across UTC
-hours or days. `NextDeadline` creates a durable cutoff job, so unanswered
-requests time out without another arrival.
+| Слой | Что хранит |
+|------|------------|
+| PostgreSQL | users, sessions, devices, ingest/export ledgers, retention, runtime settings, projection/reconciliation jobs, audit |
+| ClickHouse | `syslog_messages`, Eltex/Satel CDR, Custom AF snapshots, coverage, VoIP links |
+| MinIO | raw CDR (`cdr/`), export artifacts (`exports/`) |
 
-Toggle races are resolved by checking the PostgreSQL policy revision before
-cutover under a device-scoped PostgreSQL advisory lock shared by all roles and
-instances. Enable creates durable Syslog and CDR discovery jobs. Disable cancels live
-jobs, writes disabled markers and not-applicable CDR coverage, and leaves raw
-Syslog untouched.
+`syslog_messages` — единственная граница для движка `customradius`. PostgreSQL
+владеет policy revision, discovery/bucket jobs, generation, deadlines, per-device
+lease (≤1 running job на SMG), deployment-wide heavy-lane lock на write/cutover,
+watermarks.
 
-## Migration boundary
+Claim предпочитает устройства с самым старым watermark и на устройстве порядок
+`open UTC-hour → discover → older backlog`, чтобы live tip не голодал. Discover
+курсоры идут в admission-классе `custom_reconcile` (не heavy).
 
-ClickHouse migration 022 creates and copies `syslog_messages`. Application
-preflight compares source/destination counts and deterministic aggregate
-digests, including payload bytes and stored hash, and checks the old PostgreSQL
-rebuild queue. A PostgreSQL advisory lock serializes the complete ClickHouse
-migration ledger check, execution, and recording across instances. Migration 023 is allowed
-to remove legacy Syslog-derived objects only after that validation. All
-migrations finish before workers start.
+Часы выше `projection.maxEvents` грузятся split-окнами hour→15m→5m→1m in-process.
+Windowed rebuild держит **предыдущий active tip** видимым до **одного** finalize
+cutover (lease продлевается перед CH write). Packets/calls принадлежат first-seen
+5m-окну часа: вызов, пересекающий окна, может остаться неполным до следующего
+полного finalize — во время rebuild авторитетен предыдущий tip.
 
-Migrations 024 and 025 create the Custom projection and CDR coverage model.
-Migration 018 creates the new durable PostgreSQL queue; it does not reuse the
-deleted legacy parser queue.
-PostgreSQL migration 020 adds generation/deadline state and leased
-reconciliation. ClickHouse migration 026 adds finalized link/exchange views and
-the session-event index.
+Каждый arrival инкрементирует generation bucket, в том числе под lease.
+Active marker — граница видимости; retries используют deterministic snapshot ID;
+superseded → tombstones; raw rows replay не обновляет и не удаляет.
 
-See [the migration runbook](syslog-storage-migration.md).
+Session recompute: exact engine identities + `custom_radius_session_events` для
+ограниченных indexed windows. `NextDeadline` — durable cutoff без нового arrival.
 
-## CDR independence
+Toggle `antifraudEnabled`: перед cutover проверяется policy revision под
+device-scoped advisory lock. Enable → discovery jobs; disable → cancel live jobs,
+disabled markers, coverage `not_applicable`, raw Syslog не трогается.
 
-Eltex and Satel typed CDR ingestion remain active. CDR timezone reinterpretation
-does not invoke a Syslog rebuild. `cdr_time_interpretations`,
-`cdr_time_facts`, `satel_rtu_cdr`, and `satel_rtu_cdr_time_facts` are retained
-through cleanup.
+---
 
-Every typed Eltex CDR insert immediately writes `expected` coverage for an
-enabled device or `not_applicable` for a disabled device. CDR and Custom call
-arrivals dirty the same UTC reconciliation buckets. The fair scheduler also
-ages expected rows without new arrivals. Exact normalized Acct-Session-Id is
-the only primary key; H323 fallback requires a unique value from a real CDR
-field. Number and time similarity never select a candidate.
+## Роли Compose
 
-AntiFraud call cards load the active call shell with a device-scoped
-`custom_antifraud_calls FINAL` point lookup (not the unfiltered
-`*_current` view) under a 512 MiB Interactive memory budget, then enrich
-packets/exchanges/CDR. Enrichment failures return the shell with warnings
-instead of a false “call not found”.
+| `COLLECTOR_ROLE` | Владение |
+|------------------|----------|
+| `ingress` | Host-network UDP edge |
+| `app` | All-in-one (default) |
+| `api-ingest` | HTTP + NATS raw consumer + CDR watcher |
+| `export` | Только async export worker |
+| `maintenance` | Projection/replay, reconciliation, retention |
 
-Current views (`custom_antifraud_calls_current` and related) use `SELECT *`
-expanded at `CREATE VIEW` time. After any `ALTER TABLE … ADD COLUMN` on the
-underlying ReplacingMergeTree tables, recreate the matching `_current` views
-in the same migration (see 028/029). If list works but detail 404s after a
-schema add, view drift is the first check.
+Split-профиль: `docker compose --profile split up --scale collector=0`.
+Одновременно с default `collector` не запускать — дублирование ownership.
+
+---
+
+## Миграции (контур)
+
+- CH 022: create/copy `syslog_messages`; preflight — counts + digests.
+- Cleanup legacy Syslog-derived — только после verified copy
+  ([syslog-storage-migration.md](syslog-storage-migration.md)).
+- Custom projection / coverage — CH 024–026 (+ refresh views 028/029).
+- PG: durable queues, generation/deadline, runtime settings (до **023**), …
+- CH VoIP links — **030**. Все миграции завершаются до старта workers.
+
+---
+
+## CDR и coverage
+
+Ingest Eltex/Satel независим от Syslog rebuild. Timezone reinterpretation CDR
+не запускает Syslog rebuild.
+
+Каждый typed Eltex CDR insert сразу пишет coverage `expected` (AF on) или
+`not_applicable` (AF off). Primary match — exact normalized Acct-Session-Id;
+H323 fallback — только unique значение из реального CDR field. Номера/время
+кандидата не выбирают.
+
+Карточки AF: device-scoped `custom_antifraud_calls FINAL` (не «голый»
+`*_current`) под Interactive **512 MiB**; enrichment soft-fail с warnings,
+не false-404.
+
+Views `*_current` создаются как `SELECT *` на момент CREATE: после
+`ALTER TABLE … ADD COLUMN` нужна recreate view в той же миграции (028/029).
+Если list работает, а detail 404 после schema add — первым проверьте drift view.
+
+---
+
+## Ограничения (инженерные)
+
+- Finalize-only tip (нет mid-hour progressive activate).
+- Single-host, не HA.
+- Export и `custom_replay` делят одну heavy lane (см. [security-performance.md](security-performance.md)).
+- Source IP isolation только через host-network ingress.

@@ -1,16 +1,20 @@
-# Raw Syslog storage migration
+# Миграция хранилища raw Syslog
 
-The upgrade replaces `collector.raw_syslog` and every legacy Syslog
-classification/RADIUS/AntiFraud/correlation projection with the immutable
-`collector.syslog_messages` table. CDR and Satel RTU tables are not part of
-this cleanup.
+> One-shot runbook для инсталляций, ещё держащих legacy `collector.raw_syslog`.
+> Новые стеки на актуальном образе этот путь не проходят.
+> Вызов из операторского гайда: [deployment.md — Upgrade](deployment.md#13-upgrade)
+> и раздел инцидентов про legacy storage.
+
+Upgrade заменяет `collector.raw_syslog` и все legacy Syslog
+classification/RADIUS/AntiFraud/correlation projection на immutable
+`collector.syslog_messages`. Таблицы CDR и Satel RTU в cleanup **не** входят.
 
 ## Preflight
 
-Stop the application container so no worker can race the copy. Keep
-PostgreSQL and ClickHouse running. Take an off-host backup before any
-destructive cleanup — copy verification protects against a bad copy, but it
-is not a restore point:
+Остановите application-контейнер, чтобы worker не гонялся с copy. PostgreSQL и
+ClickHouse оставьте running. Сделайте off-host backup **до** destructive cleanup —
+проверка copy защищает от плохой копии, но не заменяет restore point
+(см. [Backup / restore](deployment.md#10-backup--restore--ротация-секретов)):
 
 ```bash
 docker compose -f deploy/compose.yml stop collector
@@ -21,53 +25,50 @@ docker compose -f deploy/compose.yml exec -T clickhouse \
   --query "BACKUP TABLE collector.raw_syslog TO Disk('default', 'backups/raw_syslog-$(date -u +%Y%m%dT%H%M%SZ)')"
 ```
 
-If your ClickHouse build or storage policy does not support `BACKUP TABLE`,
-take a filesystem/volume snapshot of the ClickHouse data directory instead
-(see [Backup](deployment.md#backup)). Keep the dump and snapshot until the
-new release has served production traffic and retention/purge look healthy.
+Если `BACKUP TABLE` недоступен — filesystem/volume snapshot каталога данных
+ClickHouse. Держите dump/snapshot, пока новый релиз не отработает в production
+и retention/purge не выглядят здоровыми.
 
-Then verify the immutable copy:
+Затем проверьте immutable copy:
 
 ```bash
 docker compose -f deploy/compose.yml run --rm collector migration-preflight
 ```
 
-The command applies ClickHouse migrations only through the create/copy phase
-and prints one JSON object. It exits non-zero unless:
+Команда применяет ClickHouse-миграции только до фазы create/copy и печатает
+один JSON. Exit non-zero, пока не выполнено:
 
-- the source and destination row counts match;
-- deterministic aggregate `sum` and `xor` digests over all eight immutable
-  columns match;
-- PostgreSQL has no `pending` or `running` legacy parser rebuild job;
-- both source and destination tables are queryable.
+- совпали counts source/destination;
+- совпали deterministic aggregate `sum` и `xor` digests по всем восьми
+  immutable-колонкам (включая payload bytes и stored hash);
+- в PostgreSQL нет `pending`/`running` legacy parser rebuild job;
+- обе таблицы queryable.
 
-`legacyTables` is the inventory that cleanup will remove.
-`availableDiskBytes` is reported when ClickHouse exposes `system.disks`; it is
-informational because storage policies may use remote or shared capacity.
+`legacyTables` — inventory, который cleanup удалит.
+`availableDiskBytes` информативен (политики могут использовать remote capacity).
 
-Do not continue if `copyVerified` or `readyForCleanup` is false. The source
-table is retained on every verification failure.
+**Не продолжайте**, если `copyVerified` или `readyForCleanup` = false.
+Source table при любом провале verification сохраняется.
 
 ## Upgrade
 
-After a successful preflight, start the application normally:
+После успешного preflight поднимите application:
 
 ```bash
 docker compose -f deploy/compose.yml up -d collector
 ```
 
-Startup checks the legacy PostgreSQL queue again, applies PostgreSQL migration
-`017`, runs ClickHouse create/copy idempotently, repeats the copy verification,
-and only then applies ClickHouse cleanup migration `023`. This all completes
-before NATS, Syslog, CDR, export, or HTTP workers start.
+Startup снова проверяет legacy PG queue, применяет PostgreSQL migration `017`,
+идемпотентно гоняет ClickHouse create/copy, повторяет verification и только
+затем cleanup migration `023`. Всё завершается **до** старта NATS/Syslog/CDR/
+export/HTTP workers.
 
-The NATS durable consumer is intentionally still named `syslog-parser` during
-this transition. The name is an upgrade compatibility seam only; its runtime
-behavior is raw insertion into `syslog_messages`.
+Durable consumer NATS по-прежнему может называться `syslog-parser` — это только
+compatibility seam имени; runtime-поведение = raw insert в `syslog_messages`.
 
 ## Schema contract
 
-`syslog_messages` contains only `event_id`, `device_id`, `received_at`,
-`source_ip`, `source_port`, `transport`, `payload`, and `payload_sha256`.
-Copying uses those source columns directly; IDs, UTC microsecond timestamps,
-payload bytes, and stored SHA-256 text are not regenerated.
+`syslog_messages` содержит только `event_id`, `device_id`, `received_at`,
+`source_ip`, `source_port`, `transport`, `payload`, `payload_sha256`.
+Copy использует эти колонки напрямую; ID, UTC µs timestamps, payload bytes и
+stored SHA-256 text **не** перегенерируются.

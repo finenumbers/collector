@@ -122,7 +122,7 @@ type DashboardDevice = {
     voipmonitorAmbiguous?: number
     voipmonitorUnmatched?: number
   }
-  freshness: { latestSyslogAt?: string; latestCdrAt?: string }
+  freshness: { latestSyslogAt?: string; latestCdrAt?: string; latestAntifraudAt?: string }
   revision: {
     configured: number
     active: number
@@ -170,6 +170,7 @@ type DashboardCategoryTotals = {
   rejects?: number
   files?: number
   bytes?: number
+  storageBytes?: number
   voipmonitorMatchedExact?: number
   voipmonitorMatchedFallback?: number
   voipmonitorAmbiguous?: number
@@ -969,8 +970,10 @@ function DashboardPage({ devices, onSelectDevice }: {
         tone={softswitchTotals.failed ? 'bad' : 'good'} />
       <DashboardKPI label="VoIPmonitor"
         value={formatCount(voipmonitorMatched(softswitchTotals))}
-        detail={formatVoipmonitorDetail(softswitchTotals)}
         tone={voipmonitorTone(softswitchTotals)} />
+      <DashboardKPI label="Неразобранное"
+        value={formatCount(softswitchTotals.voipmonitorUnmatched)}
+        tone={(softswitchTotals.voipmonitorUnmatched || 0) > 0 ? 'warn' : 'good'} />
       <DashboardKPI label="ASR" value={formatPercent(softswitchTotals.calls, softswitchTotals.failed)}
         detail="для типизированных CDR" />
       <DashboardKPI label="Средний разговор"
@@ -1019,14 +1022,15 @@ function DashboardPage({ devices, onSelectDevice }: {
         tone={equipmentTotals.failed ? 'bad' : 'good'} />
       <DashboardKPI label="VoIPmonitor"
         value={formatCount(voipmonitorMatched(equipmentTotals))}
-        detail={formatVoipmonitorDetail(equipmentTotals)}
         tone={voipmonitorTone(equipmentTotals)} />
+      <DashboardKPI label="AntiFraud" value={formatCount(equipmentTotals.antifraud)}
+        detail={`reject ${formatCount(equipmentTotals.rejects)}`} />
       <DashboardKPI label="ASR" value={formatPercent(equipmentTotals.calls, equipmentTotals.failed)}
         detail="доля успешных вызовов" />
       <DashboardKPI label="Средний разговор"
         value={formatDurationAverage(equipmentTotals.averageTalkMs)} />
-      <DashboardKPI label="AntiFraud" value={formatCount(equipmentTotals.antifraud)}
-        detail={`reject ${formatCount(equipmentTotals.rejects)}`} />
+      <DashboardKPI label="Объем данных"
+        value={formatStorageMB(equipmentTotals.storageBytes)} />
     </div>
     <section className="dashboard-panel fleet-panel">
       <div className="panel-heading"><div><h4>Оборудование</h4></div></div>
@@ -1036,8 +1040,9 @@ function DashboardPage({ devices, onSelectDevice }: {
         <th title="Вызовы">Вызовы</th><th title="Неуспешные">Неуспешные</th>
         <th title="AntiFraud / reject">AntiFraud / reject</th>
         <th title="Revision">Revision</th>
-        <th className="col-flex-pair" title="Последний CDR">Последний CDR</th>
-        <th className="col-flex-pair" title="Последний приём Syslog">Последний приём Syslog</th>
+        <th className="col-flex" title="Последний CDR">Последний CDR</th>
+        <th className="col-flex" title="Последний приём Syslog">Последний приём Syslog</th>
+        <th className="col-flex" title="Последнее значение АнтиФрода">Последнее значение АнтиФрода</th>
       </tr></thead>
         <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
           <td><strong>{row.name}</strong><small>{row.model}</small></td>
@@ -1050,12 +1055,15 @@ function DashboardPage({ devices, onSelectDevice }: {
           <td className="right">{row.antifraudEnabled
             ? `${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}` : '—'}</td>
           <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
-          <td className="mono col-flex-pair">
+          <td className="mono col-flex">
             {formatTime(row.freshness.latestCdrAt, row.activeTimezone || row.timezone || 'UTC')}
           </td>
-          <td className="mono col-flex-pair">
+          <td className="mono col-flex">
             {formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')}
             <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
+          </td>
+          <td className="mono col-flex">
+            {formatTime(row.freshness.latestAntifraudAt, row.activeTimezone || row.timezone || 'UTC')}
           </td>
         </tr>)}</tbody></table>
       {equipmentRows.length === 0 && <div className="table-empty">
@@ -1118,8 +1126,9 @@ function dashboardCategoryTotals(
     voipmonitorMatchedFallback: totals.voipmonitorMatchedFallback + (row.metrics.voipmonitorMatchedFallback || 0),
     voipmonitorAmbiguous: totals.voipmonitorAmbiguous + (row.metrics.voipmonitorAmbiguous || 0),
     voipmonitorUnmatched: totals.voipmonitorUnmatched + (row.metrics.voipmonitorUnmatched || 0),
+    storageBytes: totals.storageBytes,
   }), {
-    calls: 0, failed: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0,
+    calls: 0, failed: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0, storageBytes: 0,
     voipmonitorMatchedExact: 0, voipmonitorMatchedFallback: 0,
     voipmonitorAmbiguous: 0, voipmonitorUnmatched: 0,
   })
@@ -1133,6 +1142,7 @@ function dashboardCategoryTotals(
     rejects: apiTotals.rejects ?? fallback.rejects,
     files: apiTotals.files ?? fallback.files,
     bytes: apiTotals.bytes ?? fallback.bytes,
+    storageBytes: apiTotals.storageBytes ?? fallback.storageBytes,
     voipmonitorMatchedExact: apiTotals.voipmonitorMatchedExact ?? fallback.voipmonitorMatchedExact,
     voipmonitorMatchedFallback: apiTotals.voipmonitorMatchedFallback ?? fallback.voipmonitorMatchedFallback,
     voipmonitorAmbiguous: apiTotals.voipmonitorAmbiguous ?? fallback.voipmonitorAmbiguous,
@@ -1145,20 +1155,6 @@ function voipmonitorMatched(totals: {
   voipmonitorMatchedFallback?: number
 }) {
   return (totals.voipmonitorMatchedExact || 0) + (totals.voipmonitorMatchedFallback || 0)
-}
-
-function formatVoipmonitorDetail(totals: {
-  voipmonitorMatchedExact?: number
-  voipmonitorMatchedFallback?: number
-  voipmonitorAmbiguous?: number
-  voipmonitorUnmatched?: number
-}) {
-  const exact = totals.voipmonitorMatchedExact || 0
-  const fallback = totals.voipmonitorMatchedFallback || 0
-  const ambiguous = totals.voipmonitorAmbiguous || 0
-  const unmatched = totals.voipmonitorUnmatched || 0
-  if (exact + fallback + ambiguous + unmatched === 0) return 'нет сопоставлений'
-  return `exact ${formatCount(exact)} · fb ${formatCount(fallback)} · amb ${formatCount(ambiguous)} · miss ${formatCount(unmatched)}`
 }
 
 function voipmonitorTone(totals: {
@@ -2470,7 +2466,7 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
 }
 
 function SystemSettingsPage({ user }: { user: User }) {
-  const [tab, setTab] = useState<'system' | 'users' | 'retention' | 'runtime'>('system')
+  const [tab, setTab] = useState<'system' | 'users' | 'retention' | 'runtime' | 'logs'>('system')
   const [info, setInfo] = useState<SystemInfo | null>(null)
   const [users, setUsers] = useState<ManagedUser[]>([])
   const [retention, setRetention] = useState<RetentionPolicy[]>([])
@@ -2611,6 +2607,8 @@ function SystemSettingsPage({ user }: { user: User }) {
         onClick={() => setTab('users')}>Пользователи</button>}
       {canManageUsers(user.role) && <button className={tab === 'runtime' ? 'active' : ''}
         onClick={() => setTab('runtime')}>Параметры</button>}
+      {canManageUsers(user.role) && <button className={tab === 'logs' ? 'active' : ''}
+        onClick={() => setTab('logs')}>Логи</button>}
       {canManageUsers(user.role) && <button className={tab === 'retention' ? 'active' : ''}
         onClick={() => setTab('retention')}>Хранение</button>}
     </nav>
@@ -2704,6 +2702,7 @@ function SystemSettingsPage({ user }: { user: User }) {
           }}
         />
       )}
+      {tab === 'logs' && canManageUsers(user.role) && <SystemAuditLogsPanel />}
       {tab === 'retention' && canManageUsers(user.role) && <section>
         <div className="page-heading"><div><h3>Хранение данных</h3>
           <p>Новый срок применяется сразу ко всем ресурсам выбранного класса.</p></div></div>
@@ -2728,6 +2727,114 @@ function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
       apiCpus: '2', apiMemory: '2G', exportCpus: '2', exportMemory: '2G',
       maintenanceCpus: '2', maintenanceMemory: '2G', appCpus: '4', appMemory: '4G',
     },
+  }
+}
+
+function SystemAuditLogsPanel() {
+  const [query, setQuery] = useState('')
+  const [items, setItems] = useState<AuditLogEntry[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const load = useCallback(async (search: string) => {
+    await Promise.resolve()
+    setLoading(true)
+    setError('')
+    try {
+      const response = await api<{ items: AuditLogEntry[] }>(
+        `/system/audit-logs?limit=300&q=${encodeURIComponent(search.trim())}`,
+      )
+      setItems(response.items || [])
+    } catch (reason) {
+      setItems([])
+      setError(reason instanceof Error ? reason.message : 'Не удалось загрузить логи')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void load('')
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [load])
+  const grouped = AUDIT_CATEGORY_ORDER
+    .map((category) => ({
+      category,
+      label: AUDIT_CATEGORY_LABELS[category] || category,
+      rows: items.filter((item) => item.category === category),
+    }))
+    .filter((group) => group.rows.length > 0)
+  const other = items.filter((item) => !AUDIT_CATEGORY_ORDER.includes(item.category))
+  if (other.length > 0) {
+    grouped.push({ category: 'other', label: AUDIT_CATEGORY_LABELS.other, rows: other })
+  }
+  return <section className="audit-logs-panel">
+    <div className="page-heading"><div><h3>Логи системы</h3>
+      <p>Журнал действий Collector с поиском по действию, ресурсу и пользователю.</p></div>
+      <form className="audit-search" onSubmit={(event) => {
+        event.preventDefault()
+        void load(query)
+      }}>
+        <input placeholder="Поиск по логам…" value={query}
+          onChange={(event) => setQuery(event.target.value)} />
+        <button className="secondary" type="submit" disabled={loading}>Найти</button>
+        <button className="secondary" type="button" disabled={loading}
+          onClick={() => { setQuery(''); void load('') }}>Сброс</button>
+      </form>
+    </div>
+    {error && <div className="form-error">{error}</div>}
+    {loading && <div className="diagnostic-facts"><span>Загрузка журнала…</span></div>}
+    {!loading && items.length === 0 && <div className="table-empty">
+      <strong>Записей не найдено</strong>
+      <p>Измените поисковый запрос или дождитесь новых действий в системе.</p>
+    </div>}
+    {!loading && grouped.map((group) => <article key={group.category} className="audit-group">
+      <h4>{group.label} <small>{formatCount(group.rows.length)}</small></h4>
+      <table className="audit-table"><thead><tr>
+        <th>Время</th><th>Действие</th><th>Ресурс</th><th>Пользователь</th><th>IP</th><th>Детали</th>
+      </tr></thead>
+        <tbody>{group.rows.map((row) => <tr key={row.id}>
+          <td className="mono">{formatTime(row.occurredAt, 'UTC')}</td>
+          <td>{row.action}</td>
+          <td>{row.resourceType}{row.resourceId ? ` · ${row.resourceId}` : ''}</td>
+          <td>{row.actorName || '—'}</td>
+          <td className="mono">{row.remoteIp || '—'}</td>
+          <td className="mono audit-details">{formatAuditDetails(row.details)}</td>
+        </tr>)}</tbody></table>
+    </article>)}
+  </section>
+}
+
+const AUDIT_CATEGORY_ORDER = ['auth', 'users', 'devices', 'exports', 'retention', 'system', 'other']
+const AUDIT_CATEGORY_LABELS: Record<string, string> = {
+  auth: 'Аутентификация',
+  users: 'Пользователи',
+  devices: 'Устройства',
+  exports: 'Экспорт',
+  retention: 'Хранение',
+  system: 'Система',
+  other: 'Прочее',
+}
+
+type AuditLogEntry = {
+  id: number
+  occurredAt: string
+  actorName?: string
+  action: string
+  resourceType: string
+  resourceId?: string
+  remoteIp?: string
+  details?: unknown
+  category: string
+}
+
+function formatAuditDetails(value: unknown) {
+  if (value == null || value === '') return '—'
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    return text.length > 160 ? `${text.slice(0, 157)}…` : text
+  } catch {
+    return '—'
   }
 }
 
@@ -3071,6 +3178,11 @@ function formatBytes(value?: number) {
   if (bytes < 1024) return `${bytes} Б`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
   return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
+}
+
+function formatStorageMB(value?: number) {
+  if (!Number.isFinite(value)) return '—'
+  return formatCount(Math.max(0, Math.round(Number(value) / (1024 * 1024))))
 }
 
 function formatTime(value?: string, timezone = 'UTC') {

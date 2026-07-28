@@ -1,8 +1,13 @@
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import main from './main.tsx?raw'
 import {
   defaultSourceDataset, deviceSurfaces, fallbackTemplates, normalizeTemplate, sourceDatasets, templatesFor,
 } from './equipment'
+
+const styles = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'styles.css'), 'utf8')
 
 describe('equipment templates', () => {
   it('keeps exact Eltex labels in the equipment category', () => {
@@ -63,6 +68,10 @@ describe('equipment templates', () => {
     expect(main).not.toContain('(snapshot?.devices || []).map((row) => <tr')
     // KPI strip: VoIPmonitor between Вызовы and ASR; no source-count tiles.
     expect(main).toContain('label="VoIPmonitor"')
+    expect(main).toContain('label="Неразобранное"')
+    expect(main).toContain('label="Объем данных"')
+    expect(main).toContain('title="Последнее значение АнтиФрода"')
+    expect(main).not.toContain('formatVoipmonitorDetail')
     expect(main).not.toContain('label="Софтсвитчи"')
     expect(main).not.toContain('label="Оборудование"')
     expect(main).toContain('fleet-panel')
@@ -70,6 +79,9 @@ describe('equipment templates', () => {
     expect(main).toContain('title="Последний CDR"')
     expect(main.indexOf('title="Последний CDR"')).toBeLessThan(
       main.lastIndexOf('title="Последний приём Syslog"'),
+    )
+    expect(main.lastIndexOf('title="Последний приём Syslog"')).toBeLessThan(
+      main.indexOf('title="Последнее значение АнтиФрода"'),
     )
     // Dashboard order: services → softswitches → equipment.
     const servicesAt = main.indexOf('<h4>Сервисы</h4>')
@@ -114,5 +126,11 @@ describe('equipment templates', () => {
     expect(main.indexOf('<div className="sidebar-scroll">'))
       .toBeLessThan(main.indexOf('<div className="sidebar-footer">'))
     expect(main).toContain("activeView === 'device' && sourceCategory(selected) === category")
+  })
+
+  it('highlights the active device in the sidebar with green', () => {
+    expect(styles).toContain('.device-button.active')
+    expect(styles).toContain('#d8f5e4')
+    expect(styles).toContain('grid-template-columns: 192px')
   })
 })

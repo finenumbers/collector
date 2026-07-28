@@ -1057,6 +1057,7 @@ function DashboardPage({ devices, onSelectDevice }: {
           <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
           <td className="mono col-flex">
             {formatTime(row.freshness.latestCdrAt, row.activeTimezone || row.timezone || 'UTC')}
+            <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
           </td>
           <td className="mono col-flex">
             {formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')}
@@ -1064,6 +1065,7 @@ function DashboardPage({ devices, onSelectDevice }: {
           </td>
           <td className="mono col-flex">
             {formatTime(row.freshness.latestAntifraudAt, row.activeTimezone || row.timezone || 'UTC')}
+            <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
           </td>
         </tr>)}</tbody></table>
       {equipmentRows.length === 0 && <div className="table-empty">

@@ -3185,7 +3185,7 @@ function devicesPollFingerprint(devices: Device[]) {
     device.replay?.pending ?? 0,
     device.replay?.processing ?? 0,
     device.replay?.complete ?? 0,
-    device.replay?.failed ?? 0,
+    device.replay?.quarantined ?? 0,
   ].join(':')).join('|')
 }
 

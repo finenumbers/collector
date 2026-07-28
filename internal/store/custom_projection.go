@@ -481,7 +481,11 @@ func (s *Store) RequeueFailedOverflowProjectionJobs(ctx context.Context) (int64,
 			lease_expires_at=NULL,worker_id=NULL,completed_at=NULL,updated_at=now()
 		WHERE status='failed'
 		  AND (last_error ILIKE '%exceeds%events%'
-			OR last_error ILIKE '%memory bound%')`)
+			OR last_error ILIKE '%memory bound%'
+			OR last_error ILIKE '%memory limit exceeded%'
+			OR last_error ILIKE '%query was cancelled%'
+			OR last_error ILIKE '%timeout exceeded%'
+			OR last_error ILIKE '%context deadline exceeded%')`)
 	if err != nil {
 		return 0, err
 	}

@@ -356,11 +356,16 @@ func (w *Worker) processBucketWindows(
 				},
 			)
 			if loadErr != nil {
-				return loadErr
+				if !IsClickHouseResourceError(loadErr) {
+					return loadErr
+				}
+				sessionEvents = nil
 			}
-			events = mergeEvents(events, sessionEvents)
-			if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
-				return limitErr
+			if len(sessionEvents) != 0 {
+				events = mergeEvents(events, sessionEvents)
+				if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
+					return limitErr
+				}
 			}
 		}
 		for _, event := range events {
@@ -466,11 +471,18 @@ func (w *Worker) finishBucket(
 			ctx, cfg, job.DeviceID, identities, from, to,
 		)
 		if loadErr != nil {
-			return loadErr
+			if !IsClickHouseResourceError(loadErr) {
+				return loadErr
+			}
+			// Prefer advancing the hour without cross-bucket session expansion over
+			// terminal-failing on ClickHouse memory/cancel; deadlines recompute later.
+			sessionEvents = nil
 		}
-		events = mergeEvents(events, sessionEvents)
-		if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
-			return w.processBucketWindows(ctx, cfg, job, from, to)
+		if len(sessionEvents) != 0 {
+			events = mergeEvents(events, sessionEvents)
+			if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
+				return w.processBucketWindows(ctx, cfg, job, from, to)
+			}
 		}
 	}
 	var watermarkTime time.Time
@@ -613,11 +625,28 @@ func IsMemoryBoundError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "memory bound")
 }
 
+func IsClickHouseResourceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "memory limit exceeded") ||
+		strings.Contains(message, "query was cancelled") ||
+		strings.Contains(message, "timeout exceeded") ||
+		strings.Contains(message, "context deadline exceeded")
+}
+
 func (w *Worker) loadSessionEvents(
 	ctx context.Context, cfg Config, deviceID uuid.UUID, identities []string, from, to time.Time,
 ) ([]customradius.RawEvent, error) {
-	start := from.Add(-cfg.RetryHorizon)
-	end := to.Add(cfg.RetryHorizon)
+	// Engine RetryHorizon may be 7d for assembly deadlines; loading ±7d of syslog
+	// payloads per identity set OOMs ClickHouse on dense SMG. Cap the fetch window.
+	horizon := cfg.RetryHorizon
+	if horizon <= 0 || horizon > 48*time.Hour {
+		horizon = 48 * time.Hour
+	}
+	start := from.Add(-horizon)
+	end := to.Add(horizon)
 	return w.loadEventsSplit(ctx, start, end, time.Hour, func(windowStart, windowEnd time.Time) ([]customradius.RawEvent, error) {
 		return w.Warehouse.LoadCustomRadiusSessionEvents(
 			ctx, deviceID, identities, windowStart, windowEnd, cfg.PairingHorizon, cfg.MaxEvents,

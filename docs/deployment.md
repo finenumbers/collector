@@ -177,10 +177,11 @@ IANA timezone выбирается из выпадающего списка в �
    Либо SQL: `UPDATE custom_projection_jobs SET status='pending', attempts=0,
    next_attempt_at=now(), last_error=NULL WHERE device_id=$1 AND status='failed'`.
 4. Worker при overflow сам режет час на окна 5m (и при необходимости 1m) и
-   собирает snapshot по окнам без склейки всего часа в память; terminal `failed`
-   на пиках также периодически requeue’ится (каждые ~30с), даже если discover
-   держит очередь. После релиза нажмите «Requeue failed» в Диагностике, если
-   `failed>0`, и дождитесь drain.
+   собирает snapshot по окнам без склейки всего часа в память. Session expansion
+   идёт через `event_id IN (session index)` (без hash JOIN syslog справа) и
+   ограничена ±48h. Ошибки ClickHouse `memory limit exceeded` / `Query was cancelled`
+   автоматически requeue’ятся и не блокируют catch-up навсегда. После релиза
+   нажмите «Requeue failed» в Диагностике, если `failed>0`, и дождитесь drain.
 5. Если jobs complete, syslog lag мал, но `afAuthHeaders6h=0` и
    `classificationGap=true` — это не очередь: на SMG нет classifiable AF RADIUS
    (логирование AntiFraud / диалект), поднимать MaxEvents бесполезно.

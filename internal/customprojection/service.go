@@ -301,15 +301,20 @@ func (w *Worker) processBucket(
 	switch {
 	case err == nil && eventsExceedLimits(events, cfg) == nil:
 		return w.finishBucket(ctx, cfg, job, from, to, events)
+	case err == nil:
+		// CH load succeeded but local memory/event bounds failed: window the
+		// already-fetched slice instead of re-scanning syslog from ClickHouse.
+		return w.processBucketWindows(ctx, cfg, job, from, to, events)
 	case err != nil && !IsEventLimitError(err) && !IsClickHouseResourceError(err):
 		return err
 	default:
-		return w.processBucketWindows(ctx, cfg, job, from, to)
+		return w.processBucketWindows(ctx, cfg, job, from, to, nil)
 	}
 }
 
 func (w *Worker) processBucketWindows(
 	ctx context.Context, cfg Config, job Job, from, to time.Time,
+	preloaded []customradius.RawEvent,
 ) error {
 	span := 5 * time.Minute
 	packetsByID := make(map[uuid.UUID]customradius.Packet)
@@ -330,13 +335,21 @@ func (w *Worker) processBucketWindows(
 		if end.After(to) {
 			end = to
 		}
-		events, err := w.loadEventsSplit(ctx, cursor, end, span, func(start, finish time.Time) ([]customradius.RawEvent, error) {
-			return w.Warehouse.LoadCustomRadiusEvents(
-				ctx, job.DeviceID, start.Add(-cfg.PairingHorizon), finish.Add(cfg.PairingHorizon), cfg.MaxEvents,
+		var events []customradius.RawEvent
+		var err error
+		if preloaded != nil {
+			events = filterEventsInRange(
+				preloaded, cursor.Add(-cfg.PairingHorizon), end.Add(cfg.PairingHorizon),
 			)
-		})
-		if err != nil {
-			return err
+		} else {
+			events, err = w.loadEventsSplit(ctx, cursor, end, span, func(start, finish time.Time) ([]customradius.RawEvent, error) {
+				return w.Warehouse.LoadCustomRadiusEvents(
+					ctx, job.DeviceID, start.Add(-cfg.PairingHorizon), finish.Add(cfg.PairingHorizon), cfg.MaxEvents,
+				)
+			})
+			if err != nil {
+				return err
+			}
 		}
 		if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
 			return limitErr
@@ -381,7 +394,7 @@ func (w *Worker) processBucketWindows(
 		for _, event := range events {
 			affected[event.ReceivedAt.UTC().Truncate(time.Hour)] = struct{}{}
 			if event.ReceivedAt.After(watermarkTime) ||
-				(event.ReceivedAt.Equal(watermarkTime) && event.EventID.String() > watermarkID.String()) {
+				(event.ReceivedAt.Equal(watermarkTime) && customradius.LessEventID(watermarkID, event.EventID)) {
 				watermarkTime, watermarkID = event.ReceivedAt, event.EventID
 			}
 		}
@@ -427,7 +440,7 @@ func (w *Worker) processBucketWindows(
 		lastWindow := !end.Before(to)
 		watermarkAdvanced := watermarkTime.After(publishedWatermark) ||
 			(watermarkTime.Equal(publishedWatermark) &&
-				watermarkID.String() > publishedWatermarkID.String())
+				customradius.LessEventID(publishedWatermarkID, watermarkID))
 		if !lastWindow && watermarkAdvanced && (len(packetsByID) > 0 || len(callsByID) > 0) {
 			partial := materializeWindowResult(packetsByID, callsByID, nil)
 			progressJob := job
@@ -529,21 +542,21 @@ func (w *Worker) finishBucket(
 			// terminal-failing on ClickHouse memory/cancel; deadlines recompute later.
 			sessionEvents = nil
 		}
-		if len(sessionEvents) != 0 {
-			events = mergeEvents(events, sessionEvents)
-			if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
-				return w.processBucketWindows(ctx, cfg, job, from, to)
+			if len(sessionEvents) != 0 {
+				events = mergeEvents(events, sessionEvents)
+				if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
+					return w.processBucketWindows(ctx, cfg, job, from, to, events)
+				}
+				result = customradius.BuildAtCutoff(engineConfig, events, cutoff)
 			}
-			result = customradius.BuildAtCutoff(engineConfig, events, cutoff)
 		}
-	}
 	var watermarkTime time.Time
 	var watermarkID uuid.UUID
 	affected := make(map[time.Time]struct{})
 	for _, event := range events {
 		affected[event.ReceivedAt.UTC().Truncate(time.Hour)] = struct{}{}
 		if event.ReceivedAt.After(watermarkTime) ||
-			(event.ReceivedAt.Equal(watermarkTime) && event.EventID.String() > watermarkID.String()) {
+			(event.ReceivedAt.Equal(watermarkTime) && customradius.LessEventID(watermarkID, event.EventID)) {
 			watermarkTime, watermarkID = event.ReceivedAt, event.EventID
 		}
 	}
@@ -626,9 +639,6 @@ func (w *Worker) publishBucketSnapshot(
 		return err
 	}
 	defer releaseHeavy()
-	if err := w.Warehouse.WriteCustomProjectionSnapshot(ctx, snapshot); err != nil {
-		return err
-	}
 	cutoverCtx := ctx
 	releaseAdmission := func() {}
 	if admitter, ok := w.Warehouse.(workloadAdmitter); ok {
@@ -638,6 +648,10 @@ func (w *Worker) publishBucketSnapshot(
 		}
 	}
 	defer releaseAdmission()
+	// One CustomReplay admission covers write batches + activate (nested acquire is a no-op).
+	if err := w.Warehouse.WriteCustomProjectionSnapshot(cutoverCtx, snapshot); err != nil {
+		return err
+	}
 	activate := func(activateCtx context.Context) error {
 		return w.Warehouse.ActivateCustomProjectionSnapshot(activateCtx, snapshot)
 	}
@@ -670,7 +684,7 @@ func resultEventIDs(result customradius.Result) []customradius.RawEvent {
 	}
 	sort.SliceStable(events, func(i, j int) bool {
 		if events[i].ReceivedAt.Equal(events[j].ReceivedAt) {
-			return events[i].EventID.String() < events[j].EventID.String()
+			return customradius.LessEventID(events[i].EventID, events[j].EventID)
 		}
 		return events[i].ReceivedAt.Before(events[j].ReceivedAt)
 	})
@@ -741,6 +755,14 @@ func (w *Worker) loadEventsSplit(
 	span time.Duration,
 	load func(time.Time, time.Time) ([]customradius.RawEvent, error),
 ) ([]customradius.RawEvent, error) {
+	if span <= 0 {
+		span = time.Hour
+	}
+	// Multi-day session expands routinely OOM on the first full-range probe;
+	// chunk by span first when the range is clearly larger than two chunks.
+	if to.Sub(from) > 2*span {
+		return w.loadEventsSplitChunks(ctx, from, to, span, load)
+	}
 	events, err := load(from, to)
 	if err == nil || !IsEventLimitError(err) {
 		return events, err
@@ -756,22 +778,45 @@ func (w *Worker) loadEventsSplit(
 	default:
 		return nil, err
 	}
+	return w.loadEventsSplitChunks(ctx, from, to, nextSpan, load)
+}
+
+func (w *Worker) loadEventsSplitChunks(
+	ctx context.Context,
+	from, to time.Time,
+	span time.Duration,
+	load func(time.Time, time.Time) ([]customradius.RawEvent, error),
+) ([]customradius.RawEvent, error) {
 	merged := make([]customradius.RawEvent, 0)
-	for cursor := from; cursor.Before(to); cursor = cursor.Add(nextSpan) {
+	for cursor := from; cursor.Before(to); cursor = cursor.Add(span) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		end := cursor.Add(nextSpan)
+		end := cursor.Add(span)
 		if end.After(to) {
 			end = to
 		}
-		part, partErr := w.loadEventsSplit(ctx, cursor, end, nextSpan, load)
+		part, partErr := w.loadEventsSplit(ctx, cursor, end, span, load)
 		if partErr != nil {
 			return nil, partErr
 		}
 		merged = mergeEvents(merged, part)
 	}
 	return merged, nil
+}
+
+func filterEventsInRange(events []customradius.RawEvent, from, to time.Time) []customradius.RawEvent {
+	if len(events) == 0 || !from.Before(to) {
+		return nil
+	}
+	filtered := make([]customradius.RawEvent, 0, len(events))
+	for _, event := range events {
+		if event.ReceivedAt.Before(from) || !event.ReceivedAt.Before(to) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
 }
 
 func latestEventTime(events []customradius.RawEvent) time.Time {
@@ -815,7 +860,7 @@ func mergeEvents(groups ...[]customradius.RawEvent) []customradius.RawEvent {
 	}
 	sort.SliceStable(result, func(i, j int) bool {
 		if result[i].ReceivedAt.Equal(result[j].ReceivedAt) {
-			return result[i].EventID.String() < result[j].EventID.String()
+			return customradius.LessEventID(result[i].EventID, result[j].EventID)
 		}
 		return result[i].ReceivedAt.Before(result[j].ReceivedAt)
 	})

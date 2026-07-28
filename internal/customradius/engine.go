@@ -1,6 +1,7 @@
 package customradius
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"fmt"
 	"sort"
@@ -10,6 +11,12 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// LessEventID compares canonical UUID string order without allocating.
+// For standard UUID layout this matches id.String() lexicographic order.
+func LessEventID(left, right uuid.UUID) bool {
+	return bytes.Compare(left[:], right[:]) < 0
+}
 
 var stableNamespace = uuid.MustParse("9d07d95f-2abc-5ff4-9ee7-c865d190e93d")
 
@@ -50,7 +57,7 @@ func (engine *Engine) ProcessAtCutoff(events []RawEvent, cutoff time.Time) Resul
 	ordered := append([]RawEvent(nil), events...)
 	sort.SliceStable(ordered, func(left, right int) bool {
 		if ordered[left].ReceivedAt.Equal(ordered[right].ReceivedAt) {
-			return eventIDString(ordered[left].EventID) < eventIDString(ordered[right].EventID)
+			return LessEventID(ordered[left].EventID, ordered[right].EventID)
 		}
 		return ordered[left].ReceivedAt.Before(ordered[right].ReceivedAt)
 	})

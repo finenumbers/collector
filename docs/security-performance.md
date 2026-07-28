@@ -20,7 +20,8 @@ Lock order is:
 
 Code must never wait for admission while holding a device lock. Custom
 projection acquires its cutover lease before `LockDeviceWrites`; tests enforce
-this ordering.
+this ordering. Syslog discover cursors use `custom_reconcile` (non-heavy);
+hour snapshot write+activate share one `custom_replay` admission lease.
 
 ## Roles
 

@@ -346,6 +346,46 @@ func TestOverflowSplitsHourLoad(t *testing.T) {
 	}
 }
 
+func TestLocalMemoryOverflowReusesLoadedHour(t *testing.T) {
+	deviceID := uuid.New()
+	bucket := time.Date(2026, 7, 27, 5, 0, 0, 0, time.UTC)
+	payload := string(make([]byte, 2048))
+	hourEvents := make([]customradius.RawEvent, 0, 30)
+	for index := 0; index < 30; index++ {
+		at := bucket.Add(time.Duration(index) * 2 * time.Minute)
+		hourEvents = append(hourEvents, projectionRaw(
+			deviceID, uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("mem-%d", index))),
+			at, "[C1] Access-Request [9] Acct-Session-Id=s"+fmt.Sprint(index)+" "+payload,
+		))
+	}
+	queue := &projectionQueueMock{policy: Policy{DeviceID: deviceID, Enabled: true, Revision: 1}}
+	warehouse := &projectionWarehouseMock{
+		loadFn: func(from, to time.Time, limit int) ([]customradius.RawEvent, error) {
+			if to.Sub(from) < 50*time.Minute {
+				t.Fatalf("unexpected windowed CH reload after successful hour load: %s..%s", from, to)
+			}
+			return hourEvents, nil
+		},
+	}
+	worker := &Worker{
+		Queue: queue, Warehouse: warehouse,
+		// Hour payload ~60KiB; each pairing-expanded 5m window stays under 32KiB.
+		Config: Config{MaxEvents: 10_000, MaxMemoryBytes: 32 << 10},
+	}
+	if err := worker.process(context.Background(), worker.Config.normalized(), Job{
+		ID: uuid.New(), DeviceID: deviceID, PolicyRevision: 1, ProjectionSeq: 1,
+		Kind: JobBucket, BucketStart: bucket, WorkerID: "mem-worker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if warehouse.loadCalls != 1 {
+		t.Fatalf("local memory overflow should reuse loaded hour: loadCalls=%d", warehouse.loadCalls)
+	}
+	if queue.completed != 1 {
+		t.Fatalf("expected finalize after in-memory windows: completed=%d", queue.completed)
+	}
+}
+
 func TestDenseHourProgressiveActivatesDuringWindowedRebuild(t *testing.T) {
 	deviceID := uuid.New()
 	bucket := time.Date(2026, 7, 27, 4, 0, 0, 0, time.UTC)

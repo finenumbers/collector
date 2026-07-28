@@ -22,7 +22,9 @@ import (
 func (c *Client) DiscoverSyslogBuckets(
 	ctx context.Context, deviceID uuid.UUID, cursorTime time.Time, cursorID uuid.UUID, limit int,
 ) (customprojection.Discovery, error) {
-	ctx, release, err := c.queryContext(ctx, workload.CustomReplay)
+	// Discover is a tiny key-order cursor scan; keep it off the heavy lane so
+	// dense hour loads / exports do not serialize cheap backfill progress.
+	ctx, release, err := c.queryContext(ctx, workload.CustomReconcile)
 	if err != nil {
 		return customprojection.Discovery{}, err
 	}
@@ -92,19 +94,10 @@ func (c *Client) LoadCustomRadiusEvents(
 	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,toString(source_ip),
 		source_port,transport,payload FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?
-		  AND (
-			positionCaseInsensitiveUTF8(payload,'RADIUS')>0
-			OR positionCaseInsensitiveUTF8(payload,'Antifraud')>0
-			OR positionCaseInsensitiveUTF8(payload,'Access-')>0
-			OR positionCaseInsensitiveUTF8(payload,'Accounting-')>0
-			OR positionCaseInsensitiveUTF8(payload,'Accs-')>0
-			OR positionCaseInsensitiveUTF8(payload,'Proc Reply')>0
-			OR positionCaseInsensitiveUTF8(payload,'Acct-Session-Id')>0
-			OR positionCaseInsensitiveUTF8(payload,'Eltex-AVPair')>0
-			OR positionCaseInsensitiveUTF8(payload,'Cisco-AVPair')>0
-			OR positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0
-			OR positionCaseInsensitiveUTF8(payload,'h323-conf-id')>0
-		  )
+		  AND multiSearchAnyCaseInsensitiveUTF8(payload, [
+			'RADIUS','Antifraud','Access-','Accounting-','Accs-','Proc Reply',
+			'Acct-Session-Id','Eltex-AVPair','Cisco-AVPair','xpgk-request-type','h323-conf-id'
+		  ]) > 0
 		ORDER BY received_at,event_id LIMIT ?`, deviceID, from, to, limit+1)
 	if err != nil {
 		return nil, err
@@ -173,7 +166,7 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 	}
 	sort.SliceStable(events, func(i, j int) bool {
 		if events[i].ReceivedAt.Equal(events[j].ReceivedAt) {
-			return events[i].EventID.String() < events[j].EventID.String()
+			return customradius.LessEventID(events[i].EventID, events[j].EventID)
 		}
 		return events[i].ReceivedAt.Before(events[j].ReceivedAt)
 	})
@@ -297,7 +290,7 @@ func mergeAnalyticsEvents(
 	}
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].ReceivedAt.Equal(events[j].ReceivedAt) {
-			return events[i].EventID.String() < events[j].EventID.String()
+			return customradius.LessEventID(events[i].EventID, events[j].EventID)
 		}
 		return events[i].ReceivedAt.Before(events[j].ReceivedAt)
 	})

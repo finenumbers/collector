@@ -51,7 +51,9 @@ job per SMG), deployment-wide ClickHouse heavy-lane lock for snapshot
 write/cutover, and watermarks. Claim prefers devices with the oldest watermark
 and, per device, `open UTC-hour bucket → discover → older backlog buckets`
 so live tip stays fresh without starving lookback discovery behind every
-historical hour. Hour buckets that exceed runtime `projection.maxEvents`
+historical hour. Discover scans use the non-heavy `custom_reconcile`
+admission class so tiny cursor pages are not serialized behind hour payload
+loads or exports. Hour buckets that exceed runtime `projection.maxEvents`
 (Настройки → Параметры; env `CUSTOM_PROJECTION_MAX_EVENTS` only seeds an empty
 DB) are loaded via 15m→5m split windows in-process so a dense SMG cannot
 terminal-fail the hour. During that windowed rebuild the worker

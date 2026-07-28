@@ -972,8 +972,8 @@ function DashboardPage({ devices, onSelectDevice }: {
         value={formatCount(voipmonitorMatched(softswitchTotals))}
         tone={voipmonitorTone(softswitchTotals)} />
       <DashboardKPI label="Неразобранное"
-        value={formatCount(softswitchTotals.voipmonitorUnmatched)}
-        tone={(softswitchTotals.voipmonitorUnmatched || 0) > 0 ? 'warn' : 'good'} />
+        value={formatCount(softswitchUnresolved(softswitchTotals))}
+        tone={softswitchUnresolved(softswitchTotals) > 0 ? 'warn' : 'good'} />
       <DashboardKPI label="ASR" value={formatPercent(softswitchTotals.calls, softswitchTotals.failed)}
         detail="для типизированных CDR" />
       <DashboardKPI label="Средний разговор"
@@ -1155,6 +1155,15 @@ function voipmonitorMatched(totals: {
   voipmonitorMatchedFallback?: number
 }) {
   return (totals.voipmonitorMatchedExact || 0) + (totals.voipmonitorMatchedFallback || 0)
+}
+
+/** Softswitch-only: calls not matched by VoIPmonitor within the softswitch totals. */
+function softswitchUnresolved(totals: {
+  calls?: number
+  voipmonitorMatchedExact?: number
+  voipmonitorMatchedFallback?: number
+}) {
+  return Math.max(0, (totals.calls || 0) - voipmonitorMatched(totals))
 }
 
 function voipmonitorTone(totals: {
@@ -3182,7 +3191,7 @@ function formatBytes(value?: number) {
 
 function formatStorageMB(value?: number) {
   if (!Number.isFinite(value)) return '—'
-  return formatCount(Math.max(0, Math.round(Number(value) / (1024 * 1024))))
+  return `${formatCount(Math.max(0, Math.round(Number(value) / (1024 * 1024))))} Mb`
 }
 
 function formatTime(value?: string, timezone = 'UTC') {

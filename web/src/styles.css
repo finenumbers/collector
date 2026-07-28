@@ -135,12 +135,24 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .page-heading h3 { margin: 0 0 4px; font-size: 17px; }
 .page-heading p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.dashboard-kpis { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 8px; }
+.dashboard-kpis {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: stretch;
+}
 .dashboard-category-heading { display: flex; align-items: baseline; gap: 9px; margin: 16px 0 7px; }
 .dashboard-category-heading:first-of-type { margin-top: 0; }
 .dashboard-category-heading h4 { margin: 0; font-size: 13px; }
 .dashboard-category-heading span { color: var(--muted); font-size: 10px; }
-.dashboard-kpi { min-height: 86px; padding: 12px; border: 1px solid var(--line); background: var(--panel); }
+.dashboard-kpi {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 86px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
 .dashboard-kpi small, .dashboard-kpi strong, .dashboard-kpi span { display: block; }
 .dashboard-kpi small { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
 .dashboard-kpi strong { margin-top: 8px; font-size: 22px; }
@@ -452,7 +464,6 @@ a.button-link:hover { background: #eef2f7; }
   .export-panel { width: min(620px, calc(100vw - 220px)); }
   .export-create { grid-template-columns: 1fr 125px 125px; }
   .export-create > button { grid-column: 3; }
-  .dashboard-kpis { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
   .retention-row { grid-template-columns: 1fr 120px; }
   .user-admin-row { display: flex; flex-wrap: wrap; }
   .user-admin-row > span:first-child, .user-admin-row .row-error { flex: 1 0 100%; }
@@ -471,7 +482,6 @@ a.button-link:hover { background: #eef2f7; }
   .search { width: min(100%, 240px); }
   .settings-page { flex-direction: column; }
   .settings-tabs { width: 100%; flex-direction: row; }
-  .dashboard-kpis { grid-template-columns: 1fr; }
   .drawer { width: 100vw; border-left: 0; }
   .call-facts { grid-template-columns: 1fr; }
 }

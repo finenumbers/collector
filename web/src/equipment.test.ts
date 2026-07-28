@@ -69,7 +69,10 @@ describe('equipment templates', () => {
     // KPI strip: VoIPmonitor between Вызовы and ASR; no source-count tiles.
     expect(main).toContain('label="VoIPmonitor"')
     expect(main).toContain('label="Неразобранное"')
+    expect(main).toContain('softswitchUnresolved')
     expect(main).toContain('label="Объем данных"')
+    expect(main).toContain('formatStorageMB')
+    expect(styles).toContain('flex-wrap: nowrap')
     expect(main).toContain('title="Последнее значение АнтиФрода"')
     expect(main).not.toContain('formatVoipmonitorDetail')
     expect(main).not.toContain('label="Софтсвитчи"')

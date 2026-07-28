@@ -52,18 +52,19 @@ func (c Config) normalized() Config {
 }
 
 type CDR struct {
-	ID               uuid.UUID
-	DeviceID         uuid.UUID
-	EventTime        time.Time
-	IngestedAt       time.Time
-	AcctSessionID    string
-	H323FieldValues  []string
-	Calling          string
-	Called           string
-	OutgoingCalling  string
-	OutgoingCalled   string
-	Enabled          bool
-	PolicyRevision   uint64
+	ID              uuid.UUID
+	DeviceID        uuid.UUID
+	EventTime       time.Time
+	IngestedAt      time.Time
+	AcctSessionID   string
+	UniqueTag       string
+	H323FieldValues []string
+	Calling         string
+	Called          string
+	OutgoingCalling string
+	OutgoingCalled  string
+	Enabled         bool
+	PolicyRevision  uint64
 }
 
 type Call struct {
@@ -165,10 +166,20 @@ func Reconcile(config Config, now time.Time, cdrs []CDR, calls []Call) Result {
 				Delta: call.EventTime.Sub(cdr.EventTime), Version: Version,
 				MatchedEvidence: map[string]string{},
 			}
-			if method == "acct_session_id" {
+			switch method {
+			case "acct_session_id":
 				assignment.MatchedEvidence["acct_session_id"] = normalize(cdr.AcctSessionID)
-			} else {
+			case "unique_tag_as_session":
+				assignment.MatchedEvidence["unique_tag"] = normalize(cdr.UniqueTag)
+				assignment.MatchedEvidence["acct_session_id"] = normalize(call.AcctSessionID)
+			case "cdr_session_as_h323":
+				assignment.MatchedEvidence["cdr_session"] = normalize(cdr.AcctSessionID)
 				assignment.MatchedEvidence["h323_conf_id"] = normalize(call.H323ConfID)
+			default:
+				assignment.MatchedEvidence["h323_conf_id"] = normalize(call.H323ConfID)
+				if tag := normalize(cdr.UniqueTag); tag != "" {
+					assignment.MatchedEvidence["unique_tag"] = tag
+				}
 			}
 			if numberMatch(call.Calling, cdr.Calling, cdr.OutgoingCalling) {
 				assignment.MatchedEvidence["calling"] = "validated"
@@ -223,39 +234,121 @@ func scheduleCoverageDeadline(result *Result, coverage Coverage, now time.Time) 
 }
 
 func candidatesFor(cdr CDR, calls []Call) ([]Call, string) {
-	session := normalize(cdr.AcctSessionID)
-	if session != "" {
-		var matches []Call
-		for _, call := range calls {
-			if call.DeviceID != cdr.DeviceID ||
-				cdr.PolicyRevision == 0 || call.PolicyRevision != cdr.PolicyRevision {
-				continue
-			}
-			if callHasSession(call, session) {
-				matches = append(matches, call)
-			}
-		}
-		return matches, "acct_session_id"
-	}
-	values := make(map[string]struct{})
-	for _, value := range cdr.H323FieldValues {
-		if normalized := normalize(value); normalized != "" {
-			values[normalized] = struct{}{}
-		}
-	}
-	if len(values) == 0 {
+	keys := identityKeys(cdr)
+	if len(keys) == 0 {
 		return nil, "none"
 	}
-	var matches []Call
-	for _, call := range calls {
-		_, present := values[normalize(call.H323ConfID)]
-		if call.DeviceID == cdr.DeviceID &&
-			cdr.PolicyRevision != 0 && call.PolicyRevision == cdr.PolicyRevision &&
-			call.H323ConfID != "" && present {
-			matches = append(matches, call)
+	if matches, method := matchCallsBySession(cdr, calls, keys); len(matches) > 0 {
+		return matches, method
+	}
+	if matches, method := matchCallsByH323(cdr, calls, keys); len(matches) > 0 {
+		return matches, method
+	}
+	return nil, "none"
+}
+
+type identityKey struct {
+	Value  string
+	Source string
+}
+
+func identityKeys(cdr CDR) []identityKey {
+	seen := make(map[string]struct{})
+	out := make([]identityKey, 0, 4)
+	add := func(value, source string) {
+		normalized := normalize(value)
+		if normalized == "" {
+			return
+		}
+		if _, ok := seen[normalized]; ok {
+			return
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, identityKey{Value: normalized, Source: source})
+	}
+	add(cdr.AcctSessionID, "acct_session_id")
+	add(cdr.UniqueTag, "unique_tag")
+	for _, value := range cdr.H323FieldValues {
+		add(value, "h323_field")
+	}
+	return out
+}
+
+func matchCallsBySession(cdr CDR, calls []Call, keys []identityKey) ([]Call, string) {
+	byID := make(map[uuid.UUID]Call)
+	methodByID := make(map[uuid.UUID]string)
+	for _, key := range keys {
+		for _, call := range calls {
+			if !sameDevicePolicy(cdr, call) || !callHasSession(call, key.Value) {
+				continue
+			}
+			if _, ok := byID[call.ID]; ok {
+				continue
+			}
+			byID[call.ID] = call
+			methodByID[call.ID] = sessionMatchMethod(key.Source)
 		}
 	}
-	return matches, "h323_conf_id"
+	return collectMatches(byID, methodByID)
+}
+
+func matchCallsByH323(cdr CDR, calls []Call, keys []identityKey) ([]Call, string) {
+	keySet := make(map[string]string, len(keys))
+	for _, key := range keys {
+		keySet[key.Value] = key.Source
+	}
+	byID := make(map[uuid.UUID]Call)
+	methodByID := make(map[uuid.UUID]string)
+	for _, call := range calls {
+		if !sameDevicePolicy(cdr, call) {
+			continue
+		}
+		conf := normalize(call.H323ConfID)
+		if conf == "" {
+			continue
+		}
+		source, present := keySet[conf]
+		if !present {
+			continue
+		}
+		byID[call.ID] = call
+		if source == "acct_session_id" {
+			methodByID[call.ID] = "cdr_session_as_h323"
+		} else {
+			methodByID[call.ID] = "h323_conf_id"
+		}
+	}
+	return collectMatches(byID, methodByID)
+}
+
+func sessionMatchMethod(source string) string {
+	if source == "unique_tag" {
+		return "unique_tag_as_session"
+	}
+	return "acct_session_id"
+}
+
+func sameDevicePolicy(cdr CDR, call Call) bool {
+	return call.DeviceID == cdr.DeviceID &&
+		cdr.PolicyRevision != 0 && call.PolicyRevision == cdr.PolicyRevision
+}
+
+func collectMatches(byID map[uuid.UUID]Call, methodByID map[uuid.UUID]string) ([]Call, string) {
+	if len(byID) == 0 {
+		return nil, ""
+	}
+	out := make([]Call, 0, len(byID))
+	method := ""
+	for id, call := range byID {
+		out = append(out, call)
+		if method == "" {
+			method = methodByID[id]
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	return out, method
 }
 
 func callHasSession(call Call, session string) bool {

@@ -78,7 +78,7 @@ func (c *Client) LoadReconciliationEvidence(
 	from, to := bucket.Start.Add(-horizon), bucket.Start.Add(time.Hour+horizon)
 	cdrRows, err := c.Conn.Query(ctx, `SELECT record_id,device_id,
 		coalesce(setup_time,connect_time,disconnect_time,ingested_at),ingested_at,
-		radius_session_id_normalized,raw_fields,
+		radius_session_id_normalized,unique_tag,raw_fields,
 		incoming_cgpn,incoming_cdpn,outgoing_cgpn,outgoing_cdpn
 		FROM collector.cdr_records
 		WHERE device_id=? AND coalesce(setup_time,connect_time,disconnect_time,ingested_at)>=?
@@ -99,7 +99,7 @@ func (c *Client) LoadReconciliationEvidence(
 		var raw map[string]string
 		if err := cdrRows.Scan(
 			&item.ID, &item.DeviceID, &item.EventTime, &item.IngestedAt,
-			&item.AcctSessionID, &raw, &item.Calling, &item.Called,
+			&item.AcctSessionID, &item.UniqueTag, &raw, &item.Calling, &item.Called,
 			&item.OutgoingCalling, &item.OutgoingCalled,
 		); err != nil {
 			cdrRows.Close()

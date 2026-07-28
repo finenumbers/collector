@@ -83,15 +83,31 @@ device_id + normalize(Acct-Session-Id) # иначе
 ```
 
 Нормализация удаляет **все** whitespace и приводит регистр (одинаково в CDR,
-Custom AF keys и reconciliation). Matching сначала проверяет exact normalized
-`Acct-Session-Id` CDR ↔ любая нога logical call (`acct_session_ids`). Если exact ID
-недоступен, допускается unique H323 значение из реального поля CDR
-(`h323-conf-id` / эквивалент) ↔ logical call h323.
+Custom AF keys и reconciliation).
+
+CDR identity keys (в порядке приоритета источника):
+
+1. `normalize(RADIUS Accounting-Session-Id)` → `radius_session_id_normalized`
+2. `normalize(UniqueTag identifier)` — Eltex-эквивалент, если отличается / session пуст
+3. raw_fields с именем `*h323*conf*` (редко; в стандартном Eltex CSV колонки нет)
+
+Matching (строго, без выбора по номерам/времени):
+
+1. **Session pass:** любой CDR key ↔ AF `acct_session_id` / любая нога `acct_session_ids`
+   (methods: `acct_session_id`, `unique_tag_as_session`).
+2. **H323 pass** только если session pass дал 0 кандидатов: тот же набор keys ↔
+   AF `h323_conf_id` (methods: `cdr_session_as_h323`, `h323_conf_id`).
+   Так закрывается случай SMG 3.23.2, когда в CDR лежит conf-id-форма, а ноги AF
+   другие: раздел АнтиФрод уже полный, а карточка Вызовы/CDR раньше не находила связь.
 
 Номера A/B и время — **вторичная проверка** уже найденного primary-кандидата:
 при расхождении assign запрещён (`number_mismatch` / `time_mismatch`). Номера и
 время никогда не выбирают кандидата сами. Разные session **без** общего h323
 никогда не склеиваются в один Call.
+
+UI: на карточке из **Вызовы и CDR** лейблы coverage CDR-центричные
+(«AntiFraud не найден» вместо «CDR опаздывает»); вход из АнтиФрод остаётся
+AF-центричным.
 
 Покрытие со стороны AF-call: `awaiting_cdr` → `expected` → `late` → `missing`,
 либо `matched` / `ambiguous`. Неполная RADIUS-цепочка помечается
@@ -113,7 +129,7 @@ disable пишет `not_applicable` coverage и оставляет raw Syslog н
 | State | Meaning |
 | --- | --- |
 | `expected` | CDR принят для устройства с включённым AntiFraud, связь ещё не подтверждена |
-| `matched` | Unique exact link (Acct-Session-Id или unique H323) |
+| `matched` | Unique exact link (session leg, UniqueTag, или CDR key ↔ AF h323) |
 | `late` | Связь ещё не найдена после ожидаемого окна / lag |
 | `missing` | После grace окно закрыто без unique match |
 | `ambiguous` | Несколько exact-кандидатов; выбор запрещён |

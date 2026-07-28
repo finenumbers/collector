@@ -1784,13 +1784,22 @@ function CallDrawer({ device, call, onClose }: { device: Device; call: CallRow; 
   return <SharedCallCard device={device} recordID={call.recordId} fallbackCDR={call} onClose={onClose} />
 }
 
-function CoverageBadge({ coverage }: { coverage: CoverageSummary }) {
+function CoverageBadge({ coverage, perspective = 'antifraud' }: {
+  coverage: CoverageSummary
+  perspective?: 'antifraud' | 'cdr'
+}) {
   const state = coverage.ambiguous ? 'ambiguous' : coverage.state
-  const labels: Record<string, string> = {
+  const antifraudLabels: Record<string, string> = {
     matched: 'Связан', awaiting_cdr: 'Ожидает CDR', expected: 'Ожидается CDR',
     late: 'CDR опаздывает', missing: 'CDR отсутствует',
     ambiguous: 'Неоднозначно', not_applicable: 'Не применяется', unmatched: 'CDR не найден',
   }
+  const cdrLabels: Record<string, string> = {
+    matched: 'Связан', awaiting_cdr: 'Ожидается AntiFraud', expected: 'Ожидается AntiFraud',
+    late: 'AntiFraud не найден', missing: 'AntiFraud отсутствует',
+    ambiguous: 'Неоднозначно', not_applicable: 'Не применяется', unmatched: 'AntiFraud не найден',
+  }
+  const labels = perspective === 'cdr' ? cdrLabels : antifraudLabels
   return <span className={`parse-status ${state}`} title={coverage.reason || coverage.ambiguityReason}>
     {labels[state] || state}
   </span>
@@ -1888,7 +1897,9 @@ function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
         </strong></span>
       </div></>}
       {coverage && <div className="call-facts">
-        <span><small>Покрытие AntiFraud</small><strong><CoverageBadge coverage={coverage} /></strong></span>
+        <span><small>Покрытие AntiFraud</small><strong>
+          <CoverageBadge coverage={coverage} perspective={recordID ? 'cdr' : 'antifraud'} />
+        </strong></span>
       </div>}
       {antifraud ? <AntiFraudCallBody value={antifraud} cdr={cdr} /> :
         coverage?.state !== 'not_applicable' &&

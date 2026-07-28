@@ -38,9 +38,17 @@ func TestRegistryListIsCopyAndFiltersCategory(t *testing.T) {
 	if resolved.DisplayName == "changed" {
 		t.Fatal("List exposed mutable registry state")
 	}
-	if got := ListCategory(CategorySoftswitch); len(got) != 1 ||
-		got[0].Key != TemplateSatelRTUCDRV1 {
-		t.Fatalf("unexpected softswitch templates: %#v", got)
+	softswitch := 0
+	for _, template := range List() {
+		if template.Category == CategorySoftswitch {
+			softswitch++
+			if template.Key != TemplateSatelRTUCDRV1 {
+				t.Fatalf("unexpected softswitch template: %#v", template)
+			}
+		}
+	}
+	if softswitch != 1 {
+		t.Fatalf("got %d softswitch templates", softswitch)
 	}
 	if _, err := Resolve("missing"); err != ErrUnknownTemplate {
 		t.Fatalf("unexpected missing-template error: %v", err)

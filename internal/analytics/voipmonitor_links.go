@@ -2,8 +2,6 @@ package analytics
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"time"
 
 	"collector/internal/voipmonitor"
@@ -258,37 +256,6 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		out = append(out, item)
 	}
 	return out, rows.Err()
-}
-
-func (c *Client) LookupVoipmonitorLink(
-	ctx context.Context, deviceID uuid.UUID, sourceSystem string, recordID uuid.UUID,
-) (VoipmonitorLink, bool, error) {
-	ctx, release, err := c.queryContext(ctx, workload.Interactive)
-	if err != nil {
-		return VoipmonitorLink{}, false, err
-	}
-	defer release()
-	var link VoipmonitorLink
-	err = c.Conn.QueryRow(ctx, `SELECT device_id,source_system,source_record_id,source_cdr_id,
-		source_call_id,source_protocol_conf_id,source_call_id_out_proto,policy_revision,projection_seq,
-		voipmonitor_cdr_id,voipmonitor_call_id,voipmonitor_card_url,match_method,match_score,
-		match_status,match_evidence_json,matched_at
-		FROM collector.cdr_voipmonitor_links_current
-		WHERE device_id=? AND source_system=? AND source_record_id=?
-		LIMIT 1`, deviceID, sourceSystem, recordID).Scan(
-		&link.DeviceID, &link.SourceSystem, &link.SourceRecordID, &link.SourceCDRID,
-		&link.SourceCallID, &link.SourceProtocolConfID, &link.SourceCallIDOutProto,
-		&link.PolicyRevision, &link.ProjectionSeq, &link.VoipmonitorCDRID, &link.VoipmonitorCallID,
-		&link.VoipmonitorCardURL, &link.MatchMethod, &link.MatchScore, &link.MatchStatus,
-		&link.MatchEvidenceJSON, &link.MatchedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return VoipmonitorLink{}, false, nil
-	}
-	if err != nil {
-		return VoipmonitorLink{}, false, err
-	}
-	return link, true, nil
 }
 
 func firstNonEmpty(values ...string) string {

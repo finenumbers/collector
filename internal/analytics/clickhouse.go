@@ -424,11 +424,6 @@ func (c *Client) ReinterpretCDRTimes(
 		timezone, timezone, timezone, timezone, timezone, deviceID, timezone)
 }
 
-func (c *Client) ListCalls(ctx context.Context, deviceID uuid.UUID, search string, limit uint64) ([]CallRow, error) {
-	page, err := c.ListCallsPage(ctx, deviceID, search, limit, nil)
-	return page.Items, err
-}
-
 func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor) (CallPage, error) {
 	return c.ListCallsPageRange(ctx, deviceID, search, limit, cursor, nil)
 }

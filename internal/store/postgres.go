@@ -615,15 +615,6 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 	return result, rows.Err()
 }
 
-func (s *Store) DeviceBySourceIP(ctx context.Context, sourceIP string) (uuid.UUID, error) {
-	var id uuid.UUID
-	err := s.DB.QueryRow(ctx, `SELECT id FROM devices WHERE syslog_source_ip=$1 AND enabled`, sourceIP).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, ErrNotFound
-	}
-	return id, err
-}
-
 func (s *Store) DeviceIdentityBySourceIP(
 	ctx context.Context, sourceIP string,
 ) (uuid.UUID, string, int64, error) {
@@ -686,15 +677,6 @@ func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	return device, nil
 }
 
-func (s *Store) DeviceTimezone(ctx context.Context, id uuid.UUID) (string, error) {
-	var timezone string
-	err := s.DB.QueryRow(ctx, `SELECT timezone FROM devices WHERE id=$1`, id).Scan(&timezone)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return timezone, err
-}
-
 func (s *Store) DeviceTimeConfig(ctx context.Context, id uuid.UUID) (DeviceTimeConfig, error) {
 	var config DeviceTimeConfig
 	var purgeState string
@@ -710,19 +692,6 @@ func (s *Store) DeviceTimeConfig(ctx context.Context, id uuid.UUID) (DeviceTimeC
 		return DeviceTimeConfig{}, ErrDeviceDeleting
 	}
 	return config, err
-}
-
-func (s *Store) ActivateDeviceTimezoneRevision(ctx context.Context, id uuid.UUID, revision int64) error {
-	commandTag, err := s.DB.Exec(ctx, `UPDATE devices
-		SET active_timezone=timezone,active_timezone_revision=timezone_revision
-		WHERE id=$1 AND timezone_revision=$2`, id, revision)
-	if err != nil {
-		return err
-	}
-	if commandTag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 // IngestFileClaim is the durable ledger row for one CDR content hash.
@@ -929,14 +898,6 @@ func (s *Store) DeviceIngestReplayProgress(
 		&progress.Pending, &progress.Processing, &progress.Complete, &progress.Quarantined,
 	)
 	return progress, err
-}
-
-func (s *Store) DeviceIngestFileMetrics(ctx context.Context, deviceID uuid.UUID) (IngestFileMetrics, error) {
-	var metrics IngestFileMetrics
-	err := s.DB.QueryRow(ctx, `SELECT count(*),COALESCE(sum(size_bytes),0),max(received_at)
-		FROM ingest_files WHERE device_id=$1 AND status IN ('archived','processed','quarantined')`,
-		deviceID).Scan(&metrics.Files, &metrics.Bytes, &metrics.LatestAt)
-	return metrics, err
 }
 
 func (s *Store) AuditIngestFileDownload(

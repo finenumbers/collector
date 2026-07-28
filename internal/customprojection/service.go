@@ -322,10 +322,7 @@ func (w *Worker) processBucketWindows(
 	affected := make(map[time.Time]struct{})
 	var watermarkTime time.Time
 	var watermarkID uuid.UUID
-	var publishedWatermark time.Time
-	var publishedWatermarkID uuid.UUID
 	var nextDeadline *time.Time
-	progressCount := 0
 	cutoff := job.CutoffAt.UTC()
 	for cursor := from; cursor.Before(to); cursor = cursor.Add(span) {
 		if ctx.Err() != nil {
@@ -435,41 +432,11 @@ func (w *Worker) processBucketWindows(
 			}
 			callsByID[call.ID] = call
 		}
-		// Progressive activate after each advancing window except the last; the
-		// final window uses publishBucket so the job completes / lease releases.
-		lastWindow := !end.Before(to)
-		watermarkAdvanced := watermarkTime.After(publishedWatermark) ||
-			(watermarkTime.Equal(publishedWatermark) &&
-				customradius.LessEventID(publishedWatermarkID, watermarkID))
-		if !lastWindow && watermarkAdvanced && (len(packetsByID) > 0 || len(callsByID) > 0) {
-			partial := materializeWindowResult(packetsByID, callsByID, nil)
-			progressJob := job
-			if progressCount > 0 {
-				seq, seqErr := w.Queue.NextCustomProjectionSeq(ctx)
-				if seqErr != nil {
-					return seqErr
-				}
-				progressJob.ProjectionSeq = seq
-			}
-			if err := w.publishBucketProgress(
-				ctx, cfg, progressJob, from, partial, watermarkTime, watermarkID, affected,
-			); err != nil {
-				return err
-			}
-			progressCount++
-			publishedWatermark, publishedWatermarkID = watermarkTime, watermarkID
-		}
+		// Dense hours accumulate 5m windows in-process and activate once at
+		// finalize so the previous complete tip stays visible during rebuild.
 	}
 	merged := materializeWindowResult(packetsByID, callsByID, nextDeadline)
-	finalJob := job
-	if progressCount > 0 {
-		seq, seqErr := w.Queue.NextCustomProjectionSeq(ctx)
-		if seqErr != nil {
-			return seqErr
-		}
-		finalJob.ProjectionSeq = seq
-	}
-	return w.publishBucket(ctx, cfg, finalJob, from, merged, watermarkTime, watermarkID, affected)
+	return w.publishBucket(ctx, cfg, job, from, merged, watermarkTime, watermarkID, affected)
 }
 
 func materializeWindowResult(
@@ -629,7 +596,7 @@ func (w *Worker) publishBucketSnapshot(
 			return err
 		}
 	}
-	// Heartbeat before slow CH write/activate so dense progressive windows cannot
+	// Heartbeat before slow CH write/activate so dense windowed rebuilds cannot
 	// expire the fixed cutover-only lease refresh mid-snapshot.
 	if err := w.Queue.RefreshCustomProjectionLease(ctx, job, cfg.Lease); err != nil {
 		return err
@@ -665,6 +632,7 @@ func (w *Worker) publishBucketSnapshot(
 	}
 	// Progressive publishes expose partial hour contents; CDR reconciliation,
 	// sibling-hour enqueue, and durable deadlines stay finalize-only.
+	// Kept for lease-refresh activate paths; windowed rebuild uses finalize only.
 	return w.Queue.ProgressCustomProjection(cutoverCtx, job, snapshot, cfg.Lease, activate)
 }
 

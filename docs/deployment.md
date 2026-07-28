@@ -180,12 +180,12 @@ IANA timezone выбирается из выпадающего списка в �
    Либо SQL: `UPDATE custom_projection_jobs SET status='pending', attempts=0,
    next_attempt_at=now(), last_error=NULL WHERE device_id=$1 AND status='failed'`.
 4. Worker при overflow сам режет час на окна 5m (и при необходимости 1m) и
-   progressive-активирует snapshot после каждого окна с новым watermark (список
-   AF / tip растут без паузы до XX:59). Перед каждым CH write lease
-   продлевается из `projection.lease`; CDR reconciliation / sibling hours /
-   `NextDeadline` выполняются только на финальном cutover. Session expansion
-   идёт через `event_id IN (session index)` (без hash JOIN syslog справа) и
-   ограничена ±48h.
+   активирует snapshot один раз на финальном cutover — предыдущий tip остаётся
+   видимым во время rebuild, чтобы карточки AF/CDR не ломались на partial
+   snapshot. Перед CH write lease продлевается из `projection.lease`; CDR
+   reconciliation / sibling hours / `NextDeadline` выполняются на cutover.
+   Session expansion идёт через `event_id IN (session index)` (без hash JOIN
+   syslog справа) и ограничена ±48h.
    Ошибки ClickHouse `memory limit exceeded` / `Query was cancelled`
    автоматически requeue’ятся и не блокируют catch-up навсегда. После релиза
    нажмите «Requeue failed» в Диагностике, если `failed>0`, и дождитесь drain.

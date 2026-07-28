@@ -162,6 +162,13 @@ describe('equipment templates', () => {
     expect(main).toContain('setSelectedEvent(null)')
   })
 
+  it('explains matched CDR coverage when AntiFraud detail is missing', () => {
+    expect(main).toContain("coverage?.state === 'matched'")
+    expect(main).toContain('Связанная цепочка AntiFraud временно недоступна')
+    expect(main).toContain('antifraud_detail_unavailable')
+    expect(main).toContain('body.detail')
+  })
+
   it('formats softswitch dashboard freshness in the device timezone', () => {
     const softswitchBlock = main.slice(
       main.indexOf('title="Последний CDR"'),

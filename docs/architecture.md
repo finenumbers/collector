@@ -56,15 +56,12 @@ admission class so tiny cursor pages are not serialized behind hour payload
 loads or exports. Hour buckets that exceed runtime `projection.maxEvents`
 (Настройки → Параметры; env `CUSTOM_PROJECTION_MAX_EVENTS` only seeds an empty
 DB) are loaded via 15m→5m split windows in-process so a dense SMG cannot
-terminal-fail the hour. During that windowed rebuild the worker
-progressive-activates after each advancing 5m window (lease refreshed from
-`projection.lease` before each CH write, and again on progress cutover) so
-AntiFraud tip/list grow continuously; the final window performs the normal
-cutover/complete plus CDR reconciliation, sibling-hour enqueue, and durable
-`NextDeadline` scheduling. Mid-hour progressive watermarks may advance from
-window loads that include `±pairingHorizon`, so lag diagnostics can look
-healthier than a fully projected hour until finalize. Every arrival increments
-its bucket generation, including arrivals while a worker owns the lease.
+terminal-fail the hour. Windowed rebuild keeps the previous active tip visible
+until a single finalize cutover (lease refreshed before the CH write) so call
+cards and CDR coverage stay consistent mid-rebuild; cutover then completes the
+job, enqueues CDR reconciliation and sibling hours, and schedules durable
+`NextDeadline`. Every arrival increments its bucket generation, including
+arrivals while a worker owns the lease.
 ClickHouse stores staged snapshots. An active marker is the visibility
 boundary; retries reuse the deterministic snapshot ID, superseded rows receive
 tombstones, and raw rows are never updated or deleted by replay.

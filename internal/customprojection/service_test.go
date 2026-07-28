@@ -386,7 +386,7 @@ func TestLocalMemoryOverflowReusesLoadedHour(t *testing.T) {
 	}
 }
 
-func TestDenseHourProgressiveActivatesDuringWindowedRebuild(t *testing.T) {
+func TestDenseHourFinalizeOnlyDuringWindowedRebuild(t *testing.T) {
 	deviceID := uuid.New()
 	bucket := time.Date(2026, 7, 27, 4, 0, 0, 0, time.UTC)
 	queue := &projectionQueueMock{policy: Policy{DeviceID: deviceID, Enabled: true, Revision: 1}}
@@ -418,24 +418,15 @@ func TestDenseHourProgressiveActivatesDuringWindowedRebuild(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(warehouse.activations) < 2 || queue.progressed < 1 || queue.completed != 1 {
-		t.Fatalf("dense hour should progressive-activate then finalize: activations=%v progressed=%d completed=%d",
+	if len(warehouse.activations) != 1 || queue.progressed != 0 || queue.completed != 1 {
+		t.Fatalf("dense hour must finalize-only: activations=%v progressed=%d completed=%d",
 			warehouse.activations, queue.progressed, queue.completed)
 	}
-	if queue.refreshed < len(warehouse.activations) {
-		t.Fatalf("expected lease refresh before each CH publish: refreshed=%d activations=%d",
-			queue.refreshed, len(warehouse.activations))
+	if queue.refreshed < 1 {
+		t.Fatalf("expected lease refresh before finalize publish: refreshed=%d", queue.refreshed)
 	}
-	if queue.lastProgressLease != 2*time.Minute {
-		t.Fatalf(" progressive lease=%s, want default cfg.Lease", queue.lastProgressLease)
-	}
-	// CDR reconciliation must not run on progressive publishes (finalize only).
 	if len(queue.buckets) == 0 {
 		t.Fatal("finalize should enqueue CDR reconciliation")
-	}
-	if len(queue.buckets) > queue.progressed {
-		t.Fatalf("CDR reconciliation ran on progressive windows: stamps=%d progressed=%d",
-			len(queue.buckets), queue.progressed)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"collector/internal/exportworker"
 	ftpclient "collector/internal/ftp"
 	"collector/internal/ingest"
+	"collector/internal/redact"
 	"collector/internal/runtimesettings"
 	"collector/internal/spool"
 	"collector/internal/store"
@@ -1305,7 +1306,10 @@ func writeAntifraudCallDetailError(
 	}
 	slog.Error("antifraud call detail failed",
 		"deviceId", deviceID, "callId", callID, "error", err)
-	writeError(writer, http.StatusInternalServerError, "unable to load AntiFraud call card")
+	writeJSON(writer, http.StatusInternalServerError, map[string]string{
+		"error":  "unable to load AntiFraud call card",
+		"detail": redact.Text(err.Error()),
+	})
 }
 
 func (s *Server) callCard(writer http.ResponseWriter, request *http.Request) {
@@ -1535,7 +1539,7 @@ func writeAdmissionError(writer http.ResponseWriter, err error) bool {
 		writeError(writer, http.StatusTooManyRequests, "analytics workload queue is full")
 		return true
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		writeError(writer, http.StatusGatewayTimeout, "analytics query deadline exceeded")
 		return true
 	}

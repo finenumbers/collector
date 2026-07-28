@@ -253,26 +253,48 @@ func BuildCardURL(template, guiBase string, parts CardURLParts) string {
 		return ""
 	}
 	if template == "" {
-		if parts.CDRID != "" {
-			return base + "/admin.php?cdr_filter=" + url.QueryEscape("{fId:"+parts.CDRID+"}")
+		if filter := cardFilter(parts); filter != "" {
+			return base + "/admin.php?cdr_filter=" + url.QueryEscape(filter)
 		}
-		if parts.CallID == "" {
-			return ""
-		}
-		return base + "/admin.php?cdr_filter=" +
-			url.QueryEscape(`{fcallid:"`+escapeJSONString(parts.CallID)+`"}`)
+		return ""
 	}
 	// Prefer stable numeric CDR id when the template still points at Call-ID only.
 	if parts.CDRID != "" && strings.Contains(template, "{voipmonitor_call_id}") &&
 		!strings.Contains(template, "{voipmonitor_cdr_id}") {
-		return base + "/admin.php?cdr_filter=" + url.QueryEscape("{fId:"+parts.CDRID+"}")
+		if filter := cardFilter(CardURLParts{CDRID: parts.CDRID}); filter != "" {
+			return base + "/admin.php?cdr_filter=" + url.QueryEscape(filter)
+		}
 	}
 	replaced := strings.NewReplacer(
 		"{gui_base}", base,
-		"{voipmonitor_cdr_id}", parts.CDRID,
+		"{voipmonitor_cdr_id}", digitsOnly(parts.CDRID),
 		"{voipmonitor_call_id}", escapeJSONString(parts.CallID),
 	).Replace(template)
 	return encodeCDRFilterQuery(replaced)
+}
+
+func cardFilter(parts CardURLParts) string {
+	if id := digitsOnly(parts.CDRID); id != "" {
+		return "{fId:" + id + "}"
+	}
+	if parts.CallID == "" {
+		return ""
+	}
+	quoted, err := json.Marshal(parts.CallID)
+	if err != nil {
+		return ""
+	}
+	return `{fcallid:` + string(quoted) + `}`
+}
+
+func digitsOnly(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func encodeCDRFilterQuery(raw string) string {

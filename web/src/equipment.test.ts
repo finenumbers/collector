@@ -136,9 +136,27 @@ describe('equipment templates', () => {
     expect(main).toContain("activeView === 'device' && sourceCategory(selected) === category")
   })
 
-  it('highlights the active device in the sidebar with green', () => {
+  it('highlights the active device in the sidebar with green only when device view is open', () => {
+    expect(main).toContain(
+      "className={`device-button ${activeView === 'device' && device.id === activeDevice ? 'active' : ''}`}",
+    )
     expect(styles).toContain('.device-button.active')
     expect(styles).toContain('#d8f5e4')
     expect(styles).toContain('grid-template-columns: 192px')
+  })
+
+  it('clamps dataset when a saved device loses the current surface', () => {
+    expect(main).toContain('!deviceSurfaces(device).includes(dataset as DeviceSurface)')
+    expect(main).toContain('setDataset(defaultSourceDataset(device))')
+  })
+
+  it('formats softswitch dashboard freshness in the device timezone', () => {
+    const softswitchBlock = main.slice(
+      main.indexOf('title="Последний CDR"'),
+      main.indexOf('Софтсвитчи ещё не добавлены'),
+    )
+    expect(softswitchBlock).toContain('row.fileMetrics?.latestAt || row.freshness.latestCdrAt')
+    expect(softswitchBlock).toContain("row.activeTimezone || row.timezone || 'UTC'")
+    expect(softswitchBlock).not.toContain(", 'UTC')")
   })
 })

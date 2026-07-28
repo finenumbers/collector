@@ -169,8 +169,24 @@ func main() {
 	ingestMetrics := &ingest.Metrics{}
 	exportHealth := &exportworker.Health{}
 	var apiExportHealth *exportworker.Health
-	if cfg.Role == "app" {
+	// In-process Health is authoritative only when this process runs the export
+	// worker. Split api-ingest infers liveness from export_jobs heartbeats.
+	if runExport {
 		apiExportHealth = exportHealth
+	}
+	applyRuntimeDocument := func(doc runtimesettings.Document) {
+		runtime.Replace(doc)
+		applyProjectionGate(doc)
+		applyClickHouseAdmission(doc)
+		if err := writeContainerLimitsEnv("/data/spool/container-limits.env", doc); err != nil {
+			slog.Error("container limits env write failed", "error", err)
+		}
+		slog.Info("runtime settings applied",
+			"projectionEnabled", doc.Projection.Enabled,
+			"projectionThreads", doc.Projection.Threads,
+			"voipmonitorEnabled", doc.Voipmonitor.Enabled,
+			"clickhouseAdmissionCapacity", doc.Platform.ClickHouseAdmissionCapacity,
+			"apiMemory", doc.Containers.APIMemory)
 	}
 
 	apiServer := &httpapi.Server{
@@ -187,17 +203,7 @@ func main() {
 		ReconcileRetention: retentionReconciler.RunNow,
 		Runtime:            runtime,
 		OnRuntimeSettingsChanged: func(doc runtimesettings.Document) {
-			applyProjectionGate(doc)
-			applyClickHouseAdmission(doc)
-			if err := writeContainerLimitsEnv("/data/spool/container-limits.env", doc); err != nil {
-				slog.Error("container limits env write failed", "error", err)
-			}
-			slog.Info("runtime settings applied",
-				"projectionEnabled", doc.Projection.Enabled,
-				"projectionThreads", doc.Projection.Threads,
-				"voipmonitorEnabled", doc.Voipmonitor.Enabled,
-				"clickhouseAdmissionCapacity", doc.Platform.ClickHouseAdmissionCapacity,
-				"apiMemory", doc.Containers.APIMemory)
+			applyRuntimeDocument(doc)
 		},
 	}
 	server := &http.Server{
@@ -212,6 +218,10 @@ func main() {
 	}
 
 	errs := make(chan error, 8)
+	// Split maintenance/export processes do not receive PATCH callbacks; poll PG
+	// so local Manager + ClickHouse admission hot-apply without restart. The API
+	// process also polls as a backstop when another replica wrote settings.
+	go watchRuntimeSettings(ctx, control, runtime, applyRuntimeDocument)
 	if runAPIIngest {
 		go func() {
 			slog.Info("HTTP server listening", "address", cfg.HTTPAddr)
@@ -668,6 +678,39 @@ func sleepContext(ctx context.Context, duration time.Duration) bool {
 		return false
 	case <-timer.C:
 		return true
+	}
+}
+
+// watchRuntimeSettings polls PostgreSQL so split maintenance/export processes
+// hot-apply settings written by the API role without process restart.
+func watchRuntimeSettings(
+	ctx context.Context,
+	control *store.Store,
+	runtime *runtimesettings.Manager,
+	onChange func(runtimesettings.Document),
+) {
+	var lastUpdated time.Time
+	if row, err := control.LoadRuntimeSettings(ctx); err == nil {
+		lastUpdated = row.UpdatedAt
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			row, err := control.LoadRuntimeSettings(ctx)
+			if err != nil || !row.Seeded || !row.UpdatedAt.After(lastUpdated) {
+				continue
+			}
+			lastUpdated = row.UpdatedAt
+			if onChange != nil {
+				onChange(row.Settings)
+			} else {
+				runtime.Replace(row.Settings)
+			}
+		}
 	}
 }
 

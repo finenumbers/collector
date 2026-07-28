@@ -38,6 +38,13 @@ because it duplicates ownership. CPU and memory limits are configurable per
 role. Separate ClickHouse usernames/passwords can be supplied after operators
 provision corresponding least-privilege users and quotas.
 
+Runtime settings PATCH is applied immediately in the API process and every
+long-lived `api-ingest` / `export` / `maintenance` process polls PostgreSQL
+(~2s) to hot-apply the same document locally (projection gate, worker
+fingerprints, ClickHouse admission capacity, container-limits env). Split
+`api-ingest` does not run the export worker in-process; dashboard and create-job
+liveness use `export_jobs` heartbeats instead of a local Health probe.
+
 ## Secret handling and raw Syslog risk
 
 The server recognizes Password/User-Password, CHAP, digest/preimage,

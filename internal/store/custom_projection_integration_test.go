@@ -105,6 +105,167 @@ func TestProjectionGenerationAndReconciliationLease(t *testing.T) {
 		t.Fatalf("aging deadline did not retain reconciliation job: %s", status)
 	}
 
+}
+
+func TestCustomProjectionClaimPrefersOpenHourThenDiscover(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "claim-order-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "claim-order-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::2345", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx,
+		`DELETE FROM custom_projection_jobs WHERE device_id=$1`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	openHour := time.Now().UTC().Truncate(time.Hour)
+	backlog := openHour.Add(-2 * time.Hour)
+	if err := control.EnqueueCustomProjectionBuckets(
+		ctx, device.ID, 1, []time.Time{backlog, openHour},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO custom_projection_jobs
+		(device_id,kind,status,policy_revision,next_attempt_at)
+		VALUES ($1,'discover','pending',1,now())`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, ok, err := control.ClaimCustomProjectionJob(ctx, "order-a", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("open-hour claim: ok=%v err=%v", ok, err)
+	}
+	if first.Kind != customprojection.JobBucket || !first.BucketStart.Equal(openHour) {
+		t.Fatalf("first claim=%#v, want open-hour bucket", first)
+	}
+	if err := control.CompleteCustomProjectionJob(ctx, first, customprojection.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	// Completing may requeue the same generation as pending if arrivals bumped it;
+	// force the open-hour row out of the way so discover can surface next.
+	if _, err := control.DB.Exec(ctx, `UPDATE custom_projection_jobs
+		SET status='completed',lease_expires_at=NULL,worker_id=NULL
+		WHERE device_id=$1 AND kind='bucket' AND bucket_start=$2`,
+		device.ID, openHour); err != nil {
+		t.Fatal(err)
+	}
+	second, ok, err := control.ClaimCustomProjectionJob(ctx, "order-b", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("discover claim: ok=%v err=%v", ok, err)
+	}
+	if second.Kind != customprojection.JobDiscover {
+		t.Fatalf("second claim kind=%s, want discover before backlog", second.Kind)
+	}
+	if err := control.CompleteCustomProjectionJob(ctx, second, customprojection.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx, `UPDATE custom_projection_jobs
+		SET status='completed',lease_expires_at=NULL,worker_id=NULL
+		WHERE id=$1`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	third, ok, err := control.ClaimCustomProjectionJob(ctx, "order-c", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("backlog claim: ok=%v err=%v", ok, err)
+	}
+	if third.Kind != customprojection.JobBucket || !third.BucketStart.Equal(backlog) {
+		t.Fatalf("third claim=%#v, want backlog bucket", third)
+	}
+}
+
+func TestFailCustomProjectionJobIsOwnershipSafe(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "fail-own-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "fail-own-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::3456", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx,
+		`DELETE FROM custom_projection_jobs WHERE device_id=$1`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	bucket := time.Date(2026, 7, 27, 5, 0, 0, 0, time.UTC)
+	if err := control.EnqueueCustomProjectionBuckets(
+		ctx, device.ID, 1, []time.Time{bucket},
+	); err != nil {
+		t.Fatal(err)
+	}
+	owner, ok, err := control.ClaimCustomProjectionJob(ctx, "owner", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("owner claim: ok=%v err=%v", ok, err)
+	}
+	stale := owner
+	stale.WorkerID = "stale-worker"
+	if err := control.FailCustomProjectionJob(ctx, stale, context.DeadlineExceeded, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	var status, workerID string
+	if err := control.DB.QueryRow(ctx, `SELECT status,COALESCE(worker_id,'')
+		FROM custom_projection_jobs WHERE id=$1`, owner.ID).Scan(&status, &workerID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || workerID != "owner" {
+		t.Fatalf("stale fail mutated job: status=%s worker=%s", status, workerID)
+	}
+	var leaseOwner string
+	if err := control.DB.QueryRow(ctx, `SELECT worker_id FROM custom_projection_device_leases
+		WHERE device_id=$1`, device.ID).Scan(&leaseOwner); err != nil {
+		t.Fatal(err)
+	}
+	if leaseOwner != "owner" {
+		t.Fatalf("stale fail released device lease to %q", leaseOwner)
+	}
+}
+
+func TestProjectionCutoverHoldsToggleLock(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "cutover-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "cutover-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::4567", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx,
+		`DELETE FROM custom_projection_jobs WHERE device_id=$1`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	bucket := time.Date(2026, 7, 27, 6, 0, 0, 0, time.UTC)
+	if err := control.EnqueueCustomProjectionBuckets(
+		ctx, device.ID, 1, []time.Time{bucket},
+	); err != nil {
+		t.Fatal(err)
+	}
 	cutoverJob, ok, err := control.ClaimCustomProjectionJob(ctx, "cutover-a", time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("cutover claim: ok=%v err=%v", ok, err)

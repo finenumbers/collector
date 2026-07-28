@@ -45,6 +45,19 @@ func (s *Server) customProjectionEnabled() bool {
 	return s.Config.CustomProjectionEnabled
 }
 
+// exportWorkerHealthy prefers in-process Health (monolith). On split api-ingest,
+// ExportHealth is nil and liveness is inferred from export_jobs heartbeats.
+func (s *Server) exportWorkerHealthy(ctx context.Context) bool {
+	if s.ExportHealth != nil {
+		return s.ExportHealth.Available(store.ExportHeartbeatTimeout)
+	}
+	if s.Store == nil {
+		return false
+	}
+	ok, err := s.Store.ExportWorkerAvailable(ctx, store.ExportHeartbeatTimeout)
+	return err == nil && ok
+}
+
 type costlyRate struct {
 	window time.Time
 	count  int
@@ -310,8 +323,7 @@ func (s *Server) systemInfo(writer http.ResponseWriter, request *http.Request) {
 	services["postgres"] = s.Store.DB.Ping(ctx) == nil
 	services["clickhouse"] = s.Analytics.Conn.Ping(ctx) == nil
 	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
-	services["export_worker"] = s.ExportHealth == nil ||
-		s.ExportHealth.Available(store.ExportHeartbeatTimeout)
+	services["export_worker"] = s.exportWorkerHealthy(ctx)
 	if s.Archive != nil {
 		exists, err := s.Archive.Client.BucketExists(ctx, s.Archive.Bucket)
 		services["minio"] = err == nil && exists
@@ -459,8 +471,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	services["postgres"] = s.Store.DB.Ping(serviceCtx) == nil
 	services["clickhouse"] = s.Analytics.Conn.Ping(serviceCtx) == nil
 	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
-	services["export_worker"] = s.ExportHealth == nil ||
-		s.ExportHealth.Available(store.ExportHeartbeatTimeout)
+	services["export_worker"] = s.exportWorkerHealthy(serviceCtx)
 	var spoolDepth uint64
 	if s.Spool != nil {
 		if depth, depthErr := s.Spool.Depth(); depthErr == nil {

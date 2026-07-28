@@ -205,7 +205,15 @@ func (s *Store) ClaimCustomProjectionJob(
 				SELECT 1 FROM custom_projection_device_leases lease
 				WHERE lease.device_id=job.device_id AND lease.lease_expires_at>=now()
 			  )
-			ORDER BY device_id,updated_at,created_at
+			ORDER BY device_id,
+				CASE
+					WHEN kind='bucket'
+						AND bucket_start=date_trunc('hour', timezone('UTC', now()))
+					THEN 0
+					WHEN kind='bucket' THEN 1
+					ELSE 2
+				END,
+				updated_at,created_at
 		), picked AS (
 			SELECT job.id FROM custom_projection_jobs job
 			JOIN eligible USING (id)
@@ -349,11 +357,36 @@ func (s *Store) ScheduleCustomProjectionDeadline(
 
 const customProjectionAdvisorySeed int64 = 0x435553544f4d
 
+func (s *Store) NextCustomProjectionSeq(ctx context.Context) (uint64, error) {
+	var seq uint64
+	err := s.DB.QueryRow(ctx, `SELECT nextval('custom_projection_seq')`).Scan(&seq)
+	return seq, err
+}
+
+func (s *Store) ProgressCustomProjection(
+	ctx context.Context,
+	job customprojection.Job,
+	snapshot customprojection.Snapshot,
+	activate func(context.Context) error,
+) error {
+	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, false)
+}
+
 func (s *Store) CutoverCustomProjection(
 	ctx context.Context,
 	job customprojection.Job,
 	snapshot customprojection.Snapshot,
 	activate func(context.Context) error,
+) error {
+	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, true)
+}
+
+func (s *Store) applyCustomProjectionCutover(
+	ctx context.Context,
+	job customprojection.Job,
+	snapshot customprojection.Snapshot,
+	activate func(context.Context) error,
+	finalize bool,
 ) error {
 	conn, err := s.DB.Acquire(ctx)
 	if err != nil {
@@ -429,19 +462,34 @@ func (s *Store) CutoverCustomProjection(
 	if tag.RowsAffected() != 1 {
 		return errors.New("projection watermark compare-and-swap failed")
 	}
-	if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
-		SET status=CASE WHEN generation=claimed_generation THEN 'completed' ELSE 'pending' END,
-			completed_at=CASE WHEN generation=claimed_generation THEN now() ELSE NULL END,
-			next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
-				ELSE LEAST(next_attempt_at,now()) END,
-			last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
-			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
-		WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
-		WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
-		return err
+	if finalize {
+		if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
+			SET status=CASE WHEN generation=claimed_generation THEN 'completed' ELSE 'pending' END,
+				completed_at=CASE WHEN generation=claimed_generation THEN now() ELSE NULL END,
+				next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
+					ELSE LEAST(next_attempt_at,now()) END,
+				last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
+				lease_expires_at=NULL,worker_id=NULL,updated_at=now()
+			WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
+			WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
+			return err
+		}
+	} else {
+		// Keep the hour job running and refresh leases so progressive publishes
+		// remain visible while later 5m windows continue.
+		if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
+			SET lease_expires_at=now()+interval '2 minutes',updated_at=now()
+			WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE custom_projection_device_leases
+			SET lease_expires_at=now()+interval '2 minutes',updated_at=now()
+			WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

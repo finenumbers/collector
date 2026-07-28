@@ -48,15 +48,18 @@ and CDR time interpretations. MinIO stores immutable source CDR files.
 engine. PostgreSQL owns policy revisions, durable discovery/bucket jobs,
 generation counters, deadline cursors, per-device projection leases (≤1 running
 job per SMG), deployment-wide ClickHouse heavy-lane lock for snapshot
-write/cutover, and watermarks. Claim prefers devices with the oldest watermark.
+write/cutover, and watermarks. Claim prefers devices with the oldest watermark
+and, per device, the open UTC-hour bucket over older backlog hours.
 Hour buckets that exceed runtime `projection.maxEvents` (Настройки → Параметры;
 env `CUSTOM_PROJECTION_MAX_EVENTS` only seeds an empty DB) are loaded via
 15m→5m split windows in-process so a dense SMG cannot terminal-fail the hour.
-Every arrival increments its bucket generation, including arrivals while a
-worker owns the lease. ClickHouse stores staged complete snapshots. A final
-active marker is the visibility boundary; retries reuse the deterministic
-snapshot ID, superseded rows receive tombstones, and raw rows are never
-updated or deleted by replay.
+During that windowed rebuild the worker progressive-activates after each
+advancing 5m window (lease kept) so AntiFraud tip/list grow continuously;
+the final window performs the normal cutover/complete. Every arrival increments
+its bucket generation, including arrivals while a worker owns the lease.
+ClickHouse stores staged snapshots. An active marker is the visibility
+boundary; retries reuse the deterministic snapshot ID, superseded rows receive
+tombstones, and raw rows are never updated or deleted by replay.
 
 Session recomputation uses exact engine identities plus
 `custom_radius_session_events` to expand bounded indexed windows across UTC

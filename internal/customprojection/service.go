@@ -75,6 +75,10 @@ type Queue interface {
 	CompleteCustomProjectionJob(context.Context, Job, Snapshot) error
 	FailCustomProjectionJob(context.Context, Job, error, time.Duration) error
 	ScheduleCustomProjectionDeadline(context.Context, Job, time.Time) error
+	NextCustomProjectionSeq(context.Context) (uint64, error)
+	// ProgressCustomProjection publishes a mid-hour active snapshot without
+	// completing the job or releasing the per-device lease.
+	ProgressCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
 	CutoverCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
 	EnqueueCDRReconciliationBuckets(context.Context, uuid.UUID, uint64, []time.Time) error
 }
@@ -306,13 +310,15 @@ func (w *Worker) processBucketWindows(
 	ctx context.Context, cfg Config, job Job, from, to time.Time,
 ) error {
 	span := 5 * time.Minute
-	merged := customradius.Result{}
 	packetsByID := make(map[uuid.UUID]customradius.Packet)
 	callsByID := make(map[uuid.UUID]customradius.Call)
 	affected := make(map[time.Time]struct{})
 	var watermarkTime time.Time
 	var watermarkID uuid.UUID
+	var publishedWatermark time.Time
+	var publishedWatermarkID uuid.UUID
 	var nextDeadline *time.Time
+	progressCount := 0
 	cutoff := job.CutoffAt.UTC()
 	for cursor := from; cursor.Before(to); cursor = cursor.Add(span) {
 		if ctx.Err() != nil {
@@ -413,7 +419,49 @@ func (w *Worker) processBucketWindows(
 			}
 			callsByID[call.ID] = call
 		}
+		// Progressive activate after each advancing window except the last; the
+		// final window uses publishBucket so the job completes / lease releases.
+		lastWindow := !end.Before(to)
+		watermarkAdvanced := watermarkTime.After(publishedWatermark) ||
+			(watermarkTime.Equal(publishedWatermark) &&
+				watermarkID.String() > publishedWatermarkID.String())
+		if !lastWindow && watermarkAdvanced && (len(packetsByID) > 0 || len(callsByID) > 0) {
+			partial := materializeWindowResult(packetsByID, callsByID, nil)
+			progressJob := job
+			if progressCount > 0 {
+				seq, seqErr := w.Queue.NextCustomProjectionSeq(ctx)
+				if seqErr != nil {
+					return seqErr
+				}
+				progressJob.ProjectionSeq = seq
+			}
+			if err := w.publishBucketProgress(
+				ctx, cfg, progressJob, from, partial, watermarkTime, watermarkID, affected,
+			); err != nil {
+				return err
+			}
+			progressCount++
+			publishedWatermark, publishedWatermarkID = watermarkTime, watermarkID
+		}
 	}
+	merged := materializeWindowResult(packetsByID, callsByID, nextDeadline)
+	finalJob := job
+	if progressCount > 0 {
+		seq, seqErr := w.Queue.NextCustomProjectionSeq(ctx)
+		if seqErr != nil {
+			return seqErr
+		}
+		finalJob.ProjectionSeq = seq
+	}
+	return w.publishBucket(ctx, cfg, finalJob, from, merged, watermarkTime, watermarkID, affected)
+}
+
+func materializeWindowResult(
+	packetsByID map[uuid.UUID]customradius.Packet,
+	callsByID map[uuid.UUID]customradius.Call,
+	nextDeadline *time.Time,
+) customradius.Result {
+	merged := customradius.Result{NextDeadline: nextDeadline}
 	merged.Packets = make([]customradius.Packet, 0, len(packetsByID))
 	for _, packet := range packetsByID {
 		merged.Packets = append(merged.Packets, packet)
@@ -435,8 +483,7 @@ func (w *Worker) processBucketWindows(
 		}
 		return left.Before(right)
 	})
-	merged.NextDeadline = nextDeadline
-	return w.publishBucket(ctx, cfg, job, from, merged, watermarkTime, watermarkID, affected)
+	return merged
 }
 
 func callFirstSeen(call customradius.Call) time.Time {
@@ -502,6 +549,19 @@ func (w *Worker) finishBucket(
 	return w.publishBucket(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected)
 }
 
+func (w *Worker) publishBucketProgress(
+	ctx context.Context,
+	cfg Config,
+	job Job,
+	from time.Time,
+	result customradius.Result,
+	watermarkTime time.Time,
+	watermarkID uuid.UUID,
+	affected map[time.Time]struct{},
+) error {
+	return w.publishBucketSnapshot(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected, false)
+}
+
 func (w *Worker) publishBucket(
 	ctx context.Context,
 	cfg Config,
@@ -512,13 +572,27 @@ func (w *Worker) publishBucket(
 	watermarkID uuid.UUID,
 	affected map[time.Time]struct{},
 ) error {
+	return w.publishBucketSnapshot(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected, true)
+}
+
+func (w *Worker) publishBucketSnapshot(
+	ctx context.Context,
+	cfg Config,
+	job Job,
+	from time.Time,
+	result customradius.Result,
+	watermarkTime time.Time,
+	watermarkID uuid.UUID,
+	affected map[time.Time]struct{},
+	finalize bool,
+) error {
 	snapshot := Snapshot{
 		ID: stableSnapshotID(job, resultEventIDs(result)), DeviceID: job.DeviceID, BucketStart: from,
 		PolicyRevision: job.PolicyRevision, ProjectionSeq: job.ProjectionSeq,
 		WatermarkTime: watermarkTime, WatermarkID: watermarkID,
 		Result: result,
 	}
-	if result.NextDeadline != nil {
+	if finalize && result.NextDeadline != nil {
 		if err := w.Queue.ScheduleCustomProjectionDeadline(ctx, job, *result.NextDeadline); err != nil {
 			return err
 		}
@@ -531,10 +605,12 @@ func (w *Worker) publishBucket(
 			otherBuckets = append(otherBuckets, bucket)
 		}
 	}
-	if err := w.Queue.EnqueueCustomProjectionBuckets(
-		ctx, job.DeviceID, job.PolicyRevision, otherBuckets,
-	); err != nil {
-		return err
+	if finalize {
+		if err := w.Queue.EnqueueCustomProjectionBuckets(
+			ctx, job.DeviceID, job.PolicyRevision, otherBuckets,
+		); err != nil {
+			return err
+		}
 	}
 	releaseHeavy, err := w.acquireHeavyLane(ctx)
 	if err != nil {
@@ -553,12 +629,18 @@ func (w *Worker) publishBucket(
 		}
 	}
 	defer releaseAdmission()
-	if err := w.Queue.CutoverCustomProjection(
-		cutoverCtx, job, snapshot,
-		func(activateCtx context.Context) error {
-			return w.Warehouse.ActivateCustomProjectionSnapshot(activateCtx, snapshot)
-		},
-	); err != nil {
+	activate := func(activateCtx context.Context) error {
+		return w.Warehouse.ActivateCustomProjectionSnapshot(activateCtx, snapshot)
+	}
+	if finalize {
+		if err := w.Queue.CutoverCustomProjection(cutoverCtx, job, snapshot, activate); err != nil {
+			return err
+		}
+		return w.Queue.EnqueueCDRReconciliationBuckets(
+			cutoverCtx, job.DeviceID, job.PolicyRevision, allBuckets,
+		)
+	}
+	if err := w.Queue.ProgressCustomProjection(cutoverCtx, job, snapshot, activate); err != nil {
 		return err
 	}
 	return w.Queue.EnqueueCDRReconciliationBuckets(

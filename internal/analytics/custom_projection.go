@@ -145,18 +145,24 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 		return nil, err
 	}
 	defer release()
-	// Indexed session-event lookup only. Full-payload substring scans over an
-	// hour of Syslog starve ClickHouse and block ingest.
+	// Resolve event IDs from the compact session index first, then fetch payloads by
+	// primary key. A hash JOIN with syslog_messages on the right side OOMs at the
+	// CustomReplay 512MiB cap on dense SMG devices (FillingRightJoinSide).
 	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT message.event_id,message.device_id,
 		message.received_at,toString(message.source_ip),message.source_port,
 		message.transport,message.payload
-		FROM collector.custom_radius_session_events_current AS session
-		INNER JOIN collector.syslog_messages AS message
-			ON message.device_id=session.device_id AND message.event_id=session.event_id
-		WHERE session.device_id=? AND session.identity_value IN ?
+		FROM collector.syslog_messages AS message
+		WHERE message.device_id=?
 		  AND message.received_at>=? AND message.received_at<?
+		  AND message.event_id IN (
+			SELECT DISTINCT session.event_id
+			FROM collector.custom_radius_session_events_current AS session
+			WHERE session.device_id=?
+			  AND session.identity_value IN ?
+			  AND session.received_at>=? AND session.received_at<?
+		  )
 		ORDER BY message.received_at,message.event_id LIMIT ?`,
-		deviceID, identities, from, to, limit+1)
+		deviceID, from, to, deviceID, identities, from, to, limit+1)
 	if err != nil {
 		return nil, err
 	}

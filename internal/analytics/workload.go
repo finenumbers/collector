@@ -90,7 +90,9 @@ func workloadQueryLimits(class workload.Class) (time.Duration, uint64, uint64, u
 	case workload.Export:
 		return 45 * time.Second, 2, 512 << 20, 20_000, 64 << 20
 	case workload.CustomReplay:
-		return 60 * time.Second, 2, 512 << 20, 100_000, 128 << 20
+		// Dense SMG session expansion previously OOMed at 512MiB; keep headroom after
+		// the IN-subquery rewrite without starving the shared ClickHouse host.
+		return 90 * time.Second, 2, 768 << 20, 100_000, 128 << 20
 	case workload.CustomReconcile:
 		return 30 * time.Second, 2, 256 << 20, 50_000, 64 << 20
 	case workload.Ingest:

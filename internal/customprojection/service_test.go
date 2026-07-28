@@ -360,6 +360,12 @@ func TestIsEventLimitError(t *testing.T) {
 	if !IsMemoryBoundError(fmt.Errorf("bucket payload bytes 9 exceed memory bound 8")) {
 		t.Fatal("memory bound error not detected")
 	}
+	if !IsClickHouseResourceError(fmt.Errorf("code: 241, message: Query memory limit exceeded: would use 512.85 MiB")) {
+		t.Fatal("clickhouse memory error not detected")
+	}
+	if !IsClickHouseResourceError(fmt.Errorf("code: 394, message: Query was cancelled")) {
+		t.Fatal("clickhouse cancel error not detected")
+	}
 }
 
 func TestUnansweredRequestSchedulesDurableDeadline(t *testing.T) {

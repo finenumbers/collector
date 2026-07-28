@@ -160,7 +160,8 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 
 	rows, err = c.Conn.Query(ctx, `SELECT device_id,max(last_seen_at)
 		FROM collector.custom_antifraud_calls_current
-		GROUP BY device_id`)
+		WHERE last_seen_at>=now()-toIntervalSecond(?)
+		GROUP BY device_id`, seconds)
 	if err != nil {
 		result.Diagnostics = append(result.Diagnostics, "antifraud tip: "+err.Error())
 	} else {

@@ -221,9 +221,16 @@ func RunSyslogWorker(
 
 			active := make([]rawMessage, 0, len(pending))
 			records := make([]analytics.SyslogMessage, 0, len(pending))
+			// One DeviceTimeConfig lookup per distinct device in the batch.
+			deviceConfigErr := make(map[uuid.UUID]error)
 			for _, item := range pending {
 				if timeResolver != nil {
-					if _, configErr := timeResolver.DeviceTimeConfig(ctx, item.raw.DeviceID); configErr != nil {
+					configErr, seen := deviceConfigErr[item.raw.DeviceID]
+					if !seen {
+						_, configErr = timeResolver.DeviceTimeConfig(ctx, item.raw.DeviceID)
+						deviceConfigErr[item.raw.DeviceID] = configErr
+					}
+					if configErr != nil {
 						if errors.Is(configErr, store.ErrDeviceDeleting) ||
 							errors.Is(configErr, store.ErrNotFound) {
 							_ = item.message.Term()
@@ -260,11 +267,23 @@ func RunSyslogWorker(
 				}
 				buckets := make(map[uuid.UUID]map[time.Time]struct{})
 				revisions := make(map[uuid.UUID]uint64)
+				type policyLookup struct {
+					policy customprojection.Policy
+					err    error
+					loaded bool
+				}
+				policies := make(map[uuid.UUID]*policyLookup, len(active))
 				for _, item := range active {
-					policy, policyErr := enqueuer.CustomAntifraudPolicy(ctx, item.raw.DeviceID)
-					if policyErr != nil {
-						if errors.Is(policyErr, store.ErrNotFound) ||
-							errors.Is(policyErr, store.ErrDeviceDeleting) {
+					lookup := policies[item.raw.DeviceID]
+					if lookup == nil {
+						lookup = &policyLookup{}
+						lookup.policy, lookup.err = enqueuer.CustomAntifraudPolicy(ctx, item.raw.DeviceID)
+						lookup.loaded = true
+						policies[item.raw.DeviceID] = lookup
+					}
+					if lookup.err != nil {
+						if errors.Is(lookup.err, store.ErrNotFound) ||
+							errors.Is(lookup.err, store.ErrDeviceDeleting) {
 							continue
 						}
 						for _, pendingItem := range active {
@@ -272,10 +291,10 @@ func RunSyslogWorker(
 						}
 						return true
 					}
-					if !policy.Enabled {
+					if !lookup.policy.Enabled {
 						continue
 					}
-					revisions[item.raw.DeviceID] = policy.Revision
+					revisions[item.raw.DeviceID] = lookup.policy.Revision
 					if buckets[item.raw.DeviceID] == nil {
 						buckets[item.raw.DeviceID] = make(map[time.Time]struct{})
 					}

@@ -284,17 +284,16 @@ func (w *Worker) execute(ctx context.Context, job store.ExportJob) error {
 	if _, err = file.Seek(0, io.SeekStart); err != nil {
 		return fail(err)
 	}
-	hash := sha256.New()
-	size, err := io.Copy(hash, file)
+	info, err := file.Stat()
 	if err != nil {
 		return fail(err)
 	}
-	if _, err = file.Seek(0, io.SeekStart); err != nil {
-		return fail(err)
-	}
+	size := info.Size()
+	hash := sha256.New()
+	upload := io.TeeReader(file, hash)
 	result.Filename = path.Base(result.Filename)
 	objectKey := path.Join("exports", job.DeviceID.String(), job.ID.String(), result.Filename)
-	if err = w.Archive.Put(ctx, objectKey, file, size, result.ContentType); err != nil {
+	if err = w.Archive.Put(ctx, objectKey, upload, size, result.ContentType); err != nil {
 		cleanupErr := w.Archive.DeleteObject(context.WithoutCancel(ctx), objectKey)
 		if cleanupErr != nil {
 			_ = w.Store.FinishExportJobWithArtifact(

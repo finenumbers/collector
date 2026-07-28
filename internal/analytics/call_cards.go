@@ -251,7 +251,8 @@ func (c *Client) ListAntifraudCallsPage(
 			SELECT device_id,call_id,any(method) method,any(reason) reason,any(delta_ms) delta_ms,
 				max(ambiguous) ambiguous,any(ambiguity_reason) ambiguity_reason,
 				any(matched_evidence_json) evidence,groupUniqArray(cdr_id) cdr_ids
-			FROM collector.cdr_antifraud_assignments_current GROUP BY device_id,call_id
+			FROM collector.cdr_antifraud_assignments_current
+			WHERE device_id=? GROUP BY device_id,call_id
 		) assignment ON assignment.device_id=call.device_id AND assignment.call_id=call.call_id
 		LEFT JOIN (
 			SELECT links.device_id,links.snapshot_id,links.call_id,
@@ -265,11 +266,12 @@ func (c *Client) ListAntifraudCallsPage(
 			INNER JOIN collector.custom_radius_packets_current packet
 				ON packet.device_id=links.device_id AND packet.snapshot_id=links.snapshot_id
 				AND packet.packet_id=links.packet_id
-			WHERE links.deleted=0 GROUP BY links.device_id,links.snapshot_id,links.call_id
+			WHERE links.deleted=0 AND links.device_id=?
+			GROUP BY links.device_id,links.snapshot_id,links.call_id
 		) packet_summary ON packet_summary.device_id=call.device_id
 			AND packet_summary.snapshot_id=call.snapshot_id AND packet_summary.call_id=call.call_id
 		WHERE call.device_id=?`
-	args := []any{deviceID}
+	args := []any{deviceID, deviceID, deviceID}
 	if timeRange != nil {
 		query += ` AND call.first_seen_at>=? AND call.first_seen_at<?`
 		args = append(args, timeRange.From, timeRange.To)

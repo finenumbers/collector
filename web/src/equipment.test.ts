@@ -86,6 +86,11 @@ describe('equipment templates', () => {
     expect(main.lastIndexOf('title="Последний приём Syslog"')).toBeLessThan(
       main.indexOf('title="Последнее значение АнтиФрода"'),
     )
+    expect(main).toContain('latestCdrAt, row.activeTimezone || row.timezone || \'UTC\')')
+    expect(main).toContain('latestAntifraudAt, row.activeTimezone || row.timezone || \'UTC\')')
+    // Timezone label under all three equipment freshness columns.
+    expect(main.match(/formatTime\(row\.freshness\.latestCdrAt[\s\S]*?<small>\{row\.activeTimezone/)).toBeTruthy()
+    expect(main.match(/formatTime\(row\.freshness\.latestAntifraudAt[\s\S]*?<small>\{row\.activeTimezone/)).toBeTruthy()
     // Dashboard order: services → softswitches → equipment.
     const servicesAt = main.indexOf('<h4>Сервисы</h4>')
     const softAt = main.indexOf('<h4>Софтсвитчи</h4><span>Типизированные')

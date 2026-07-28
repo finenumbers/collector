@@ -449,6 +449,7 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 	}
 	calls := make([]callRow, 0)
 	links := make([]linkRow, 0)
+	writtenPackets := snapshotPacketIDsInBucket(snapshot)
 	for _, call := range snapshot.Result.Calls {
 		if len(call.Packets) == 0 {
 			continue
@@ -489,11 +490,16 @@ func (c *Client) writeCustomCalls(ctx context.Context, snapshot customprojection
 			call.Accounting.DelayTimeSec, string(attributes),
 			string(unmatched), call.Orphans, explanationCodes(call.Explanations), first, last, uint8(0),
 		}})
-		for index, packet := range call.Packets {
+		order := uint16(0)
+		for _, packet := range call.Packets {
+			if _, ok := writtenPackets[packet.ID]; !ok {
+				continue
+			}
 			links = append(links, linkRow{args: []any{
 				snapshot.DeviceID, snapshot.BucketStart, snapshot.ID, snapshot.PolicyRevision,
-				snapshot.ProjectionSeq, call.ID, packet.ID, uint16(index), packet.FirstSeenAt, uint8(0),
+				snapshot.ProjectionSeq, call.ID, packet.ID, order, packet.FirstSeenAt, uint8(0),
 			}})
+			order++
 		}
 	}
 	if err := c.withBatch(ctx, `INSERT INTO collector.custom_antifraud_calls
@@ -637,6 +643,34 @@ func customContractKey(key customradius.CallKey) string {
 		return "session:" + key.AcctSessionID
 	}
 	return ""
+}
+
+// snapshotPacketIDsInBucket mirrors writeCustomPackets hour ownership so call
+// links cannot point at packets that were never inserted for this snapshot.
+func snapshotPacketIDsInBucket(snapshot customprojection.Snapshot) map[uuid.UUID]struct{} {
+	written := make(map[uuid.UUID]struct{}, len(snapshot.Result.Packets))
+	hourEnd := snapshot.BucketStart.Add(time.Hour)
+	for _, packet := range snapshot.Result.Packets {
+		if packet.FirstSeenAt.Before(snapshot.BucketStart) || !packet.FirstSeenAt.Before(hourEnd) {
+			continue
+		}
+		written[packet.ID] = struct{}{}
+	}
+	return written
+}
+
+// callPacketLinkIDs returns packet IDs that would be written as call links for
+// the snapshot (intersection of call.Packets and hour-owned Result.Packets).
+func callPacketLinkIDs(snapshot customprojection.Snapshot, call customradius.Call) []uuid.UUID {
+	written := snapshotPacketIDsInBucket(snapshot)
+	ids := make([]uuid.UUID, 0, len(call.Packets))
+	for _, packet := range call.Packets {
+		if _, ok := written[packet.ID]; !ok {
+			continue
+		}
+		ids = append(ids, packet.ID)
+	}
+	return ids
 }
 
 func explanationCodes(items []customradius.Explanation) []string {

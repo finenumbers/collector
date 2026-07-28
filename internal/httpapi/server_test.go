@@ -71,6 +71,9 @@ func TestWriteAntifraudCallDetailErrorMapping(t *testing.T) {
 		!strings.Contains(internal.Body.String(), "unable to load AntiFraud call card") {
 		t.Fatalf("internal mapping: status=%d body=%s", internal.Code, internal.Body.String())
 	}
+	if !strings.Contains(internal.Body.String(), "clickhouse memory limit exceeded") {
+		t.Fatalf("500 must include redacted detail: body=%s", internal.Body.String())
+	}
 	if strings.Contains(internal.Body.String(), "AntiFraud call not found") {
 		t.Fatal("non-NoRows errors must not be masked as call not found")
 	}
@@ -79,6 +82,12 @@ func TestWriteAntifraudCallDetailErrorMapping(t *testing.T) {
 	writeAntifraudCallDetailError(timeout, context.DeadlineExceeded, deviceID, callID)
 	if timeout.Code != http.StatusGatewayTimeout {
 		t.Fatalf("timeout mapping: status=%d body=%s", timeout.Code, timeout.Body.String())
+	}
+
+	canceled := httptest.NewRecorder()
+	writeAntifraudCallDetailError(canceled, context.Canceled, deviceID, callID)
+	if canceled.Code != http.StatusGatewayTimeout {
+		t.Fatalf("canceled mapping: status=%d body=%s", canceled.Code, canceled.Body.String())
 	}
 }
 

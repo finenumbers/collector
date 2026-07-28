@@ -652,13 +652,16 @@ async function api<T>(path: string, init?: RequestInit & { timeoutMs?: number; r
       },
     })
     if (response.status === 204) return undefined as T
-    const body = await response.json().catch(() => ({})) as { error?: string }
+    const body = await response.json().catch(() => ({})) as { error?: string; detail?: string }
     if (!response.ok) {
       if (response.status === 401 && body.error === 'session expired' &&
         mutating && retryOnCSRF && await restoreCSRF()) {
         return api<T>(path, { ...init, retryOnCSRF: false })
       }
-      throw new Error(body.error || `HTTP ${response.status}`)
+      const message = body.detail
+        ? `${body.error || `HTTP ${response.status}`}: ${body.detail}`
+        : (body.error || `HTTP ${response.status}`)
+      throw new Error(message)
     }
     return body as T
   } finally {
@@ -2063,8 +2066,12 @@ function SharedCallCard({ device, recordID, callID, fallbackCDR, onClose }: {
         </strong></span>
       </div>}
       {antifraud ? <AntiFraudCallBody value={antifraud} cdr={cdr} /> :
-        coverage?.state !== 'not_applicable' &&
-          <p className="warning-text">Пакеты не синтезируются: связанная цепочка AntiFraud отсутствует.</p>}
+        coverage?.state === 'matched'
+          ? <p className="warning-text">Связанная цепочка AntiFraud временно недоступна
+            {coverage.reason?.includes('antifraud_detail_unavailable') ? ' (детали вызова не загрузились)' : ''}.
+            Повторите открытие карточки.</p>
+          : coverage?.state !== 'not_applicable' &&
+            <p className="warning-text">Пакеты не синтезируются: связанная цепочка AntiFraud отсутствует.</p>}
     </>}
   </div>
 }

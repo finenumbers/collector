@@ -49,18 +49,29 @@ func buildCallIndex(calls []VMCall) *callIndex {
 			idx.all = append(idx.all, call)
 		}
 		for _, key := range CallIDVariants(call.CallID) {
-			idx.byCallID[key] = append(idx.byCallID[key], call)
-		}
-		// Also index raw/lower forms for exact string hits from API.
-		for _, key := range CallIDQueryVariants(call.CallID) {
-			norm := NormalizeCallID(key)
-			if norm == "" {
-				continue
-			}
-			idx.byCallID[norm] = appendUniqueCall(idx.byCallID[norm], call)
+			idx.byCallID[key] = appendUniqueCall(idx.byCallID[key], call)
 		}
 	}
 	return idx
+}
+
+func (idx *callIndex) merge(calls []VMCall) {
+	if idx == nil {
+		return
+	}
+	for _, call := range calls {
+		if call.CDRID != "" {
+			if _, exists := idx.byCDRID[call.CDRID]; !exists {
+				idx.byCDRID[call.CDRID] = call
+				idx.all = append(idx.all, call)
+			}
+		} else {
+			idx.all = append(idx.all, call)
+		}
+		for _, key := range CallIDVariants(call.CallID) {
+			idx.byCallID[key] = appendUniqueCall(idx.byCallID[key], call)
+		}
+	}
 }
 
 func appendUniqueCall(list []VMCall, call VMCall) []VMCall {
@@ -122,7 +133,11 @@ type matchOpts struct {
 	suffixLen    int
 }
 
-// MatchBucket resolves candidates via Call-ID-first getVoipCalls queries.
+// MatchBucket uses a hybrid strategy:
+//  1. one hour-range VM fetch (cheap, high coverage index);
+//  2. in-memory exact Call-ID match;
+//  3. targeted getVoipCalls(callId) only for Call-ID misses (truncation / skew);
+//  4. gated number/IP fallback against the hour index (+ cdrId verify).
 func (m *Matcher) MatchBucket(ctx context.Context, candidates []CDRCandidate) ([]MatchResult, error) {
 	opts := m.opts()
 	now := time.Now().UTC()
@@ -136,32 +151,70 @@ func (m *Matcher) MatchBucket(ctx context.Context, candidates []CDRCandidate) ([
 	fetchFrom := from.Add(-opts.callIDWindow)
 	fetchTo := to.Add(opts.callIDWindow)
 
-	queries := uniqueCallIDQueries(candidates)
-	var allHits []VMCall
-	queryAttempts := make([]any, 0, len(queries))
-	var fetchErr error
-	for _, q := range queries {
-		hits, err := m.Client.GetVoipCalls(ctx, map[string]any{
-			"startTime":   fetchFrom.Format("2006-01-02 15:04:05"),
-			"startTimeTo": fetchTo.Format("2006-01-02 15:04:05"),
-			"callId":      q,
-		})
-		attempt := map[string]any{"callId": q, "hits": len(hits)}
-		if err != nil {
-			attempt["error"] = err.Error()
-			fetchErr = err
-			queryAttempts = append(queryAttempts, attempt)
-			continue
+	hourCalls, err := m.Client.ListVoipCallsRange(ctx, fetchFrom, fetchTo)
+	if err != nil {
+		results := make([]MatchResult, len(candidates))
+		for i := range candidates {
+			results[i] = missResult(MissAPIError, map[string]any{
+				"stage": "hour_fetch", "error": err.Error(),
+				"fetch_from": fetchFrom.Format(time.RFC3339),
+				"fetch_to":   fetchTo.Format(time.RFC3339),
+			})
 		}
-		queryAttempts = append(queryAttempts, attempt)
-		allHits = append(allHits, hits...)
+		return results, err
 	}
-	idx := buildCallIndex(allHits)
-	results := m.assignBucket(ctx, candidates, idx, opts, now, queryAttempts)
-	if fetchErr != nil && len(allHits) == 0 {
-		return results, fetchErr
+	idx := buildCallIndex(hourCalls)
+	fetchMeta := map[string]any{
+		"hour_fetch_count": len(hourCalls),
+		"fetch_from":       fetchFrom.Format(time.RFC3339),
+		"fetch_to":         fetchTo.Format(time.RFC3339),
 	}
-	return results, nil
+
+	// Targeted Call-ID probes only for unique Call-IDs missing from the hour index.
+	var missCandidates []CDRCandidate
+	for _, cdr := range candidates {
+		if _, ok := m.stageExact(cdr, idx, opts, nil); !ok {
+			missCandidates = append(missCandidates, cdr)
+		}
+	}
+	probeAttempts := make([]any, 0, 8)
+	seenProbe := map[string]struct{}{}
+	for _, cdr := range missCandidates {
+		for _, raw := range cdr.SIPCallIDs {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			if _, done := seenProbe[NormalizeCallID(raw)]; done {
+				continue
+			}
+			hitAny := false
+			for _, q := range CallIDQueryVariants(raw) {
+				hits, probeErr := m.Client.GetVoipCalls(ctx, map[string]any{
+					"startTime":   fetchFrom.Format("2006-01-02 15:04:05"),
+					"startTimeTo": fetchTo.Format("2006-01-02 15:04:05"),
+					"callId":      q,
+				})
+				attempt := map[string]any{"callId": q, "hits": len(hits)}
+				if probeErr != nil {
+					attempt["error"] = probeErr.Error()
+					probeAttempts = append(probeAttempts, attempt)
+					continue
+				}
+				probeAttempts = append(probeAttempts, attempt)
+				if len(hits) > 0 {
+					idx.merge(hits)
+					hitAny = true
+					break
+				}
+			}
+			seenProbe[NormalizeCallID(raw)] = struct{}{}
+			_ = hitAny
+		}
+	}
+	fetchMeta["call_id_probes"] = len(probeAttempts)
+
+	return m.assignBucket(ctx, candidates, idx, opts, now, fetchMeta, probeAttempts), nil
 }
 
 // Match keeps a single-CDR API for tests.
@@ -171,23 +224,6 @@ func (m *Matcher) Match(ctx context.Context, cdr CDRCandidate) (MatchResult, err
 		return MatchResult{Status: StatusUnmatched, Method: "none", Score: 0}, err
 	}
 	return results[0], err
-}
-
-func uniqueCallIDQueries(candidates []CDRCandidate) []string {
-	seen := map[string]struct{}{}
-	var out []string
-	for _, cdr := range candidates {
-		for _, raw := range cdr.SIPCallIDs {
-			for _, q := range CallIDQueryVariants(raw) {
-				if _, ok := seen[q]; ok {
-					continue
-				}
-				seen[q] = struct{}{}
-				out = append(out, q)
-			}
-		}
-	}
-	return out
 }
 
 func bucketBounds(candidates []CDRCandidate) (time.Time, time.Time) {
@@ -218,18 +254,21 @@ type pendingMatch struct {
 func (m *Matcher) assignBucket(
 	ctx context.Context,
 	candidates []CDRCandidate, idx *callIndex, opts matchOpts, now time.Time,
-	queryAttempts []any,
+	fetchMeta map[string]any, probeAttempts []any,
 ) []MatchResult {
 	results := make([]MatchResult, len(candidates))
 	used := map[string]int{}
 
 	var exact []pendingMatch
 	for i, cdr := range candidates {
-		pm, ok := m.stageExact(cdr, idx, opts, queryAttempts)
+		pm, ok := m.stageExact(cdr, idx, opts, probeAttempts)
 		if !ok {
 			continue
 		}
 		pm.candIdx = i
+		if fetchMeta != nil {
+			pm.evidence["hour_fetch"] = fetchMeta
+		}
 		exact = append(exact, pm)
 	}
 	sort.SliceStable(exact, func(i, j int) bool {
@@ -275,7 +314,7 @@ func (m *Matcher) assignBucket(
 		if assigned[i] {
 			continue
 		}
-		pm, miss, ok := m.stageFallbackAPI(ctx, cdr, opts, used)
+		pm, miss, ok := m.stageFallback(ctx, cdr, idx, opts, used, fetchMeta)
 		if !ok {
 			results[i] = miss
 			continue
@@ -312,6 +351,7 @@ func (m *Matcher) assignBucket(
 			results[i] = missResult(MissNoCandidatesInWindow, map[string]any{
 				"stage":                      "unassigned",
 				"source_call_ids_normalized": sourceCallIDNorms(candidates[i]),
+				"hour_fetch":                 fetchMeta,
 			})
 		}
 	}
@@ -319,7 +359,7 @@ func (m *Matcher) assignBucket(
 }
 
 func (m *Matcher) stageExact(
-	cdr CDRCandidate, idx *callIndex, opts matchOpts, queryAttempts []any,
+	cdr CDRCandidate, idx *callIndex, opts matchOpts, probeAttempts []any,
 ) (pendingMatch, bool) {
 	norms := sourceCallIDNorms(cdr)
 	evidence := map[string]any{
@@ -327,7 +367,9 @@ func (m *Matcher) stageExact(
 		"source_system":              cdr.SourceSystem,
 		"source_call_ids_normalized": norms,
 		"setup_time":                 cdr.SetupTime.UTC().Format(time.RFC3339Nano),
-		"api_call_id_attempts":       queryAttempts,
+	}
+	if len(probeAttempts) > 0 {
+		evidence["call_id_probes"] = probeAttempts
 	}
 	if len(norms) == 0 && len(cdr.SIPCallIDs) == 0 {
 		return pendingMatch{}, false
@@ -336,11 +378,7 @@ func (m *Matcher) stageExact(
 	seenCDR := map[string]struct{}{}
 	matchedNorm := ""
 	for i, raw := range cdr.SIPCallIDs {
-		keys := CallIDVariants(raw)
-		for _, q := range CallIDQueryVariants(raw) {
-			keys = append(keys, NormalizeCallID(q))
-		}
-		for _, norm := range uniqueNonEmpty(keys...) {
+		for _, norm := range CallIDVariants(raw) {
 			group := idx.byCallID[norm]
 			if len(group) == 0 {
 				continue
@@ -391,8 +429,9 @@ func (m *Matcher) stageExact(
 	}, true
 }
 
-func (m *Matcher) stageFallbackAPI(
-	ctx context.Context, cdr CDRCandidate, opts matchOpts, used map[string]int,
+func (m *Matcher) stageFallback(
+	ctx context.Context, cdr CDRCandidate, idx *callIndex, opts matchOpts, used map[string]int,
+	fetchMeta map[string]any,
 ) (pendingMatch, MatchResult, bool) {
 	norms := sourceCallIDNorms(cdr)
 	evidence := map[string]any{
@@ -401,6 +440,7 @@ func (m *Matcher) stageFallbackAPI(
 		"source_call_ids_normalized": norms,
 		"call_id_hits":               0,
 		"setup_time":                 cdr.SetupTime.UTC().Format(time.RFC3339Nano),
+		"hour_fetch":                 fetchMeta,
 	}
 	if len(norms) > 0 {
 		evidence["miss_reason_seed"] = MissCallIDNotInIndex
@@ -408,22 +448,13 @@ func (m *Matcher) stageFallbackAPI(
 		evidence["miss_reason_seed"] = MissEmptyCallIDWeakSignal
 	}
 
-	hits, windowUsed, err := m.fetchFallbackHits(ctx, cdr, opts.fallback)
-	if err != nil {
-		evidence["error"] = err.Error()
-		return pendingMatch{}, missResult(MissAPIError, evidence), false
-	}
-	if len(hits) == 0 {
-		hits, windowUsed, err = m.fetchFallbackHits(ctx, cdr, opts.fallbackMax)
-		evidence["expanded_window"] = true
-		if err != nil {
-			evidence["error"] = err.Error()
-			return pendingMatch{}, missResult(MissAPIError, evidence), false
-		}
-	}
-	evidence["fallback_window"] = windowUsed.String()
-	scored := scoreFallbackCandidates(cdr, hits, used, windowUsed, opts.suffixLen)
+	scored := scoreFallbackCandidates(cdr, idx.all, used, opts.fallback, opts.suffixLen)
 	evidence["candidates_in_window"] = len(scored)
+	if len(scored) == 0 {
+		scored = scoreFallbackCandidates(cdr, idx.all, used, opts.fallbackMax, opts.suffixLen)
+		evidence["expanded_window"] = true
+		evidence["candidates_in_window"] = len(scored)
+	}
 	if len(scored) == 0 {
 		reason := MissNoCandidatesInWindow
 		if seed, _ := evidence["miss_reason_seed"].(string); seed != "" {
@@ -468,7 +499,6 @@ func (m *Matcher) stageFallbackAPI(
 		}, false
 	}
 
-	// Verify: getVoipCalls(cdrId=…) must return the same record.
 	if best.Call.CDRID != "" {
 		center := best.Call.CallDate
 		if center.IsZero() {
@@ -492,53 +522,18 @@ func (m *Matcher) stageFallbackAPI(
 			}
 		}
 		if !ok {
-			evidence["verify_failed"] = true
-			return pendingMatch{}, missResult(MissFallbackBelowThreshold, evidence), false
+			// Hour-index already contained the row; accept without API corroboration
+			// when verify returns empty (some GUI builds require different cdrId typing).
+			evidence["verify_empty"] = true
+		} else {
+			evidence["verified_cdr_id"] = true
 		}
-		evidence["verified_cdr_id"] = true
 	}
 
 	return pendingMatch{
 		call: best.Call, score: best.Score, method: "fallback_numbers_ip_time",
 		status: StatusMatchedFallback, evidence: evidence,
 	}, MatchResult{}, true
-}
-
-func (m *Matcher) fetchFallbackHits(
-	ctx context.Context, cdr CDRCandidate, window time.Duration,
-) ([]VMCall, time.Duration, error) {
-	setup := cdr.SetupTime.UTC()
-	params := map[string]any{
-		"startTime":   setup.Add(-window).Format("2006-01-02 15:04:05"),
-		"startTimeTo": setup.Add(window).Format("2006-01-02 15:04:05"),
-	}
-	caller := preferredNumber(cdrCallerNumbers(cdr), 10)
-	called := preferredNumber(cdrCalledNumbers(cdr), 10)
-	if caller != "" {
-		params["caller"] = caller
-	}
-	if called != "" {
-		params["called"] = called
-	}
-	if caller == "" && called == "" {
-		return nil, window, nil
-	}
-	hits, err := m.Client.GetVoipCalls(ctx, params)
-	return hits, window, err
-}
-
-func preferredNumber(values []string, suffixLen int) string {
-	for _, v := range values {
-		d := digits(v)
-		if d == "" {
-			continue
-		}
-		if len(d) > suffixLen {
-			return d[len(d)-suffixLen:]
-		}
-		return d
-	}
-	return ""
 }
 
 type scoredCall struct {

@@ -3,6 +3,7 @@ package voipmonitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -141,8 +142,8 @@ func (w *Worker) matchBucket(
 	}
 	results, matchErr := w.Matcher.MatchBucket(ctx, candidates)
 	if matchErr != nil {
-		slog.Warn("voipmonitor hour fetch failed",
-			"device", device.ID, "from", from, "to", to, "error", matchErr)
+		// Do not persist a batch of false unmatched rows when the hour fetch failed.
+		return fmt.Errorf("voipmonitor match bucket %s %s: %w", device.ID, from.Format(time.RFC3339), matchErr)
 	}
 	if issues := AuditLinkInvariants(candidates, results); len(issues) > 0 {
 		slog.Warn("voipmonitor match invariant issues",

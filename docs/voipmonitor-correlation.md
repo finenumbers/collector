@@ -27,17 +27,17 @@ when `voipmonitor_call_id` is present (fixes UI without rematch).
 
 1. **Ingest dirty buckets** — hour jobs in Postgres / ClickHouse dirty buckets.
 2. **Discover** — enabling a device fans out recent hours (`CUSTOM_PROJECTION_LOOKBACK`).
-3. **Bucket match (Call-ID-first):**
-   - Collect unique Call-ID **query variants** (raw, lower, strip `@host`) from all
-     unmatched SMG/RTU candidates in the hour.
-   - For each variant: `getVoipCalls(callId, startTime..startTimeTo)` with
-     `CALLID_WINDOW` pad around the hour.
-   - **Stage 1 exact:** map hits back to candidates; multi-leg same Call-ID →
-     `matched_exact` (deterministic leg pick), never `ambiguous`.
-   - **Stage 2 fallback (B2BUA):** only if all Call-ID probes returned 0 hits —
-     `getVoipCalls(caller, called, tight time)` with number/IP gates; **verify** with
-     `getVoipCalls(cdrId=…)`; status `matched_fallback` only.
-   - Unique VM `cdrId` per device-hour; write evidence / `miss_reason`.
+3. **Bucket match (hybrid):**
+   - **Hour fetch:** `getVoipCalls` over `[from-CALLID_WINDOW, to+CALLID_WINDOW]`
+     in 15‑minute slices → in-memory Call-ID index (few API calls per hour).
+   - **Stage 1 exact:** normalized Call-ID lookup in that index; multi-leg →
+     `matched_exact` (not `ambiguous`).
+   - **Miss probes:** only for Call-IDs absent from the hour index — targeted
+     `getVoipCalls(callId=raw|lower|strip@host)` (stops on first hit).
+   - **Stage 2 fallback (B2BUA):** number/IP scoring against the hour set; status
+     `matched_fallback` only.
+   - Unique VM `cdrId` per device-hour; hour-fetch failure fails the job (retry),
+     does not write a batch of false `unmatched`.
 4. **Deep-link:** official `{fcallid:"<vm.callId>"}` (+ optional date bound);
    optional `getShareURL` when `VOIPMONITOR_USE_SHARE_URL=true`.
 5. **Policy revision** — toggle `voipmonitor_enabled` bumps revision and rediscovers.

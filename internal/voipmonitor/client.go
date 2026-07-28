@@ -14,15 +14,86 @@ import (
 )
 
 type Client struct {
-	BaseURL    string
-	User       string
-	Password   string
-	HTTPClient *http.Client
+	BaseURL         string
+	User            string
+	Password        string
+	HTTPClient      *http.Client
+	RateLimitPerSec int
+
+	lastRequest time.Time
+}
+
+func (c *Client) throttle(ctx context.Context) error {
+	if c == nil || c.RateLimitPerSec <= 0 {
+		return nil
+	}
+	minGap := time.Second / time.Duration(c.RateLimitPerSec)
+	if minGap <= 0 {
+		return nil
+	}
+	if !c.lastRequest.IsZero() {
+		wait := minGap - time.Since(c.lastRequest)
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	c.lastRequest = time.Now()
+	return nil
+}
+
+// ListVoipCallsRange fetches VoIPmonitor CDRs for [from,to] in 15-minute slices.
+func (c *Client) ListVoipCallsRange(ctx context.Context, from, to time.Time) ([]VMCall, error) {
+	from = from.UTC()
+	to = to.UTC()
+	if !to.After(from) {
+		to = from.Add(time.Second)
+	}
+	const slice = 15 * time.Minute
+	seen := map[string]struct{}{}
+	var out []VMCall
+	for cursor := from; cursor.Before(to); {
+		next := cursor.Add(slice)
+		if next.After(to) {
+			next = to
+		}
+		hits, err := c.GetVoipCalls(ctx, map[string]any{
+			"startTime":   cursor.Format("2006-01-02 15:04:05"),
+			"startTimeTo": next.Format("2006-01-02 15:04:05"),
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, hit := range hits {
+			key := hit.CDRID
+			if key == "" {
+				key = hit.CallID + "|" + hit.CallDate.Format(time.RFC3339Nano)
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, hit)
+		}
+		if next.Equal(to) {
+			break
+		}
+		cursor = next
+	}
+	return out, nil
 }
 
 func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMCall, error) {
 	if c == nil || strings.TrimSpace(c.BaseURL) == "" {
 		return nil, fmt.Errorf("voipmonitor API URL is not configured")
+	}
+	if err := c.throttle(ctx); err != nil {
+		return nil, err
 	}
 	endpoint, err := apiEndpoint(c.BaseURL)
 	if err != nil {
@@ -40,7 +111,7 @@ func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMC
 
 	httpClient := c.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	req, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()),
@@ -54,7 +125,7 @@ func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMC
 		return nil, err
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return nil, err
 	}

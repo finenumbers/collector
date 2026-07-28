@@ -15,6 +15,15 @@ const (
 	StatusMatchedFallback = "matched_fallback"
 	StatusUnmatched       = "unmatched"
 	StatusAmbiguous       = "ambiguous"
+
+	MissCallIDNotInIndex       = "call_id_not_in_index"
+	MissEmptyCallIDWeakSignal  = "empty_callid_and_weak_signal"
+	MissFallbackBelowThreshold = "fallback_below_threshold"
+	MissFallbackAmbiguous      = "fallback_ambiguous"
+	MissAssignedElsewhere      = "assigned_elsewhere"
+	MissNoCandidatesInWindow   = "no_candidates_in_window"
+	MissFetchGap               = "fetch_gap"
+	MissAPIError               = "api_error"
 )
 
 type CDRCandidate struct {
@@ -30,26 +39,28 @@ type CDRCandidate struct {
 	ConnectDurationSec   *int64
 	Caller               string
 	Called               string
+	CallerNumbers        []string
+	CalledNumbers        []string
 	CallerIP             string
 	CalledIP             string
 	ReleaseCause         *uint16
-	SIPCallIDs           []string // Eltex preferred; Satel trial keys also listed here in priority order
+	SIPCallIDs           []string // priority order; also used for Call-ID index lookup
 	EventMonth           time.Time
 }
 
 type VMCall struct {
-	CDRID            string
-	CallID           string
-	CallDate         time.Time
-	CallEnd          time.Time
-	Duration         int64
-	ConnectDuration  int64
-	Caller           string
-	Called           string
-	SIPCallerIP      string
-	SIPCalledIP      string
-	LastSIPResponse  int64
-	SensorID         int64
+	CDRID           string
+	CallID          string
+	CallDate        time.Time
+	CallEnd         time.Time
+	Duration        int64
+	ConnectDuration int64
+	Caller          string
+	Called          string
+	SIPCallerIP     string
+	SIPCalledIP     string
+	LastSIPResponse int64
+	SensorID        int64
 }
 
 type MatchResult struct {
@@ -60,6 +71,7 @@ type MatchResult struct {
 	CardURL      string
 	EvidenceJSON string
 	MatchedAt    *time.Time
+	MissReason   string
 }
 
 // Link is the persisted VoIPmonitor correlation row written to ClickHouse.

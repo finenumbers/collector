@@ -42,7 +42,7 @@ func (s *Server) AsyncExportRenderer() exportworker.RenderFunc {
 		progress exportworker.ProgressFunc,
 	) (exportworker.RenderResult, error) {
 		if job.Dataset == "antifraud" {
-			if !s.Config.CustomProjectionEnabled {
+			if !s.customProjectionEnabled() {
 				return exportworker.RenderResult{}, errors.New("Custom AntiFraud feature is unavailable")
 			}
 			ready, readyErr := s.Store.CustomAntifraudReady(ctx, job.DeviceID)

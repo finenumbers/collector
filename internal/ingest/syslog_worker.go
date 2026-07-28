@@ -171,7 +171,7 @@ func RunSyslogWorker(
 	nc *nats.Conn,
 	client *analytics.Client,
 	timeResolver DeviceTimeConfigResolver,
-	customProjectionEnabled bool,
+	customProjectionEnabled func() bool,
 ) error {
 	js, err := nc.JetStream()
 	if err != nil {
@@ -250,7 +250,7 @@ func RunSyslogWorker(
 				}
 				return true
 			}
-			if customProjectionEnabled {
+			if customProjectionEnabled != nil && customProjectionEnabled() {
 				enqueuer, ok := timeResolver.(customProjectionEnqueuer)
 				if !ok {
 					for _, item := range active {

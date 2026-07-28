@@ -18,11 +18,22 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).not.toContain('Нераспознанное')
   })
 
+  it('exposes runtime settings editor in system settings', () => {
+    expect(main).toContain('RuntimeSettingsEditor')
+    expect(main).toContain("'/system/runtime-settings'")
+    expect(main).toContain('Параметры')
+    expect(main).toContain('Лимиты контейнеров Docker')
+    expect(main).toContain('container-limits.env')
+  })
+
   it('loads operational diagnostics from the admin endpoint on demand', () => {
     expect(main).toContain('OperationalDiagnosticsPanel')
     expect(main).toContain("'/system/diagnostics'")
     expect(main).toContain('<summary>Диагностика</summary>')
     expect(main).toContain('projectionQueue')
+    expect(main).toContain('projectionDevices')
+    expect(main).toContain('classificationGap')
+    expect(main).toContain('maxDeviceLagSeconds')
     expect(main).toContain('coverageSloMet')
     expect(main).toContain('Orphans / ambiguity')
     expect(main).toContain('Export · queued / running / oldest')

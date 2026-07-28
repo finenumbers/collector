@@ -23,6 +23,7 @@ import (
 	"collector/internal/ingest"
 	"collector/internal/reconciliation"
 	"collector/internal/retention"
+	"collector/internal/runtimesettings"
 	"collector/internal/spool"
 	"collector/internal/store"
 	"collector/internal/voipmonitor"
@@ -104,11 +105,22 @@ func main() {
 		slog.Error("object archive startup failed", "error", err)
 		os.Exit(1)
 	}
-	if err := control.SetCustomProjectionGlobalEnabled(
-		ctx, cfg.CustomProjectionEnabled, cfg.CustomProjectionLookback,
-	); err != nil {
-		slog.Error("custom projection global gate setup failed", "error", err)
+	runtimeDoc, err := control.EnsureRuntimeSettings(ctx, runtimesettings.FromEnv(cfg))
+	if err != nil {
+		slog.Error("runtime settings bootstrap failed", "error", err)
 		os.Exit(1)
+	}
+	runtime := runtimesettings.NewManager(runtimeDoc)
+	applyProjectionGate := func(doc runtimesettings.Document) {
+		if err := control.SetCustomProjectionGlobalEnabled(
+			ctx, doc.Projection.Enabled, runtimesettings.MustDuration(doc.Projection.Lookback),
+		); err != nil {
+			slog.Error("custom projection global gate setup failed", "error", err)
+		}
+	}
+	applyProjectionGate(runtimeDoc)
+	if err := writeContainerLimitsEnv("/data/spool/container-limits.env", runtimeDoc); err != nil {
+		slog.Error("container limits env write failed", "error", err)
 	}
 	retentionReconciler := &retention.Reconciler{
 		Store: control, Analytics: warehouse, Archive: rawArchive,
@@ -165,6 +177,18 @@ func main() {
 		IngressStatusPath:  cfg.IngressStatusPath,
 		ExportHealth:       apiExportHealth,
 		ReconcileRetention: retentionReconciler.RunNow,
+		Runtime:            runtime,
+		OnRuntimeSettingsChanged: func(doc runtimesettings.Document) {
+			applyProjectionGate(doc)
+			if err := writeContainerLimitsEnv("/data/spool/container-limits.env", doc); err != nil {
+				slog.Error("container limits env write failed", "error", err)
+			}
+			slog.Info("runtime settings applied",
+				"projectionEnabled", doc.Projection.Enabled,
+				"projectionThreads", doc.Projection.Threads,
+				"voipmonitorEnabled", doc.Voipmonitor.Enabled,
+				"apiMemory", doc.Containers.APIMemory)
+		},
 	}
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -194,94 +218,29 @@ func main() {
 		}()
 		go func() {
 			errs <- ingest.RunSyslogWorker(
-				ctx, nc, warehouse, control, cfg.CustomProjectionEnabled,
+				ctx, nc, warehouse, control, func() bool {
+					return runtime.Snapshot().Projection.Enabled
+				},
 			)
 		}()
 		go func() {
 			watcher := ingest.CDRWatcher{
 				Root: "/data/cdr", Store: control, Analytics: warehouse, Archive: rawArchive,
-				CoverageThresholds: analytics.CoverageThresholds{
-					ExpectedGrace:   cfg.CoverageExpectedGrace,
-					LateThreshold:   cfg.CoverageLateThreshold,
-					MissingTerminal: cfg.CoverageMissingTerminal,
-					RetryHorizon:    cfg.CoverageRetryHorizon,
+				CoverageThresholdsFn: func() analytics.CoverageThresholds {
+					return coverageThresholds(runtime.Snapshot())
 				},
-				CustomProjectionEnabled: cfg.CustomProjectionEnabled,
+				CustomProjectionEnabledFn: func() bool {
+					return runtime.Snapshot().Projection.Enabled
+				},
 			}
 			errs <- watcher.Run(ctx)
 		}()
 	}
 	hostname, _ := os.Hostname()
-	if runMaintenance && cfg.CustomProjectionEnabled {
-		projectionWorker := &customprojection.Worker{
-			Queue: control, Warehouse: warehouse,
-			Config: customprojection.Config{
-				WorkerID:        fmt.Sprintf("%s-%d-custom", hostname, os.Getpid()),
-				BatchSize:       cfg.CustomProjectionBatchSize,
-				MaxEvents:       cfg.CustomProjectionMaxEvents,
-				Threads:         cfg.CustomProjectionThreads,
-				MaxMemoryBytes:  cfg.CustomProjectionMaxMemoryBytes,
-				Sleep:           cfg.CustomProjectionSleep,
-				Lease:           cfg.CustomProjectionLease,
-				ResponseTimeout: cfg.CustomResponseTimeout,
-				PairingHorizon:  cfg.CustomPairingHorizon,
-				RetryHorizon:    cfg.CustomRetryHorizon,
-				AssemblyIdle:    cfg.CustomAssemblyIdle,
-			},
-		}
-		go func() {
-			if err := projectionWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				errs <- err
-			}
-		}()
-		reconciliationWorker := &reconciliation.Worker{
-			Store: warehouse, Queue: control,
-			Config: reconciliation.Config{
-				ExpectedGrace:   cfg.CoverageExpectedGrace,
-				LateThreshold:   cfg.CoverageLateThreshold,
-				MissingTerminal: cfg.CoverageMissingTerminal,
-				RetryHorizon:    cfg.CoverageRetryHorizon,
-			},
-			Sleep:    cfg.CoverageWorkerSleep,
-			Lease:    cfg.CustomProjectionLease,
-			WorkerID: fmt.Sprintf("%s-%d-reconcile", hostname, os.Getpid()),
-		}
-		go func() {
-			if err := reconciliationWorker.Run(ctx); err != nil &&
-				!errors.Is(err, context.Canceled) {
-				errs <- err
-			}
-		}()
-	}
-	if runMaintenance && cfg.VoipmonitorEnabled {
-		vmWorker := &voipmonitor.Worker{
-			Store: warehouse, Queue: control,
-			Matcher: &voipmonitor.Matcher{
-				Client: &voipmonitor.Client{
-					BaseURL: cfg.VoipmonitorAPIURL, User: cfg.VoipmonitorUser,
-					Password: cfg.VoipmonitorPassword,
-					RateLimitPerSec: cfg.VoipmonitorRateLimitPerSec,
-				},
-				GUIBase:            cfg.VoipmonitorGUIURL,
-				CardTpl:            cfg.VoipmonitorCardURLTemplate,
-				CallIDWindow:       cfg.VoipmonitorCallIDWindow,
-				FallbackWindow:     cfg.VoipmonitorFallbackWindow,
-				FallbackWindowMax:  cfg.VoipmonitorFallbackWindowMax,
-				MinScore:           cfg.VoipmonitorMinScore,
-				DisambiguityMargin: cfg.VoipmonitorDisambiguityMargin,
-				NumberSuffixLen:    cfg.VoipmonitorNumberSuffixLen,
-				UseShareURL:        cfg.VoipmonitorUseShareURL,
-			},
-			Sleep:    cfg.VoipmonitorWorkerSleep,
-			Lease:    cfg.VoipmonitorLease,
-			Lookback: cfg.CustomProjectionLookback,
-			WorkerID: fmt.Sprintf("%s-%d-voipmonitor", hostname, os.Getpid()),
-		}
-		go func() {
-			if err := vmWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				errs <- err
-			}
-		}()
+	if runMaintenance {
+		go runProjectionSupervisor(ctx, runtime, control, warehouse, hostname, errs)
+		go runReconciliationSupervisor(ctx, runtime, control, warehouse, hostname, errs)
+		go runVoipmonitorSupervisor(ctx, runtime, control, warehouse, hostname, errs)
 	}
 	if runExport {
 		exportWorker := &exportworker.Worker{
@@ -490,4 +449,218 @@ func openArchive(ctx context.Context, cfg config.Config) (*archive.Archive, erro
 		}
 	}
 	return nil, err
+}
+
+func runProjectionSupervisor(
+	ctx context.Context,
+	runtime *runtimesettings.Manager,
+	control *store.Store,
+	warehouse *analytics.Client,
+	hostname string,
+	errs chan<- error,
+) {
+	workerID := fmt.Sprintf("%s-%d-custom", hostname, os.Getpid())
+	var lastFP string
+	for ctx.Err() == nil {
+		doc := runtime.Snapshot()
+		fp := fmt.Sprintf("%t/%d", doc.Projection.Enabled, doc.Projection.Threads)
+		if !doc.Projection.Enabled {
+			lastFP = fp
+			if !sleepContext(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		if fp == lastFP {
+			if !sleepContext(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		lastFP = fp
+		runCtx, cancel := context.WithCancel(ctx)
+		worker := &customprojection.Worker{
+			Queue: control, Warehouse: warehouse,
+			ConfigFn: func() customprojection.Config {
+				return projectionConfig(runtime.Snapshot(), workerID)
+			},
+		}
+		done := make(chan error, 1)
+		go func() { done <- worker.Run(runCtx) }()
+		for ctx.Err() == nil {
+			next := runtime.Snapshot()
+			nextFP := fmt.Sprintf("%t/%d", next.Projection.Enabled, next.Projection.Threads)
+			if nextFP != lastFP {
+				cancel()
+				<-done
+				break
+			}
+			select {
+			case err := <-done:
+				cancel()
+				if err != nil && !errors.Is(err, context.Canceled) {
+					errs <- err
+					return
+				}
+				lastFP = ""
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				cancel()
+				<-done
+				return
+			}
+		}
+		cancel()
+	}
+}
+
+func runReconciliationSupervisor(
+	ctx context.Context,
+	runtime *runtimesettings.Manager,
+	control *store.Store,
+	warehouse *analytics.Client,
+	hostname string,
+	errs chan<- error,
+) {
+	workerID := fmt.Sprintf("%s-%d-reconcile", hostname, os.Getpid())
+	var lastFP string
+	for ctx.Err() == nil {
+		doc := runtime.Snapshot()
+		fp := fmt.Sprintf("%t/%s/%s/%s/%s/%s/%s",
+			doc.Projection.Enabled, doc.Coverage.WorkerSleep, doc.Projection.Lease,
+			doc.Coverage.ExpectedGrace, doc.Coverage.LateThreshold,
+			doc.Coverage.MissingTerminal, doc.Coverage.RetryHorizon)
+		if !doc.Projection.Enabled {
+			lastFP = fp
+			if !sleepContext(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		if fp == lastFP {
+			if !sleepContext(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		lastFP = fp
+		runCtx, cancel := context.WithCancel(ctx)
+		snap := runtime.Snapshot()
+		worker := &reconciliation.Worker{
+			Store: warehouse, Queue: control,
+			Config:   reconciliationConfig(snap),
+			Sleep:    runtimesettings.MustDuration(snap.Coverage.WorkerSleep),
+			Lease:    runtimesettings.MustDuration(snap.Projection.Lease),
+			WorkerID: workerID,
+		}
+		done := make(chan error, 1)
+		go func() { done <- worker.Run(runCtx) }()
+		for ctx.Err() == nil {
+			next := runtime.Snapshot()
+			nextFP := fmt.Sprintf("%t/%s/%s/%s/%s/%s/%s",
+				next.Projection.Enabled, next.Coverage.WorkerSleep, next.Projection.Lease,
+				next.Coverage.ExpectedGrace, next.Coverage.LateThreshold,
+				next.Coverage.MissingTerminal, next.Coverage.RetryHorizon)
+			if nextFP != lastFP {
+				cancel()
+				<-done
+				break
+			}
+			select {
+			case err := <-done:
+				cancel()
+				if err != nil && !errors.Is(err, context.Canceled) {
+					errs <- err
+					return
+				}
+				lastFP = ""
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				cancel()
+				<-done
+				return
+			}
+		}
+		cancel()
+	}
+}
+
+func runVoipmonitorSupervisor(
+	ctx context.Context,
+	runtime *runtimesettings.Manager,
+	control *store.Store,
+	warehouse *analytics.Client,
+	hostname string,
+	errs chan<- error,
+) {
+	workerID := fmt.Sprintf("%s-%d-voipmonitor", hostname, os.Getpid())
+	var lastFP string
+	for ctx.Err() == nil {
+		doc := runtime.Snapshot()
+		fp := runtimesettings.FingerprintWorkers(doc)
+		if !doc.Voipmonitor.Enabled {
+			lastFP = fp
+			if !sleepContext(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		if fp == lastFP {
+			if !sleepContext(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		lastFP = fp
+		runCtx, cancel := context.WithCancel(ctx)
+		snap := runtime.Snapshot()
+		worker := &voipmonitor.Worker{
+			Store: warehouse, Queue: control,
+			Matcher:  voipmonitorMatcher(snap),
+			Sleep:    runtimesettings.MustDuration(snap.Voipmonitor.WorkerSleep),
+			Lease:    runtimesettings.MustDuration(snap.Voipmonitor.Lease),
+			Lookback: runtimesettings.MustDuration(snap.Projection.Lookback),
+			WorkerID: workerID,
+		}
+		done := make(chan error, 1)
+		go func() { done <- worker.Run(runCtx) }()
+		for ctx.Err() == nil {
+			nextFP := runtimesettings.FingerprintWorkers(runtime.Snapshot())
+			if nextFP != lastFP {
+				cancel()
+				<-done
+				break
+			}
+			select {
+			case err := <-done:
+				cancel()
+				if err != nil && !errors.Is(err, context.Canceled) {
+					errs <- err
+					return
+				}
+				lastFP = ""
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				cancel()
+				<-done
+				return
+			}
+		}
+		cancel()
+	}
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func writeContainerLimitsEnv(path string, doc runtimesettings.Document) error {
+	return os.WriteFile(path, []byte(doc.Containers.ComposeEnvFragment()), 0o644)
 }

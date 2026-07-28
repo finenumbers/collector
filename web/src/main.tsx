@@ -46,6 +46,62 @@ type RetentionPolicy = {
   lastAppliedAt?: string
   lastError?: string
 }
+type RuntimeSettings = {
+  projection: {
+    enabled: boolean
+    lookback: string
+    batchSize: number
+    maxEvents: number
+    threads: number
+    maxMemoryBytes: number
+    sleep: string
+    lease: string
+    responseTimeout: string
+    pairingHorizon: string
+    retryHorizon: string
+    assemblyIdle: string
+  }
+  coverage: {
+    expectedGrace: string
+    lateThreshold: string
+    missingTerminal: string
+    retryHorizon: string
+    workerSleep: string
+  }
+  voipmonitor: {
+    enabled: boolean
+    apiUrl: string
+    user: string
+    password?: string
+    passwordSet?: boolean
+    guiUrl: string
+    cardUrlTemplate: string
+    callIdWindow: string
+    fallbackWindow: string
+    fallbackWindowMax: string
+    workerSleep: string
+    lease: string
+    minScore: number
+    disambiguityMargin: number
+    numberSuffixLen: number
+    rateLimitPerSec: number
+    useShareUrl: boolean
+  }
+  platform: {
+    clickhouseAdmissionCapacity: number
+    exportPageSize: number
+  }
+  containers: {
+    apiCpus: string
+    apiMemory: string
+    exportCpus: string
+    exportMemory: string
+    maintenanceCpus: string
+    maintenanceMemory: string
+    appCpus: string
+    appMemory: string
+  }
+}
 type DashboardDevice = {
   id: string
   name: string
@@ -184,6 +240,25 @@ type CdrIngestFile = {
   receivedAt: string
   processedAt?: string
 }
+type ProjectionDeviceDiagnostics = {
+  deviceId: string
+  name: string
+  depth: number
+  failed: number
+  backfilling: number
+  oldestAge: number
+  watermarkState: string
+  watermarkLagSeconds: number
+  lastError?: string
+  syslogLagSeconds: number
+  afCallLagSeconds: number
+  activatedLagSeconds: number
+  afAuthHeaders6h: number
+  xpgkHeaders6h: number
+  classificationGap: boolean
+  projectionLagSeconds: number
+  projectionSloMet: boolean
+}
 type OperationalDiagnostics = {
   generatedAt: string
   customProjectionEnabled: boolean
@@ -193,7 +268,11 @@ type OperationalDiagnostics = {
     failed: number
     backfilling: number
     lagSeconds: number
+    maxDeviceLagSeconds?: number
+    anyDeviceFailed?: boolean
+    anyClassificationGap?: boolean
   }
+  projectionDevices?: ProjectionDeviceDiagnostics[]
   reconciliationQueue: {
     depth: number
     oldestAge: number
@@ -201,6 +280,7 @@ type OperationalDiagnostics = {
   }
   derived: {
     projectionLagSeconds: number
+    maxDeviceProjectionLagSeconds?: number
     calls: number
     packets: number
     orphans: number
@@ -208,6 +288,8 @@ type OperationalDiagnostics = {
     coverage: Record<string, number>
     coverageSloMet: boolean
     projectionSloMet: boolean
+    anyDeviceFailed?: boolean
+    anyClassificationGap?: boolean
   }
   exports: {
     queued: number
@@ -898,14 +980,14 @@ function DashboardPage({ devices, onSelectDevice }: {
     </div>
     <section className="dashboard-panel fleet-panel">
       <div className="panel-heading"><div><h4>Софтсвитчи</h4></div></div>
-      <table className="table-fill"><thead><tr>
+      <table className="table-fit"><thead><tr>
         <th title="Софтсвитч">Софтсвитч</th><th title="Шаблон / timezone">Шаблон / timezone</th>
         <th title="Статус">Статус</th>
         <th title="Вызовы">Вызовы</th><th title="Успешные">Успешные</th>
         <th title="Неуспешные">Неуспешные</th><th title="ASR">ASR</th>
         <th title="Средний разговор">Средний разговор</th><th title="CDR-файлы">CDR-файлы</th>
         <th title="Объём файлов">Объём файлов</th>
-        <th title="Последний CDR">Последний CDR</th></tr></thead>
+        <th className="col-flex" title="Последний CDR">Последний CDR</th></tr></thead>
         <tbody>{softswitchRows.map((row) => {
           const typed = sourceCapabilities(row).typedCdr
           return <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
@@ -922,7 +1004,8 @@ function DashboardPage({ devices, onSelectDevice }: {
             <td className="right">{typed ? formatDurationAverage(row.metrics.averageTalkMs) : '—'}</td>
             <td className="right">{formatCount(row.fileMetrics?.files)}</td>
             <td className="right">{formatBytes(row.fileMetrics?.bytes)}</td>
-            <td className="mono">{formatTime(row.fileMetrics?.latestAt || row.freshness.latestCdrAt, 'UTC')}</td>
+            <td className="mono col-flex">
+              {formatTime(row.fileMetrics?.latestAt || row.freshness.latestCdrAt, 'UTC')}</td>
           </tr>
         })}</tbody></table>
       {softswitchRows.length === 0 && <div className="table-empty">
@@ -947,13 +1030,15 @@ function DashboardPage({ devices, onSelectDevice }: {
     </div>
     <section className="dashboard-panel fleet-panel">
       <div className="panel-heading"><div><h4>Оборудование</h4></div></div>
-      <table className="table-fill"><thead><tr>
+      <table className="table-fit"><thead><tr>
         <th title="Оборудование">Оборудование</th>
         <th title="Шаблон / timezone">Шаблон / timezone</th><th title="Статус">Статус</th>
         <th title="Вызовы">Вызовы</th><th title="Неуспешные">Неуспешные</th>
         <th title="AntiFraud / reject">AntiFraud / reject</th>
-        <th title="Последний приём Syslog">Последний приём Syslog</th>
-        <th title="Revision">Revision</th></tr></thead>
+        <th title="Revision">Revision</th>
+        <th className="col-flex-pair" title="Последний CDR">Последний CDR</th>
+        <th className="col-flex-pair" title="Последний приём Syslog">Последний приём Syslog</th>
+      </tr></thead>
         <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
           <td><strong>{row.name}</strong><small>{row.model}</small></td>
           <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}
@@ -964,11 +1049,14 @@ function DashboardPage({ devices, onSelectDevice }: {
           <td className="right">{formatCount(row.metrics.failedCalls)}</td>
           <td className="right">{row.antifraudEnabled
             ? `${formatCount(row.metrics.antifraud)} / ${formatCount(row.metrics.antifraudRejected)}` : '—'}</td>
-          <td className="mono">
+          <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
+          <td className="mono col-flex-pair">
+            {formatTime(row.freshness.latestCdrAt, row.activeTimezone || row.timezone || 'UTC')}
+          </td>
+          <td className="mono col-flex-pair">
             {formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')}
             <small>{row.activeTimezone || row.timezone || 'UTC'}</small>
           </td>
-          <td>{row.revision.aligned ? 'aligned' : 'rebuild'}</td>
         </tr>)}</tbody></table>
       {equipmentRows.length === 0 && <div className="table-empty">
         <strong>Оборудование ещё не добавлено</strong>
@@ -1495,6 +1583,7 @@ function OperationalDiagnosticsPanel() {
   const queue = value?.projectionQueue
   const derived = value?.derived
   const coverage = derived?.coverage || {}
+  const devices = value?.projectionDevices || []
   return <details className="diagnostic-panel" onToggle={(event) => {
     if ((event.currentTarget as HTMLDetailsElement).open) load()
   }}>
@@ -1506,12 +1595,20 @@ function OperationalDiagnosticsPanel() {
       <span>Очередь projection · depth / lag: <strong>
         {formatCount(queue?.depth)} / {formatCount(queue?.lagSeconds ?? derived?.projectionLagSeconds)} с
       </strong></span>
+      <span>Очередь projection · max device lag / failed: <strong>
+        {formatCount(queue?.maxDeviceLagSeconds ?? derived?.maxDeviceProjectionLagSeconds)} с /
+        {formatCount(queue?.failed)}
+      </strong></span>
       <span>Очередь projection · failed / backfill: <strong>
         {formatCount(queue?.failed)} / {formatCount(queue?.backfilling)}
       </strong></span>
       <span>Очередь projection · oldest: <strong>{formatDurationNanos(queue?.oldestAge)}</strong></span>
       <span>SLO projection / coverage: <strong>
         {derived?.projectionSloMet ? 'ok' : 'breach'} / {derived?.coverageSloMet ? 'ok' : 'breach'}
+      </strong></span>
+      <span>Classification gap / device failed: <strong>
+        {derived?.anyClassificationGap || queue?.anyClassificationGap ? 'yes' : 'no'} /
+        {derived?.anyDeviceFailed || queue?.anyDeviceFailed ? 'yes' : 'no'}
       </strong></span>
       <span>Calls / packets: <strong>{formatCount(derived?.calls)} / {formatCount(derived?.packets)}</strong></span>
       <span>Orphans / ambiguity: <strong>
@@ -1533,6 +1630,16 @@ function OperationalDiagnosticsPanel() {
         {formatDurationNanos(value.exports?.oldestAge)}
       </strong></span>
       <span>Снимок: <strong>{formatTime(value.generatedAt, 'UTC')}</strong></span>
+      {devices.length > 0 && <div className="diagnostic-device-list">
+        <strong>Projection по устройствам</strong>
+        {devices.map((device) => <span key={device.deviceId}>
+          {device.name}: lag {formatCount(device.projectionLagSeconds)} с ·
+          failed {formatCount(device.failed)} ·
+          SLO {device.projectionSloMet ? 'ok' : 'breach'}
+          {device.classificationGap ? ' · classification gap' : ''}
+          {device.lastError ? ` · ${device.lastError}` : ''}
+        </span>)}
+      </div>}
     </div>}
   </details>
 }
@@ -1549,9 +1656,11 @@ function AntifraudTable({ rows, timezone, onSelect }: {
   timezone: string
   onSelect: (row: AntifraudRow) => void
 }) {
-  return <table className="antifraud-table table-fill"><thead><tr>
+  return <table className="antifraud-table table-fit"><thead><tr>
     <th>Начало</th><th>Номер A</th><th>Номер B</th><th>Фазы</th><th>Цепочка</th><th>Статус</th>
-    <th>Пакеты</th><th>Покрытие CDR</th><th>Acct-Session-Id</th><th>H323 Conf ID</th>
+    <th>Пакеты</th><th>Покрытие CDR</th>
+    <th className="col-flex-pair">Acct-Session-Id</th>
+    <th className="col-flex-pair">H323 Conf ID</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.callId}
     onClick={() => onSelect(row)}>
     <td className="mono">{formatTime(row.firstSeenAt, timezone)}</td>
@@ -1562,8 +1671,8 @@ function AntifraudTable({ rows, timezone, onSelect }: {
     <td><RadiusOutcomeBadge outcome={row.radiusOutcome} lifecycle={row.status} /></td>
     <td className="right">{row.packetCount}</td>
     <td><CoverageBadge coverage={row.coverage} /></td>
-    <td className="mono">{row.acctSessionId || '—'}</td>
-    <td className="mono">{row.h323ConfId || '—'}</td>
+    <td className="mono col-flex-pair">{row.acctSessionId || '—'}</td>
+    <td className="mono col-flex-pair">{row.h323ConfId || '—'}</td>
   </tr>)}</tbody></table>
 }
 
@@ -1616,15 +1725,20 @@ function CallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
   onSelect: (row: CallRow) => void
   fillWidth?: boolean
 }) {
-  return <table className={['eltex-cdr-table', fillWidth ? 'table-fill' : ''].filter(Boolean).join(' ')}>
+  const flexKey = fillWidth ? 'releaseInfo' : ''
+  return <table className={['eltex-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
-    {columns.map((column) => <th key={column.key} title={column.header}>{column.header}</th>)}
+    {columns.map((column) => <th key={column.key} title={column.header}
+      className={column.key === flexKey ? 'col-flex' : undefined}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId}
     className={`outcome-row outcome-${cdrOutcome(row.releaseCause)}`}
     onClick={() => onSelect(row)}>
     {columns.map((column) => <td key={column.key}
-      className={[column.mono ? 'mono' : '', column.align === 'right' ? 'right' : '']
-        .filter(Boolean).join(' ') || undefined}>
+      className={[
+        column.mono ? 'mono' : '',
+        column.align === 'right' ? 'right' : '',
+        column.key === flexKey ? 'col-flex' : '',
+      ].filter(Boolean).join(' ') || undefined}>
       {eltexCallCell(row, column, timezone)}
     </td>)}
   </tr>)}</tbody></table>
@@ -1689,16 +1803,21 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
   onSelect: (row: SatelCdrRow) => void
   fillWidth?: boolean
 }) {
-  return <table className={['satel-cdr-table', fillWidth ? 'table-fill' : ''].filter(Boolean).join(' ')}>
+  const flexKey = fillWidth ? 'disconnectText' : ''
+  return <table className={['satel-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
-    {columns.map((column) => <th key={column.key} title={column.header}>{column.header}</th>)}
+    {columns.map((column) => <th key={column.key} title={column.header}
+      className={column.key === flexKey ? 'col-flex' : undefined}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => {
     const outcome = satelCallOutcome(row)
     return <tr key={row.recordId} className={`outcome-row outcome-${outcome}`}
       onClick={() => onSelect(row)}>
       {columns.map((column) => <td key={column.key}
-        className={[column.mono ? 'mono' : '', column.align === 'right' ? 'right' : '']
-          .filter(Boolean).join(' ') || undefined}>
+        className={[
+          column.mono ? 'mono' : '',
+          column.align === 'right' ? 'right' : '',
+          column.key === flexKey ? 'col-flex' : '',
+        ].filter(Boolean).join(' ') || undefined}>
         {satelCallCell(row, column, timezone)}
       </td>)}
     </tr>
@@ -2049,7 +2168,7 @@ function EventsTable({ rows, timezone, onSelect }: {
 }) {
   return <table className="syslog-table"><thead><tr>
     <th>Получено</th><th>Источник</th><th>Transport</th>
-    <th className="col-payload">Payload</th><th>SHA-256</th></tr></thead>
+    <th className="col-flex">Payload</th><th>SHA-256</th></tr></thead>
     <tbody>{rows.map((row) => <EventTableRow key={row.eventId} row={row}
       timezone={timezone} onSelect={onSelect} />)}</tbody></table>
 }
@@ -2064,7 +2183,8 @@ function EventTableRow({ row, timezone, onSelect, nested }: {
     <td className="mono">{formatTime(row.receivedAt, timezone)}</td>
     <td className="mono">{row.sourceIp}:{row.sourcePort}</td>
     <td><span className="tag">{row.transport}</span></td>
-    <td className={`message-cell ${nested ? 'thread-fragment' : ''}`}>{redactDisplayText(row.payload) || '—'}</td>
+    <td className={`message-cell col-flex ${nested ? 'thread-fragment' : ''}`}>
+      {redactDisplayText(row.payload) || '—'}</td>
     <td className="mono">{row.payloadSha256}</td>
   </tr>
 }
@@ -2326,10 +2446,11 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
 }
 
 function SystemSettingsPage({ user }: { user: User }) {
-  const [tab, setTab] = useState<'system' | 'users' | 'retention'>('system')
+  const [tab, setTab] = useState<'system' | 'users' | 'retention' | 'runtime'>('system')
   const [info, setInfo] = useState<SystemInfo | null>(null)
   const [users, setUsers] = useState<ManagedUser[]>([])
   const [retention, setRetention] = useState<RetentionPolicy[]>([])
+  const [runtime, setRuntime] = useState<RuntimeSettings | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [busyUserID, setBusyUserID] = useState('')
@@ -2341,12 +2462,14 @@ function SystemSettingsPage({ user }: { user: User }) {
     try {
       setInfo(await api<SystemInfo>('/system/info'))
       if (user.role === 'admin') {
-        const [userResponse, retentionResponse] = await Promise.all([
+        const [userResponse, retentionResponse, runtimeResponse] = await Promise.all([
           api<{ items: ManagedUser[] }>('/system/users'),
           api<{ items: RetentionPolicy[] }>('/system/retention'),
+          api<{ settings: RuntimeSettings }>('/system/runtime-settings'),
         ])
         setUsers(userResponse.items || [])
         setRetention(retentionResponse.items || [])
+        setRuntime(runtimeResponse.settings)
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Ошибка загрузки настроек')
@@ -2362,6 +2485,9 @@ function SystemSettingsPage({ user }: { user: User }) {
       void api<{ items: RetentionPolicy[] }>('/system/retention')
         .then((response) => setRetention(response.items || []))
         .catch((reason) => setError(reason instanceof Error ? reason.message : 'Ошибка загрузки retention'))
+      void api<{ settings: RuntimeSettings }>('/system/runtime-settings')
+        .then((response) => setRuntime(response.settings))
+        .catch((reason) => setError(reason instanceof Error ? reason.message : 'Ошибка загрузки параметров'))
     }
   }, [user.role])
   async function create(event: FormEvent) {
@@ -2459,6 +2585,8 @@ function SystemSettingsPage({ user }: { user: User }) {
       </button>
       {canManageUsers(user.role) && <button className={tab === 'users' ? 'active' : ''}
         onClick={() => setTab('users')}>Пользователи</button>}
+      {canManageUsers(user.role) && <button className={tab === 'runtime' ? 'active' : ''}
+        onClick={() => setTab('runtime')}>Параметры</button>}
       {canManageUsers(user.role) && <button className={tab === 'retention' ? 'active' : ''}
         onClick={() => setTab('retention')}>Хранение</button>}
     </nav>
@@ -2529,6 +2657,29 @@ function SystemSettingsPage({ user }: { user: User }) {
           <button className="primary" disabled={busy}>Добавить</button>
         </form>
       </section>}
+      {tab === 'runtime' && canManageUsers(user.role) && runtime && (
+        <RuntimeSettingsEditor
+          key={JSON.stringify(runtime)}
+          value={runtime}
+          busy={busy}
+          onSave={async (next) => {
+            setBusy(true)
+            setError('')
+            try {
+              const response = await api<{ settings: RuntimeSettings }>('/system/runtime-settings', {
+                method: 'PATCH',
+                body: JSON.stringify(next),
+              })
+              setRuntime(response.settings)
+            } catch (reason) {
+              setError(reason instanceof Error ? reason.message : 'Ошибка сохранения параметров')
+              throw reason
+            } finally {
+              setBusy(false)
+            }
+          }}
+        />
+      )}
       {tab === 'retention' && canManageUsers(user.role) && <section>
         <div className="page-heading"><div><h3>Хранение данных</h3>
           <p>Новый срок применяется сразу ко всем ресурсам выбранного класса.</p></div></div>
@@ -2543,6 +2694,181 @@ function SystemSettingsPage({ user }: { user: User }) {
     {resetUser && <UserPasswordReset user={resetUser}
       disabled={busyUserID === resetUser.id} onClose={() => setResetUser(null)}
       onReset={(password) => update(resetUser, {}, password)} />}
+  </section>
+}
+
+function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
+  return {
+    ...value,
+    containers: value.containers || {
+      apiCpus: '2', apiMemory: '2G', exportCpus: '2', exportMemory: '2G',
+      maintenanceCpus: '2', maintenanceMemory: '2G', appCpus: '4', appMemory: '4G',
+    },
+  }
+}
+
+function RuntimeSettingsEditor({ value, busy, onSave }: {
+  value: RuntimeSettings
+  busy: boolean
+  onSave: (next: RuntimeSettings) => Promise<void>
+}) {
+  const [form, setForm] = useState(() => normalizeRuntimeSettings(value))
+  const [password, setPassword] = useState('')
+  const updateProjection = (patch: Partial<RuntimeSettings['projection']>) =>
+    setForm((current) => ({ ...current, projection: { ...current.projection, ...patch } }))
+  const updateCoverage = (patch: Partial<RuntimeSettings['coverage']>) =>
+    setForm((current) => ({ ...current, coverage: { ...current.coverage, ...patch } }))
+  const updateVoip = (patch: Partial<RuntimeSettings['voipmonitor']>) =>
+    setForm((current) => ({ ...current, voipmonitor: { ...current.voipmonitor, ...patch } }))
+  const updatePlatform = (patch: Partial<RuntimeSettings['platform']>) =>
+    setForm((current) => ({ ...current, platform: { ...current.platform, ...patch } }))
+  const updateContainers = (patch: Partial<RuntimeSettings['containers']>) =>
+    setForm((current) => ({ ...current, containers: { ...current.containers, ...patch } }))
+  return <section className="runtime-settings">
+    <div className="page-heading"><div><h3>Операционные параметры</h3>
+      <p>AntiFraud projection, coverage, VoIPmonitor и export. Значения хранятся в БД и
+        применяются без правки .env (секреты/инфраструктура остаются в .env).</p></div></div>
+
+    <article className="runtime-card">
+      <h4>Custom AntiFraud projection</h4>
+      <label className="checkbox-row"><input type="checkbox" checked={form.projection.enabled}
+        onChange={(e) => updateProjection({ enabled: e.target.checked })} /> Включена</label>
+      <div className="runtime-grid">
+        <label>Lookback<input value={form.projection.lookback}
+          onChange={(e) => updateProjection({ lookback: e.target.value })} /></label>
+        <label>Batch size<input type="number" value={form.projection.batchSize}
+          onChange={(e) => updateProjection({ batchSize: Number(e.target.value) })} /></label>
+        <label>Max events / hour<input type="number" value={form.projection.maxEvents}
+          onChange={(e) => updateProjection({ maxEvents: Number(e.target.value) })} /></label>
+        <label>Threads<input type="number" min={1} max={16} value={form.projection.threads}
+          onChange={(e) => updateProjection({ threads: Number(e.target.value) })} /></label>
+        <label>Max memory (bytes)<input type="number" value={form.projection.maxMemoryBytes}
+          onChange={(e) => updateProjection({ maxMemoryBytes: Number(e.target.value) })} /></label>
+        <label>Sleep<input value={form.projection.sleep}
+          onChange={(e) => updateProjection({ sleep: e.target.value })} /></label>
+        <label>Lease<input value={form.projection.lease}
+          onChange={(e) => updateProjection({ lease: e.target.value })} /></label>
+        <label>Response timeout<input value={form.projection.responseTimeout}
+          onChange={(e) => updateProjection({ responseTimeout: e.target.value })} /></label>
+        <label>Pairing horizon<input value={form.projection.pairingHorizon}
+          onChange={(e) => updateProjection({ pairingHorizon: e.target.value })} /></label>
+        <label>Retry horizon<input value={form.projection.retryHorizon}
+          onChange={(e) => updateProjection({ retryHorizon: e.target.value })} /></label>
+        <label>Assembly idle<input value={form.projection.assemblyIdle}
+          onChange={(e) => updateProjection({ assemblyIdle: e.target.value })} /></label>
+      </div>
+    </article>
+
+    <article className="runtime-card">
+      <h4>CDR ↔ AntiFraud coverage</h4>
+      <div className="runtime-grid">
+        <label>Expected grace<input value={form.coverage.expectedGrace}
+          onChange={(e) => updateCoverage({ expectedGrace: e.target.value })} /></label>
+        <label>Late threshold<input value={form.coverage.lateThreshold}
+          onChange={(e) => updateCoverage({ lateThreshold: e.target.value })} /></label>
+        <label>Missing terminal<input value={form.coverage.missingTerminal}
+          onChange={(e) => updateCoverage({ missingTerminal: e.target.value })} /></label>
+        <label>Retry horizon<input value={form.coverage.retryHorizon}
+          onChange={(e) => updateCoverage({ retryHorizon: e.target.value })} /></label>
+        <label>Worker sleep<input value={form.coverage.workerSleep}
+          onChange={(e) => updateCoverage({ workerSleep: e.target.value })} /></label>
+      </div>
+    </article>
+
+    <article className="runtime-card">
+      <h4>VoIPmonitor</h4>
+      <label className="checkbox-row"><input type="checkbox" checked={form.voipmonitor.enabled}
+        onChange={(e) => updateVoip({ enabled: e.target.checked })} /> Включена</label>
+      <div className="runtime-grid">
+        <label>API URL<input value={form.voipmonitor.apiUrl}
+          onChange={(e) => updateVoip({ apiUrl: e.target.value })} /></label>
+        <label>User<input value={form.voipmonitor.user}
+          onChange={(e) => updateVoip({ user: e.target.value })} /></label>
+        <label>Password<input type="password"
+          placeholder={form.voipmonitor.passwordSet ? '•••••••• (не менять)' : 'пароль'}
+          value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+        <label>GUI URL<input value={form.voipmonitor.guiUrl}
+          onChange={(e) => updateVoip({ guiUrl: e.target.value })} /></label>
+        <label>Card URL template<input value={form.voipmonitor.cardUrlTemplate}
+          onChange={(e) => updateVoip({ cardUrlTemplate: e.target.value })} /></label>
+        <label>Call-ID window<input value={form.voipmonitor.callIdWindow}
+          onChange={(e) => updateVoip({ callIdWindow: e.target.value })} /></label>
+        <label>Fallback window<input value={form.voipmonitor.fallbackWindow}
+          onChange={(e) => updateVoip({ fallbackWindow: e.target.value })} /></label>
+        <label>Fallback window max<input value={form.voipmonitor.fallbackWindowMax}
+          onChange={(e) => updateVoip({ fallbackWindowMax: e.target.value })} /></label>
+        <label>Worker sleep<input value={form.voipmonitor.workerSleep}
+          onChange={(e) => updateVoip({ workerSleep: e.target.value })} /></label>
+        <label>Lease<input value={form.voipmonitor.lease}
+          onChange={(e) => updateVoip({ lease: e.target.value })} /></label>
+        <label>Min score<input type="number" value={form.voipmonitor.minScore}
+          onChange={(e) => updateVoip({ minScore: Number(e.target.value) })} /></label>
+        <label>Disambiguity margin<input type="number" value={form.voipmonitor.disambiguityMargin}
+          onChange={(e) => updateVoip({ disambiguityMargin: Number(e.target.value) })} /></label>
+        <label>Number suffix len<input type="number" value={form.voipmonitor.numberSuffixLen}
+          onChange={(e) => updateVoip({ numberSuffixLen: Number(e.target.value) })} /></label>
+        <label>Rate limit / sec<input type="number" value={form.voipmonitor.rateLimitPerSec}
+          onChange={(e) => updateVoip({ rateLimitPerSec: Number(e.target.value) })} /></label>
+      </div>
+      <label className="checkbox-row"><input type="checkbox" checked={form.voipmonitor.useShareUrl}
+        onChange={(e) => updateVoip({ useShareUrl: e.target.checked })} /> Use share URL</label>
+    </article>
+
+    <article className="runtime-card">
+      <h4>Платформа</h4>
+      <div className="runtime-grid">
+        <label>ClickHouse admission capacity<input type="number" min={4} max={128}
+          value={form.platform.clickhouseAdmissionCapacity}
+          onChange={(e) => updatePlatform({ clickhouseAdmissionCapacity: Number(e.target.value) })} /></label>
+        <label>Export page size<input type="number" min={100} max={5000}
+          value={form.platform.exportPageSize}
+          onChange={(e) => updatePlatform({ exportPageSize: Number(e.target.value) })} /></label>
+      </div>
+      <p className="runtime-note">Admission capacity применяется при следующем перезапуске процесса;
+        остальные параметры подхватываются воркерами сразу.</p>
+    </article>
+
+    <article className="runtime-card">
+      <h4>Лимиты контейнеров Docker</h4>
+      <p className="runtime-note">CPU/RAM для ролей Collector. После сохранения скачайте env-фрагмент и
+        выполните `docker compose up -d --force-recreate` на хосте (cgroup применяет Docker).</p>
+      <div className="runtime-grid">
+        <label>API CPUs<input value={form.containers?.apiCpus || ''}
+          onChange={(e) => updateContainers({ apiCpus: e.target.value })} /></label>
+        <label>API memory<input value={form.containers?.apiMemory || ''}
+          onChange={(e) => updateContainers({ apiMemory: e.target.value })} /></label>
+        <label>Export CPUs<input value={form.containers?.exportCpus || ''}
+          onChange={(e) => updateContainers({ exportCpus: e.target.value })} /></label>
+        <label>Export memory<input value={form.containers?.exportMemory || ''}
+          onChange={(e) => updateContainers({ exportMemory: e.target.value })} /></label>
+        <label>Maintenance CPUs<input value={form.containers?.maintenanceCpus || ''}
+          onChange={(e) => updateContainers({ maintenanceCpus: e.target.value })} /></label>
+        <label>Maintenance memory<input value={form.containers?.maintenanceMemory || ''}
+          onChange={(e) => updateContainers({ maintenanceMemory: e.target.value })} /></label>
+        <label>App (monolith) CPUs<input value={form.containers?.appCpus || ''}
+          onChange={(e) => updateContainers({ appCpus: e.target.value })} /></label>
+        <label>App (monolith) memory<input value={form.containers?.appMemory || ''}
+          onChange={(e) => updateContainers({ appMemory: e.target.value })} /></label>
+      </div>
+      <div className="dialog-actions">
+        <a className="secondary button-link" href="/api/system/runtime-settings/container-limits.env">
+          Скачать container-limits.env
+        </a>
+      </div>
+    </article>
+
+    <div className="dialog-actions">
+      <button className="primary" disabled={busy} onClick={() => {
+        const payload: RuntimeSettings = {
+          ...form,
+          voipmonitor: {
+            ...form.voipmonitor,
+            password: password || undefined,
+          },
+        }
+        void onSave(payload)
+      }}>Сохранить параметры</button>
+    </div>
   </section>
 }
 

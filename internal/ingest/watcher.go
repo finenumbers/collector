@@ -27,13 +27,15 @@ import (
 )
 
 type CDRWatcher struct {
-	Root                    string
-	Store                   *store.Store
-	Analytics               CDRAnalytics
-	Archive                 CDRArchive
-	MinAge                  time.Duration
-	CoverageThresholds      analytics.CoverageThresholds
-	CustomProjectionEnabled bool
+	Root                      string
+	Store                     *store.Store
+	Analytics                 CDRAnalytics
+	Archive                   CDRArchive
+	MinAge                    time.Duration
+	CoverageThresholds        analytics.CoverageThresholds
+	CoverageThresholdsFn      func() analytics.CoverageThresholds
+	CustomProjectionEnabled   bool
+	CustomProjectionEnabledFn func() bool
 
 	retryMu sync.Mutex
 	retries map[string]watcherRetry
@@ -44,6 +46,20 @@ type watcherRetry struct {
 	failures uint
 	next     time.Time
 	terminal bool
+}
+
+func (w *CDRWatcher) projectionEnabled() bool {
+	if w.CustomProjectionEnabledFn != nil {
+		return w.CustomProjectionEnabledFn()
+	}
+	return w.CustomProjectionEnabled
+}
+
+func (w *CDRWatcher) coverageThresholds() analytics.CoverageThresholds {
+	if w.CoverageThresholdsFn != nil {
+		return w.CoverageThresholdsFn()
+	}
+	return w.CoverageThresholds
 }
 
 var errTerminalIngest = errors.New("terminal CDR ingest result")
@@ -241,7 +257,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 			return fmt.Errorf("%w: CDR parse failed: %v", errTerminalIngest, parseErr)
 		}
 		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
-		if !w.CustomProjectionEnabled {
+		if !w.projectionEnabled() {
 			err = w.Analytics.InsertCDRBatch(ctx, result.Records)
 		} else {
 			policy, policyErr := w.Store.CustomAntifraudPolicy(ctx, device.ID)
@@ -250,7 +266,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 			} else {
 				err = insertCDRForTemplate(
 					ctx, template, w.Analytics, result.Records, policy.Enabled, policy.Revision,
-					w.CoverageThresholds,
+					w.coverageThresholds(),
 				)
 				if err == nil && policy.Enabled {
 					err = w.Store.EnqueueCDRReconciliationBuckets(

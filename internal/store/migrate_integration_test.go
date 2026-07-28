@@ -251,6 +251,8 @@ func TestPostgresMigrateBaselinesLegacySchemaWithoutRevisionBump(t *testing.T) {
 				AND to_regclass('custom_projection_watermarks') IS NOT NULL
 				AND to_regclass('custom_reconciliation_jobs') IS NOT NULL
 				AND to_regclass('custom_reconciliation_device_leases') IS NOT NULL
+				AND to_regclass('custom_projection_device_leases') IS NOT NULL
+				AND to_regclass('system_runtime_settings') IS NOT NULL
 				AND EXISTS (
 					SELECT 1 FROM information_schema.columns
 					WHERE table_schema=current_schema()

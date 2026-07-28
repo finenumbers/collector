@@ -23,10 +23,16 @@ const (
 )
 
 func (s *Server) exportPageSize() uint64 {
-	if s.Config.ExportPageSize <= 0 {
+	size := s.Config.ExportPageSize
+	if s.Runtime != nil {
+		if runtimeSize := s.Runtime.Snapshot().Platform.ExportPageSize; runtimeSize > 0 {
+			size = runtimeSize
+		}
+	}
+	if size <= 0 {
 		return defaultExportPageSize
 	}
-	return uint64(s.Config.ExportPageSize)
+	return uint64(size)
 }
 
 type exportRequest struct {

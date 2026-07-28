@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,6 +98,10 @@ type heavyLane interface {
 	AcquireClickHouseHeavyLane(context.Context) (func(), error)
 }
 
+type overflowRequeuer interface {
+	RequeueFailedOverflowProjectionJobs(context.Context) (int64, error)
+}
+
 type Config struct {
 	WorkerID        string
 	BatchSize       int
@@ -148,14 +153,22 @@ type Worker struct {
 	Queue     Queue
 	Warehouse Warehouse
 	Config    Config
+	ConfigFn  func() Config
 	Metrics   *Metrics
+}
+
+func (w *Worker) activeConfig() Config {
+	if w.ConfigFn != nil {
+		return w.ConfigFn().normalized()
+	}
+	return w.Config.normalized()
 }
 
 func (w *Worker) Run(ctx context.Context) error {
 	if w.Queue == nil || w.Warehouse == nil {
 		return errors.New("custom projection worker dependencies are required")
 	}
-	cfg := w.Config.normalized()
+	cfg := w.activeConfig()
 	if w.Metrics == nil {
 		w.Metrics = &Metrics{}
 	}
@@ -167,7 +180,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			if err := w.runLoop(runCtx, cfg); err != nil {
+			if err := w.runLoop(runCtx); err != nil {
 				errs <- err
 			}
 		}()
@@ -190,13 +203,17 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) runLoop(ctx context.Context, cfg Config) error {
+func (w *Worker) runLoop(ctx context.Context) error {
 	for ctx.Err() == nil {
+		cfg := w.activeConfig()
 		job, ok, err := w.Queue.ClaimCustomProjectionJob(ctx, cfg.WorkerID, cfg.Lease)
 		if err != nil {
 			return err
 		}
 		if !ok {
+			if requeuer, has := w.Queue.(overflowRequeuer); has {
+				_, _ = requeuer.RequeueFailedOverflowProjectionJobs(ctx)
+			}
 			if !sleepContext(ctx, cfg.Sleep) {
 				break
 			}
@@ -230,15 +247,12 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 	if policy.Revision != job.PolicyRevision {
 		return w.Queue.CompleteCustomProjectionJob(ctx, job, Snapshot{})
 	}
-	releaseHeavy := func() {}
-	if lane, ok := w.Queue.(heavyLane); ok {
-		releaseHeavy, err = lane.AcquireClickHouseHeavyLane(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	defer releaseHeavy()
 	if job.Kind == JobDisable || !policy.Enabled {
+		releaseHeavy, heavyErr := w.acquireHeavyLane(ctx)
+		if heavyErr != nil {
+			return heavyErr
+		}
+		defer releaseHeavy()
 		if err := w.Warehouse.WriteCustomProjectionDisabled(ctx, job); err != nil {
 			return err
 		}
@@ -259,11 +273,9 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 		return w.Queue.AdvanceCustomProjectionDiscovery(ctx, job, discovery)
 	}
 
-	from := job.BucketStart.UTC()
+	from := job.BucketStart.UTC().Truncate(time.Hour)
 	to := from.Add(time.Hour)
-	events, err := w.Warehouse.LoadCustomRadiusEvents(
-		ctx, job.DeviceID, from.Add(-cfg.PairingHorizon), to.Add(cfg.PairingHorizon), cfg.MaxEvents,
-	)
+	events, err := w.loadBucketEvents(ctx, cfg, job.DeviceID, from, to)
 	if err != nil {
 		return err
 	}
@@ -279,9 +291,8 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 	preliminary := customradius.BuildAtCutoff(engineConfig, events, cutoff)
 	identities := resultIdentities(preliminary)
 	if len(identities) != 0 {
-		sessionEvents, loadErr := w.Warehouse.LoadCustomRadiusSessionEvents(
-			ctx, job.DeviceID, identities, from.Add(-cfg.RetryHorizon),
-			to.Add(cfg.RetryHorizon), cfg.PairingHorizon, cfg.MaxEvents,
+		sessionEvents, loadErr := w.loadSessionEvents(
+			ctx, cfg, job.DeviceID, identities, from, to,
 		)
 		if loadErr != nil {
 			return loadErr
@@ -340,6 +351,11 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 	); err != nil {
 		return err
 	}
+	releaseHeavy, err := w.acquireHeavyLane(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseHeavy()
 	if err := w.Warehouse.WriteCustomProjectionSnapshot(ctx, snapshot); err != nil {
 		return err
 	}
@@ -363,6 +379,80 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 	return w.Queue.EnqueueCDRReconciliationBuckets(
 		cutoverCtx, job.DeviceID, job.PolicyRevision, allBuckets,
 	)
+}
+
+func (w *Worker) acquireHeavyLane(ctx context.Context) (func(), error) {
+	if lane, ok := w.Queue.(heavyLane); ok {
+		return lane.AcquireClickHouseHeavyLane(ctx)
+	}
+	return func() {}, nil
+}
+
+func IsEventLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "exceeds") && strings.Contains(message, "events")
+}
+
+func (w *Worker) loadBucketEvents(
+	ctx context.Context, cfg Config, deviceID uuid.UUID, from, to time.Time,
+) ([]customradius.RawEvent, error) {
+	return w.loadEventsSplit(ctx, from, to, time.Hour, func(start, end time.Time) ([]customradius.RawEvent, error) {
+		return w.Warehouse.LoadCustomRadiusEvents(
+			ctx, deviceID, start.Add(-cfg.PairingHorizon), end.Add(cfg.PairingHorizon), cfg.MaxEvents,
+		)
+	})
+}
+
+func (w *Worker) loadSessionEvents(
+	ctx context.Context, cfg Config, deviceID uuid.UUID, identities []string, from, to time.Time,
+) ([]customradius.RawEvent, error) {
+	start := from.Add(-cfg.RetryHorizon)
+	end := to.Add(cfg.RetryHorizon)
+	return w.loadEventsSplit(ctx, start, end, time.Hour, func(windowStart, windowEnd time.Time) ([]customradius.RawEvent, error) {
+		return w.Warehouse.LoadCustomRadiusSessionEvents(
+			ctx, deviceID, identities, windowStart, windowEnd, cfg.PairingHorizon, cfg.MaxEvents,
+		)
+	})
+}
+
+func (w *Worker) loadEventsSplit(
+	ctx context.Context,
+	from, to time.Time,
+	span time.Duration,
+	load func(time.Time, time.Time) ([]customradius.RawEvent, error),
+) ([]customradius.RawEvent, error) {
+	events, err := load(from, to)
+	if err == nil || !IsEventLimitError(err) {
+		return events, err
+	}
+	nextSpan := time.Duration(0)
+	switch {
+	case span > 15*time.Minute:
+		nextSpan = 15 * time.Minute
+	case span > 5*time.Minute:
+		nextSpan = 5 * time.Minute
+	default:
+		return nil, err
+	}
+	merged := make([]customradius.RawEvent, 0)
+	for cursor := from; cursor.Before(to); cursor = cursor.Add(nextSpan) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		end := cursor.Add(nextSpan)
+		if end.After(to) {
+			end = to
+		}
+		part, partErr := w.loadEventsSplit(ctx, cursor, end, nextSpan, load)
+		if partErr != nil {
+			return nil, partErr
+		}
+		merged = mergeEvents(merged, part)
+	}
+	return merged, nil
 }
 
 func latestEventTime(events []customradius.RawEvent) time.Time {

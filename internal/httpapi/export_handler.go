@@ -31,7 +31,7 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if export.Dataset == "antifraud" {
-		if !s.Config.CustomProjectionEnabled {
+		if !s.customProjectionEnabled() {
 			writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
 			return
 		}

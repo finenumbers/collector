@@ -23,6 +23,13 @@ func TestAntifraudCallDetailSoftFailsEnrichmentAndScopesPackets(t *testing.T) {
 	}
 	detailFn := source[strings.Index(source, "func (c *Client) AntifraudCallDetail"):]
 	detailFn = detailFn[:strings.Index(detailFn, "\nfunc (c *Client) loadAntifraudExchanges")]
+	if !strings.Contains(detailFn, "FROM collector.custom_antifraud_calls AS call FINAL") {
+		t.Fatal("detail head must point-lookup the table, not the unfiltered *_current view")
+	}
+	if !strings.Contains(detailFn, "FROM collector.custom_projection_state\n\t\tWHERE device_id=?") &&
+		!strings.Contains(detailFn, "FROM collector.custom_projection_state\n\t\t\tWHERE device_id=?") {
+		t.Fatal("detail head must scope projection state by device_id")
+	}
 	for _, needle := range []string{
 		`"packets unavailable: "`,
 		`"exchanges unavailable: "`,

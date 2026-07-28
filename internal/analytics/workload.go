@@ -102,6 +102,7 @@ func workloadQueryLimits(class workload.Class) (time.Duration, uint64, uint64, u
 	case workload.Diagnostics:
 		return 10 * time.Second, 1, 128 << 20, 2_000, 8 << 20
 	default:
-		return 10 * time.Second, 2, 256 << 20, 5_000, 16 << 20
+		// Dense SMG AntiFraud cards hit FINAL merges near the old 256 MiB ceiling.
+		return 10 * time.Second, 2, 512 << 20, 5_000, 16 << 20
 	}
 }

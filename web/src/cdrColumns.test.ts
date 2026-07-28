@@ -36,7 +36,7 @@ describe('CDR column presets', () => {
     const keys = resolvePresetColumns('satel', 'summary').map((column) => column.key)
     expect(keys).toEqual(SATEL_SUMMARY_KEYS)
     expect(keys).toEqual([
-      'connectTime',
+      'setupTime',
       'billAni',
       'billDnis',
       'outOrigDnis',

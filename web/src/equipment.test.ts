@@ -61,6 +61,12 @@ describe('equipment templates', () => {
     expect(main).toContain('softswitchRows.map')
     expect(main).not.toContain('Метрики Eltex за выбранный интервал')
     expect(main).not.toContain('(snapshot?.devices || []).map((row) => <tr')
+    // KPI strip: VoIPmonitor between Вызовы and ASR; no source-count tiles.
+    expect(main).toContain('label="VoIPmonitor"')
+    expect(main).not.toContain('label="Софтсвитчи"')
+    expect(main).not.toContain('label="Оборудование"')
+    expect(main).toContain('fleet-panel')
+    expect(main).toContain('className="table-fill"')
     // Dashboard order: services → softswitches → equipment.
     const servicesAt = main.indexOf('<h4>Сервисы</h4>')
     const softAt = main.indexOf('<h4>Софтсвитчи</h4><span>Типизированные')

@@ -12,20 +12,24 @@ import (
 )
 
 type DashboardDevice struct {
-	DeviceID            uuid.UUID  `json:"deviceId"`
-	Calls               uint64     `json:"calls"`
-	FailedCalls         uint64     `json:"failedCalls"`
-	AverageTalkMS       float64    `json:"averageTalkMs"`
-	Antifraud           uint64     `json:"antifraud"`
-	AntifraudRejected   uint64     `json:"antifraudRejected"`
-	AntifraudIncomplete uint64     `json:"antifraudIncomplete"`
-	LatestSyslogAt      *time.Time `json:"latestSyslogAt"`
-	LatestCDRAt         *time.Time `json:"latestCdrAt"`
-	ActiveRevision      uint64     `json:"activeRevision"`
-	ActiveTimezone      string     `json:"activeTimezone"`
-	BuildingRevision    uint64     `json:"buildingRevision"`
-	RevisionStatus      string     `json:"revisionStatus"`
-	RevisionReason      string     `json:"revisionReason"`
+	DeviceID                   uuid.UUID  `json:"deviceId"`
+	Calls                      uint64     `json:"calls"`
+	FailedCalls                uint64     `json:"failedCalls"`
+	AverageTalkMS              float64    `json:"averageTalkMs"`
+	Antifraud                  uint64     `json:"antifraud"`
+	AntifraudRejected          uint64     `json:"antifraudRejected"`
+	AntifraudIncomplete        uint64     `json:"antifraudIncomplete"`
+	VoipmonitorMatchedExact    uint64     `json:"voipmonitorMatchedExact"`
+	VoipmonitorMatchedFallback uint64     `json:"voipmonitorMatchedFallback"`
+	VoipmonitorAmbiguous       uint64     `json:"voipmonitorAmbiguous"`
+	VoipmonitorUnmatched       uint64     `json:"voipmonitorUnmatched"`
+	LatestSyslogAt             *time.Time `json:"latestSyslogAt"`
+	LatestCDRAt                *time.Time `json:"latestCdrAt"`
+	ActiveRevision             uint64     `json:"activeRevision"`
+	ActiveTimezone             string     `json:"activeTimezone"`
+	BuildingRevision           uint64     `json:"buildingRevision"`
+	RevisionStatus             string     `json:"revisionStatus"`
+	RevisionReason             string     `json:"revisionReason"`
 }
 
 type DashboardAnalytics struct {
@@ -149,6 +153,52 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 			target.Antifraud = total
 			target.AntifraudRejected = rejected
 			target.AntifraudIncomplete = incomplete
+		}
+		_ = rows.Close()
+	}
+
+	rows, err = c.Conn.Query(ctx, `
+		SELECT device_id,
+			countIf(match_status='matched_exact'),
+			countIf(match_status='matched_fallback'),
+			countIf(match_status='ambiguous'),
+			countIf(match_status='unmatched')
+		FROM
+		(
+			SELECT c.device_id AS device_id, link.match_status AS match_status
+			FROM collector.cdr_records AS c FINAL
+			INNER JOIN collector.cdr_voipmonitor_links_current AS link
+				ON link.device_id=c.device_id
+				AND link.source_record_id=c.record_id
+				AND link.source_system='eltex_smg'
+			WHERE c.ingested_at>=now()-toIntervalSecond(?)
+			UNION ALL
+			SELECT c.device_id AS device_id, link.match_status AS match_status
+			FROM collector.satel_rtu_cdr AS c FINAL
+			INNER JOIN collector.cdr_voipmonitor_links_current AS link
+				ON link.device_id=c.device_id
+				AND link.source_record_id=c.record_id
+				AND link.source_system='satel_rtu'
+			WHERE c.ingested_at>=now()-toIntervalSecond(?)
+		)
+		GROUP BY device_id`, seconds, seconds)
+	if err != nil {
+		result.Diagnostics = append(result.Diagnostics, "voipmonitor links: "+err.Error())
+	} else {
+		for rows.Next() {
+			var id uuid.UUID
+			var exact, fallback, ambiguous, unmatched uint64
+			if scanErr := rows.Scan(&id, &exact, &fallback, &ambiguous, &unmatched); scanErr != nil {
+				result.Diagnostics = append(
+					result.Diagnostics, "voipmonitor links: "+scanErr.Error(),
+				)
+				break
+			}
+			target := device(id)
+			target.VoipmonitorMatchedExact = exact
+			target.VoipmonitorMatchedFallback = fallback
+			target.VoipmonitorAmbiguous = ambiguous
+			target.VoipmonitorUnmatched = unmatched
 		}
 		_ = rows.Close()
 	}

@@ -338,10 +338,11 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	var weightedTalk float64
 	activeDevices := 0
 	type categoryAccumulator struct {
-		totalSources, activeSources      int
-		calls, failed                    uint64
-		antifraud, rejects, files, bytes uint64
-		weightedTalk                     float64
+		totalSources, activeSources                   int
+		calls, failed                                 uint64
+		antifraud, rejects, files, bytes              uint64
+		vmExact, vmFallback, vmAmbiguous, vmUnmatched uint64
+		weightedTalk                                  float64
 	}
 	categoryTotals := map[string]*categoryAccumulator{
 		equipment.CategoryEquipment:  {},
@@ -387,6 +388,10 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 				category.antifraud += metrics.Antifraud
 				category.rejects += metrics.AntifraudRejected
 			}
+			category.vmExact += metrics.VoipmonitorMatchedExact
+			category.vmFallback += metrics.VoipmonitorMatchedFallback
+			category.vmAmbiguous += metrics.VoipmonitorAmbiguous
+			category.vmUnmatched += metrics.VoipmonitorUnmatched
 			category.weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
 		}
 		if fileMetrics != nil {
@@ -413,6 +418,10 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			"calls": category.calls, "failed": category.failed, "averageTalkMs": average,
 			"antifraud": category.antifraud, "rejects": category.rejects,
 			"files": category.files, "bytes": category.bytes,
+			"voipmonitorMatchedExact":    category.vmExact,
+			"voipmonitorMatchedFallback": category.vmFallback,
+			"voipmonitorAmbiguous":       category.vmAmbiguous,
+			"voipmonitorUnmatched":       category.vmUnmatched,
 		}
 	}
 

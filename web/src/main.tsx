@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  Activity, CirclePlus, FileClock,
+  CirclePlus, FileClock,
   LogOut, PhoneCall, Search, Server, Settings, ShieldCheck,
 } from 'lucide-react'
 import './styles.css'
@@ -916,7 +916,7 @@ function Workspace({ user, onLogout }: { user: User; onLogout: () => void }) {
   </div>
 }
 
-const navigation: { id: Dataset; label: string; icon: typeof Activity }[] = [
+const navigation: { id: Dataset; label: string; icon: typeof PhoneCall }[] = [
   { id: 'calls', label: 'Вызовы и CDR', icon: PhoneCall },
   { id: 'syslog', label: 'Сообщения Syslog', icon: FileClock },
   { id: 'antifraud', label: 'АнтиФрод', icon: ShieldCheck },
@@ -2204,17 +2204,16 @@ function EventsTable({ rows, timezone, onSelect }: {
       timezone={timezone} onSelect={onSelect} />)}</tbody></table>
 }
 
-function EventTableRow({ row, timezone, onSelect, nested }: {
+function EventTableRow({ row, timezone, onSelect }: {
   row: EventRow
   timezone: string
   onSelect: (row: EventRow) => void
-  nested?: boolean
 }) {
-  return <tr className={nested ? 'thread-child' : undefined} onClick={() => onSelect(row)}>
+  return <tr onClick={() => onSelect(row)}>
     <td className="mono">{formatTime(row.receivedAt, timezone)}</td>
     <td className="mono">{row.sourceIp}:{row.sourcePort}</td>
     <td><span className="tag">{row.transport}</span></td>
-    <td className={`message-cell col-flex ${nested ? 'thread-fragment' : ''}`}>
+    <td className="message-cell col-flex">
       {redactDisplayText(row.payload) || '—'}</td>
     <td className="mono">{row.payloadSha256}</td>
   </tr>

@@ -204,16 +204,22 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) runLoop(ctx context.Context) error {
+	// Discover jobs stay pending every ~2s, so the claim queue is almost never
+	// idle. Sweep overflow failures on a cadence instead of only when claim misses.
+	var lastOverflowSweep time.Time
 	for ctx.Err() == nil {
 		cfg := w.activeConfig()
+		if time.Since(lastOverflowSweep) >= 30*time.Second {
+			if requeuer, has := w.Queue.(overflowRequeuer); has {
+				_, _ = requeuer.RequeueFailedOverflowProjectionJobs(ctx)
+			}
+			lastOverflowSweep = time.Now()
+		}
 		job, ok, err := w.Queue.ClaimCustomProjectionJob(ctx, cfg.WorkerID, cfg.Lease)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			if requeuer, has := w.Queue.(overflowRequeuer); has {
-				_, _ = requeuer.RequeueFailedOverflowProjectionJobs(ctx)
-			}
 			if !sleepContext(ctx, cfg.Sleep) {
 				break
 			}
@@ -275,10 +281,175 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 
 	from := job.BucketStart.UTC().Truncate(time.Hour)
 	to := from.Add(time.Hour)
-	events, err := w.loadBucketEvents(ctx, cfg, job.DeviceID, from, to)
-	if err != nil {
+	return w.processBucket(ctx, cfg, job, from, to)
+}
+
+func (w *Worker) processBucket(
+	ctx context.Context, cfg Config, job Job, from, to time.Time,
+) error {
+	// Prefer a single hour load. On overflow do NOT split-merge into one giant
+	// slice (that re-hits MaxMemory); rebuild the hour as independent windows.
+	events, err := w.Warehouse.LoadCustomRadiusEvents(
+		ctx, job.DeviceID, from.Add(-cfg.PairingHorizon), to.Add(cfg.PairingHorizon), cfg.MaxEvents,
+	)
+	switch {
+	case err == nil && eventsExceedLimits(events, cfg) == nil:
+		return w.finishBucket(ctx, cfg, job, from, to, events)
+	case err != nil && !IsEventLimitError(err):
 		return err
+	default:
+		return w.processBucketWindows(ctx, cfg, job, from, to)
 	}
+}
+
+func (w *Worker) processBucketWindows(
+	ctx context.Context, cfg Config, job Job, from, to time.Time,
+) error {
+	span := 5 * time.Minute
+	merged := customradius.Result{}
+	packetsByID := make(map[uuid.UUID]customradius.Packet)
+	callsByID := make(map[uuid.UUID]customradius.Call)
+	affected := make(map[time.Time]struct{})
+	var watermarkTime time.Time
+	var watermarkID uuid.UUID
+	var nextDeadline *time.Time
+	cutoff := job.CutoffAt.UTC()
+	for cursor := from; cursor.Before(to); cursor = cursor.Add(span) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		end := cursor.Add(span)
+		if end.After(to) {
+			end = to
+		}
+		events, err := w.loadEventsSplit(ctx, cursor, end, span, func(start, finish time.Time) ([]customradius.RawEvent, error) {
+			return w.Warehouse.LoadCustomRadiusEvents(
+				ctx, job.DeviceID, start.Add(-cfg.PairingHorizon), finish.Add(cfg.PairingHorizon), cfg.MaxEvents,
+			)
+		})
+		if err != nil {
+			return err
+		}
+		if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
+			return limitErr
+		}
+		windowCutoff := cutoff
+		if windowCutoff.IsZero() {
+			windowCutoff = latestEventTime(events)
+		}
+		engineConfig := customradius.Config{
+			Enabled: true, ResponseTimeout: cfg.ResponseTimeout,
+			PairingHorizon: cfg.PairingHorizon, RetryHorizon: cfg.RetryHorizon,
+			AssemblyIdle: cfg.AssemblyIdle,
+		}
+		preliminary := customradius.BuildAtCutoff(engineConfig, events, windowCutoff)
+		identities := resultIdentities(preliminary)
+		if len(identities) != 0 {
+			// Keep session expansion inside the local pairing neighborhood for dense
+			// hours; a 7-day scan per 5m window would starve ClickHouse.
+			sessionEvents, loadErr := w.loadEventsSplit(
+				ctx, cursor.Add(-cfg.PairingHorizon), end.Add(cfg.PairingHorizon), span,
+				func(windowStart, windowEnd time.Time) ([]customradius.RawEvent, error) {
+					return w.Warehouse.LoadCustomRadiusSessionEvents(
+						ctx, job.DeviceID, identities, windowStart, windowEnd, cfg.PairingHorizon, cfg.MaxEvents,
+					)
+				},
+			)
+			if loadErr != nil {
+				return loadErr
+			}
+			events = mergeEvents(events, sessionEvents)
+			if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
+				return limitErr
+			}
+		}
+		for _, event := range events {
+			affected[event.ReceivedAt.UTC().Truncate(time.Hour)] = struct{}{}
+			if event.ReceivedAt.After(watermarkTime) ||
+				(event.ReceivedAt.Equal(watermarkTime) && event.EventID.String() > watermarkID.String()) {
+				watermarkTime, watermarkID = event.ReceivedAt, event.EventID
+			}
+		}
+		if windowCutoff.IsZero() {
+			windowCutoff = watermarkTime
+		}
+		result := customradius.BuildAtCutoff(engineConfig, events, windowCutoff)
+		if result.NextDeadline != nil {
+			if nextDeadline == nil || result.NextDeadline.Before(*nextDeadline) {
+				deadline := *result.NextDeadline
+				nextDeadline = &deadline
+			}
+		}
+		for _, packet := range result.Packets {
+			if packet.FirstSeenAt.Before(from) || !packet.FirstSeenAt.Before(to) {
+				continue
+			}
+			// Own packets by first-seen window so multi-window rebuilds stay disjoint.
+			if packet.FirstSeenAt.Before(cursor) || !packet.FirstSeenAt.Before(end) {
+				continue
+			}
+			packetsByID[packet.ID] = packet
+		}
+		for _, call := range result.Calls {
+			if len(call.Packets) == 0 {
+				continue
+			}
+			first := call.Packets[0].FirstSeenAt
+			for _, packet := range call.Packets[1:] {
+				if packet.FirstSeenAt.Before(first) {
+					first = packet.FirstSeenAt
+				}
+			}
+			if first.Before(from) || !first.Before(to) {
+				continue
+			}
+			if first.Before(cursor) || !first.Before(end) {
+				continue
+			}
+			callsByID[call.ID] = call
+		}
+	}
+	merged.Packets = make([]customradius.Packet, 0, len(packetsByID))
+	for _, packet := range packetsByID {
+		merged.Packets = append(merged.Packets, packet)
+	}
+	sort.SliceStable(merged.Packets, func(i, j int) bool {
+		if merged.Packets[i].FirstSeenAt.Equal(merged.Packets[j].FirstSeenAt) {
+			return merged.Packets[i].ID.String() < merged.Packets[j].ID.String()
+		}
+		return merged.Packets[i].FirstSeenAt.Before(merged.Packets[j].FirstSeenAt)
+	})
+	merged.Calls = make([]customradius.Call, 0, len(callsByID))
+	for _, call := range callsByID {
+		merged.Calls = append(merged.Calls, call)
+	}
+	sort.SliceStable(merged.Calls, func(i, j int) bool {
+		left, right := callFirstSeen(merged.Calls[i]), callFirstSeen(merged.Calls[j])
+		if left.Equal(right) {
+			return merged.Calls[i].ID.String() < merged.Calls[j].ID.String()
+		}
+		return left.Before(right)
+	})
+	merged.NextDeadline = nextDeadline
+	return w.publishBucket(ctx, cfg, job, from, merged, watermarkTime, watermarkID, affected)
+}
+
+func callFirstSeen(call customradius.Call) time.Time {
+	if len(call.Packets) == 0 {
+		return time.Time{}
+	}
+	first := call.Packets[0].FirstSeenAt
+	for _, packet := range call.Packets[1:] {
+		if packet.FirstSeenAt.Before(first) {
+			first = packet.FirstSeenAt
+		}
+	}
+	return first
+}
+
+func (w *Worker) finishBucket(
+	ctx context.Context, cfg Config, job Job, from, to time.Time, events []customradius.RawEvent,
+) error {
 	cutoff := job.CutoffAt.UTC()
 	if cutoff.IsZero() {
 		cutoff = latestEventTime(events)
@@ -298,25 +469,14 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 			return loadErr
 		}
 		events = mergeEvents(events, sessionEvents)
-	}
-	var eventBytes int64
-	ordered := append([]customradius.RawEvent(nil), events...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i].ReceivedAt.Equal(ordered[j].ReceivedAt) {
-			return ordered[i].EventID.String() < ordered[j].EventID.String()
+		if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
+			return w.processBucketWindows(ctx, cfg, job, from, to)
 		}
-		return ordered[i].ReceivedAt.Before(ordered[j].ReceivedAt)
-	})
-	for _, event := range ordered {
-		eventBytes += int64(len(event.Payload))
-	}
-	if eventBytes > cfg.MaxMemoryBytes {
-		return fmt.Errorf("bucket payload bytes %d exceed memory bound %d", eventBytes, cfg.MaxMemoryBytes)
 	}
 	var watermarkTime time.Time
 	var watermarkID uuid.UUID
 	affected := make(map[time.Time]struct{})
-	for _, event := range ordered {
+	for _, event := range events {
 		affected[event.ReceivedAt.UTC().Truncate(time.Hour)] = struct{}{}
 		if event.ReceivedAt.After(watermarkTime) ||
 			(event.ReceivedAt.Equal(watermarkTime) && event.EventID.String() > watermarkID.String()) {
@@ -327,8 +487,21 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 		cutoff = watermarkTime
 	}
 	result := customradius.BuildAtCutoff(engineConfig, events, cutoff)
+	return w.publishBucket(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected)
+}
+
+func (w *Worker) publishBucket(
+	ctx context.Context,
+	cfg Config,
+	job Job,
+	from time.Time,
+	result customradius.Result,
+	watermarkTime time.Time,
+	watermarkID uuid.UUID,
+	affected map[time.Time]struct{},
+) error {
 	snapshot := Snapshot{
-		ID: stableSnapshotID(job, events), DeviceID: job.DeviceID, BucketStart: from,
+		ID: stableSnapshotID(job, resultEventIDs(result)), DeviceID: job.DeviceID, BucketStart: from,
 		PolicyRevision: job.PolicyRevision, ProjectionSeq: job.ProjectionSeq,
 		WatermarkTime: watermarkTime, WatermarkID: watermarkID,
 		Result: result,
@@ -381,6 +554,43 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 	)
 }
 
+func resultEventIDs(result customradius.Result) []customradius.RawEvent {
+	unique := make(map[uuid.UUID]struct{})
+	events := make([]customradius.RawEvent, 0)
+	for _, packet := range result.Packets {
+		for _, member := range packet.Provenance {
+			if _, seen := unique[member.EventID]; seen {
+				continue
+			}
+			unique[member.EventID] = struct{}{}
+			events = append(events, customradius.RawEvent{
+				EventID: member.EventID, ReceivedAt: member.ReceivedAt,
+			})
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].ReceivedAt.Equal(events[j].ReceivedAt) {
+			return events[i].EventID.String() < events[j].EventID.String()
+		}
+		return events[i].ReceivedAt.Before(events[j].ReceivedAt)
+	})
+	return events
+}
+
+func eventsExceedLimits(events []customradius.RawEvent, cfg Config) error {
+	var eventBytes int64
+	for _, event := range events {
+		eventBytes += int64(len(event.Payload))
+	}
+	if len(events) > cfg.MaxEvents {
+		return fmt.Errorf("custom projection bucket exceeds %d events", cfg.MaxEvents)
+	}
+	if eventBytes > cfg.MaxMemoryBytes {
+		return fmt.Errorf("bucket payload bytes %d exceed memory bound %d", eventBytes, cfg.MaxMemoryBytes)
+	}
+	return nil
+}
+
 func (w *Worker) acquireHeavyLane(ctx context.Context) (func(), error) {
 	if lane, ok := w.Queue.(heavyLane); ok {
 		return lane.AcquireClickHouseHeavyLane(ctx)
@@ -396,14 +606,11 @@ func IsEventLimitError(err error) bool {
 	return strings.Contains(message, "exceeds") && strings.Contains(message, "events")
 }
 
-func (w *Worker) loadBucketEvents(
-	ctx context.Context, cfg Config, deviceID uuid.UUID, from, to time.Time,
-) ([]customradius.RawEvent, error) {
-	return w.loadEventsSplit(ctx, from, to, time.Hour, func(start, end time.Time) ([]customradius.RawEvent, error) {
-		return w.Warehouse.LoadCustomRadiusEvents(
-			ctx, deviceID, start.Add(-cfg.PairingHorizon), end.Add(cfg.PairingHorizon), cfg.MaxEvents,
-		)
-	})
+func IsMemoryBoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "memory bound")
 }
 
 func (w *Worker) loadSessionEvents(
@@ -434,6 +641,8 @@ func (w *Worker) loadEventsSplit(
 		nextSpan = 15 * time.Minute
 	case span > 5*time.Minute:
 		nextSpan = 5 * time.Minute
+	case span > time.Minute:
+		nextSpan = time.Minute
 	default:
 		return nil, err
 	}

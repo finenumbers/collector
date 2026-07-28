@@ -711,50 +711,6 @@ func IngestFileFullyIngested(status string, rowsValid uint64) bool {
 		(status == "quarantined" && rowsValid > 0)
 }
 
-func (s *Store) ClaimIngestFile(
-	ctx context.Context, deviceID uuid.UUID, name, objectKey, checksum string, size int64,
-) (IngestFileClaim, error) {
-	var claim IngestFileClaim
-	err := s.DB.QueryRow(ctx, `INSERT INTO ingest_files(device_id,original_name,object_key,sha256,size_bytes,status)
-		VALUES($1,$2,$3,$4,$5,'received')
-		ON CONFLICT(device_id,sha256) DO NOTHING
-		RETURNING id,object_key,status,rows_valid`,
-		deviceID, name, objectKey, checksum, size,
-	).Scan(&claim.ID, &claim.ObjectKey, &claim.Status, &claim.RowsValid)
-	if err == nil {
-		claim.Retry = true
-		return claim, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return IngestFileClaim{}, err
-	}
-	err = s.DB.QueryRow(ctx, `SELECT id,object_key,status,rows_valid
-		FROM ingest_files WHERE device_id=$1 AND sha256=$2`, deviceID, checksum).
-		Scan(&claim.ID, &claim.ObjectKey, &claim.Status, &claim.RowsValid)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return IngestFileClaim{}, ErrNotFound
-	}
-	if err != nil {
-		return IngestFileClaim{}, err
-	}
-	if IngestFileFullyIngested(claim.Status, claim.RowsValid) {
-		claim.Retry = false
-		return claim, nil
-	}
-	_, err = s.DB.Exec(ctx, `UPDATE ingest_files
-		SET original_name=$2,object_key=$3,size_bytes=$4,status='received',
-		    error=NULL,processed_at=NULL,rows_total=0,rows_valid=0
-		WHERE id=$1`, claim.ID, name, objectKey, size)
-	if err != nil {
-		return IngestFileClaim{}, err
-	}
-	claim.ObjectKey = objectKey
-	claim.Status = "received"
-	claim.RowsValid = 0
-	claim.Retry = true
-	return claim, nil
-}
-
 type IngestFileSummary struct {
 	ID              uuid.UUID  `json:"id"`
 	OriginalName    string     `json:"originalName"`

@@ -139,8 +139,9 @@ func TestRawSoftswitchRemovalMigrationConvertsLegacySource(t *testing.T) {
 		template_key='softswitch-cdr-raw-v1',firmware='raw' WHERE id=$1`, device.ID); err != nil {
 		t.Fatal(err)
 	}
-	file, err := control.ClaimIngestFile(
+	file, err := control.ClaimIngestFileForParser(
 		ctx, device.ID, "legacy.csv", "cdr/legacy.csv", strings.Repeat("f", 64), 1,
+		"softswitch-cdr-raw-v1", "raw-archive-v1",
 	)
 	if err != nil {
 		t.Fatal(err)

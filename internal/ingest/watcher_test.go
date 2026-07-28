@@ -234,9 +234,10 @@ func TestSatelArchiveReplayRestartAndPartialQuarantine(t *testing.T) {
 		{key: "cdr/replay/valid", checksum: strings.Repeat("b", 64)},
 		{key: "cdr/replay/partial", checksum: strings.Repeat("c", 64)},
 	} {
-		claim, err := control.ClaimIngestFile(
+		claim, err := control.ClaimIngestFileForParser(
 			ctx, device.ID, "synthetic-"+string(rune('a'+index))+".csv",
 			item.key, item.checksum, int64(len(memoryArchive.objects[item.key])),
+			equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion,
 		)
 		if err != nil {
 			t.Fatal(err)

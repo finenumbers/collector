@@ -71,8 +71,9 @@ func TestSatelArchiveReplayWithMinIO(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = rawArchive.DeletePrefix(context.Background(), prefix) })
-	claim, err := control.ClaimIngestFile(
+	claim, err := control.ClaimIngestFileForParser(
 		ctx, device.ID, "synthetic.csv", objectKey, strings.Repeat("d", 64), int64(len(fixture)),
+		equipment.TemplateSatelRTUCDRV1, equipment.SatelRTUParserVersion,
 	)
 	if err != nil {
 		t.Fatal(err)

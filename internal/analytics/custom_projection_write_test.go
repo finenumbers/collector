@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestCallPacketLinkIDsSkipPacketsMissingFromSnapshot(t *testing.T) {
+func TestSnapshotPacketIDsInBucketSkipsOutsideHour(t *testing.T) {
 	bucket := time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC)
 	inHour := customradius.Packet{
 		ID: uuid.New(), FirstSeenAt: bucket.Add(2 * time.Minute), LastSeenAt: bucket.Add(2 * time.Minute),
@@ -21,21 +21,23 @@ func TestCallPacketLinkIDsSkipPacketsMissingFromSnapshot(t *testing.T) {
 	outsideHour := customradius.Packet{
 		ID: uuid.New(), FirstSeenAt: bucket.Add(-time.Minute), LastSeenAt: bucket.Add(-time.Minute),
 	}
-	missingFromResult := customradius.Packet{
-		ID: uuid.New(), FirstSeenAt: bucket.Add(4 * time.Minute), LastSeenAt: bucket.Add(4 * time.Minute),
-	}
 	snapshot := customprojection.Snapshot{
 		BucketStart: bucket,
 		Result: customradius.Result{
 			Packets: []customradius.Packet{inHour, alsoInHour, outsideHour},
-			Calls: []customradius.Call{{
-				ID: uuid.New(),
-				Packets: []customradius.Packet{inHour, missingFromResult, alsoInHour, outsideHour},
-			}},
 		},
 	}
-	got := callPacketLinkIDs(snapshot, snapshot.Result.Calls[0])
-	if len(got) != 2 || got[0] != inHour.ID || got[1] != alsoInHour.ID {
-		t.Fatalf("links=%v want [%s %s]", got, inHour.ID, alsoInHour.ID)
+	got := snapshotPacketIDsInBucket(snapshot)
+	if len(got) != 2 {
+		t.Fatalf("packet ids=%d want 2", len(got))
+	}
+	if _, ok := got[inHour.ID]; !ok {
+		t.Fatal("missing in-hour packet")
+	}
+	if _, ok := got[alsoInHour.ID]; !ok {
+		t.Fatal("missing second in-hour packet")
+	}
+	if _, ok := got[outsideHour.ID]; ok {
+		t.Fatal("outside-hour packet must not be written")
 	}
 }

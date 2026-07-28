@@ -55,13 +55,16 @@ historical hour. Discover scans use the non-heavy `custom_reconcile`
 admission class so tiny cursor pages are not serialized behind hour payload
 loads or exports. Hour buckets that exceed runtime `projection.maxEvents`
 (Настройки → Параметры; env `CUSTOM_PROJECTION_MAX_EVENTS` only seeds an empty
-DB) are loaded via 15m→5m split windows in-process so a dense SMG cannot
+DB) are loaded via hour→15m→5m→1m split windows in-process so a dense SMG cannot
 terminal-fail the hour. Windowed rebuild keeps the previous active tip visible
 until a single finalize cutover (lease refreshed before the CH write) so call
 cards and CDR coverage stay consistent mid-rebuild; cutover then completes the
 job, enqueues CDR reconciliation and sibling hours, and schedules durable
-`NextDeadline`. Every arrival increments its bucket generation, including
-arrivals while a worker owns the lease.
+`NextDeadline`. Packets and calls are owned by the first-seen 5m window inside
+that hour, so a call that spans later windows may stay incomplete until the
+next full finalize of that hour — operators should treat the previous tip as
+authoritative during rebuild. Every arrival increments its bucket generation,
+including arrivals while a worker owns the lease.
 ClickHouse stores staged snapshots. An active marker is the visibility
 boundary; retries reuse the deterministic snapshot ID, superseded rows receive
 tombstones, and raw rows are never updated or deleted by replay.
@@ -114,6 +117,10 @@ AntiFraud call cards load the active call shell with a device-scoped
 `custom_antifraud_calls FINAL` point lookup (not the unfiltered
 `*_current` view) under a 512 MiB Interactive memory budget, then enrich
 packets/exchanges/CDR. Enrichment failures return the shell with warnings
-instead of a false “call not found”. If cards still 404 after a list hit,
-recreate current views through migration 029 — ClickHouse expands `SELECT *`
-at `CREATE VIEW` time and can drift after accounting columns land.
+instead of a false “call not found”.
+
+Current views (`custom_antifraud_calls_current` and related) use `SELECT *`
+expanded at `CREATE VIEW` time. After any `ALTER TABLE … ADD COLUMN` on the
+underlying ReplacingMergeTree tables, recreate the matching `_current` views
+in the same migration (see 028/029). If list works but detail 404s after a
+schema add, view drift is the first check.

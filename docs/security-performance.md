@@ -62,7 +62,9 @@ phone numbers, topology, and identifiers can still be present. Exports remain
 authenticated and device-scoped and downloads are audited. There is no
 unredacted download route. ClickHouse access therefore remains an
 operator-only trust boundary and must use encrypted storage and least-privilege
-credentials.
+credentials. Production boots reject default seeded secrets (including a
+`postgres://collector:collector@…` URL), default ClickHouse/MinIO/SFTPGo
+passwords, and `SECURE_COOKIES=false`.
 
 ## Bounds and search safeguards
 

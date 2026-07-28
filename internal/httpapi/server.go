@@ -1472,17 +1472,6 @@ func parseDeviceID(writer http.ResponseWriter, request *http.Request) (uuid.UUID
 	return id, true
 }
 
-func (s *Server) requireDeviceCapability(
-	writer http.ResponseWriter,
-	request *http.Request,
-	deviceID uuid.UUID,
-	supported func(store.Device) bool,
-	feature string,
-) bool {
-	_, ok := s.deviceWithCapability(writer, request, deviceID, supported, feature)
-	return ok
-}
-
 func (s *Server) deviceWithCapability(
 	writer http.ResponseWriter,
 	request *http.Request,

@@ -33,6 +33,9 @@ type Store struct {
 	DB                  *pgxpool.Pool
 	deviceCacheRevision atomic.Uint64
 	deviceLocks         sync.Map
+	ingestSummaryMu     sync.Mutex
+	ingestSummaryAt     time.Time
+	ingestSummaryCache  map[uuid.UUID]DeviceIngestSummary
 }
 
 // AcquireClickHouseHeavyLane is a deployment-wide export/custom-replay lane.
@@ -811,6 +814,15 @@ type DeviceIngestSummary struct {
 func (s *Store) DeviceIngestSummaries(
 	ctx context.Context,
 ) (map[uuid.UUID]DeviceIngestSummary, error) {
+	const ttl = 2 * time.Second
+	s.ingestSummaryMu.Lock()
+	if s.ingestSummaryCache != nil && time.Since(s.ingestSummaryAt) < ttl {
+		cached := cloneDeviceIngestSummaries(s.ingestSummaryCache)
+		s.ingestSummaryMu.Unlock()
+		return cached, nil
+	}
+	s.ingestSummaryMu.Unlock()
+
 	rows, err := s.DB.Query(ctx, `SELECT device_id,
 		count(*) FILTER (WHERE replay_state='pending'),
 		count(*) FILTER (WHERE replay_state='processing'),
@@ -838,7 +850,24 @@ func (s *Store) DeviceIngestSummaries(
 		}
 		result[id] = summary
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	s.ingestSummaryMu.Lock()
+	s.ingestSummaryCache = cloneDeviceIngestSummaries(result)
+	s.ingestSummaryAt = time.Now()
+	s.ingestSummaryMu.Unlock()
+	return result, nil
+}
+
+func cloneDeviceIngestSummaries(
+	source map[uuid.UUID]DeviceIngestSummary,
+) map[uuid.UUID]DeviceIngestSummary {
+	cloned := make(map[uuid.UUID]DeviceIngestSummary, len(source))
+	for id, summary := range source {
+		cloned[id] = summary
+	}
+	return cloned
 }
 
 func (s *Store) DeviceIngestReplayProgress(

@@ -18,9 +18,7 @@ type projectionQueueMock struct {
 	completed         int
 	failed            int
 	advanced          int
-	progressed        int
 	refreshed         int
-	lastProgressLease time.Duration
 	seq               uint64
 	enqueueErr        error
 	beforeLock        func()
@@ -67,23 +65,6 @@ func (m *projectionQueueMock) RefreshCustomProjectionLease(
 	_ context.Context, _ Job, _ time.Duration,
 ) error {
 	m.refreshed++
-	return nil
-}
-func (m *projectionQueueMock) ProgressCustomProjection(
-	ctx context.Context, job Job, snapshot Snapshot, lease time.Duration,
-	activate func(context.Context) error,
-) error {
-	if m.beforeLock != nil {
-		m.beforeLock()
-	}
-	if m.policy.Revision != job.PolicyRevision || !m.policy.Enabled {
-		return errors.New("policy changed")
-	}
-	if err := activate(ctx); err != nil {
-		return err
-	}
-	m.lastProgressLease = lease
-	m.progressed++
 	return nil
 }
 func (m *projectionQueueMock) CutoverCustomProjection(
@@ -418,9 +399,9 @@ func TestDenseHourFinalizeOnlyDuringWindowedRebuild(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(warehouse.activations) != 1 || queue.progressed != 0 || queue.completed != 1 {
-		t.Fatalf("dense hour must finalize-only: activations=%v progressed=%d completed=%d",
-			warehouse.activations, queue.progressed, queue.completed)
+	if len(warehouse.activations) != 1 || queue.completed != 1 {
+		t.Fatalf("dense hour must finalize-only: activations=%v completed=%d",
+			warehouse.activations, queue.completed)
 	}
 	if queue.refreshed < 1 {
 		t.Fatalf("expected lease refresh before finalize publish: refreshed=%d", queue.refreshed)

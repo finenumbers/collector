@@ -65,14 +65,3 @@ func Text(value string) string {
 	})
 	return value
 }
-
-func Bytes(value []byte) []byte {
-	return []byte(Text(string(value)))
-}
-
-func Value(name string, value any) any {
-	if SecretName(name) {
-		return Replacement
-	}
-	return value
-}

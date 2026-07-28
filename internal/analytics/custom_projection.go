@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"strings"
 	"time"
 
 	"collector/internal/customprojection"
@@ -248,53 +247,6 @@ func (c *Client) loadSyslogEventsByID(
 		events = append(events, event)
 	}
 	return events, rows.Err()
-}
-
-func scanCustomRadiusEvents(rows driver.Rows, limit int) ([]customradius.RawEvent, error) {
-	defer rows.Close()
-	events := make([]customradius.RawEvent, 0)
-	for rows.Next() {
-		var event customradius.RawEvent
-		if err := rows.Scan(
-			&event.EventID, &event.DeviceID, &event.ReceivedAt, &event.SourceIP,
-			&event.SourcePort, &event.Transport, &event.Payload,
-		); err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(events) > limit {
-		return nil, fmt.Errorf("custom session scan exceeds %d events", limit)
-	}
-	return events, nil
-}
-
-func mergeAnalyticsEvents(
-	left, right []customradius.RawEvent, limit int,
-) ([]customradius.RawEvent, error) {
-	unique := make(map[uuid.UUID]customradius.RawEvent)
-	for _, events := range [][]customradius.RawEvent{left, right} {
-		for _, event := range events {
-			unique[event.EventID] = event
-		}
-	}
-	if len(unique) > limit {
-		return nil, fmt.Errorf("custom session expansion exceeds %d events", limit)
-	}
-	events := make([]customradius.RawEvent, 0, len(unique))
-	for _, event := range unique {
-		events = append(events, event)
-	}
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].ReceivedAt.Equal(events[j].ReceivedAt) {
-			return customradius.LessEventID(events[i].EventID, events[j].EventID)
-		}
-		return events[i].ReceivedAt.Before(events[j].ReceivedAt)
-	})
-	return events, nil
 }
 
 func (c *Client) WriteCustomProjectionSnapshot(
@@ -659,20 +611,6 @@ func snapshotPacketIDsInBucket(snapshot customprojection.Snapshot) map[uuid.UUID
 	return written
 }
 
-// callPacketLinkIDs returns packet IDs that would be written as call links for
-// the snapshot (intersection of call.Packets and hour-owned Result.Packets).
-func callPacketLinkIDs(snapshot customprojection.Snapshot, call customradius.Call) []uuid.UUID {
-	written := snapshotPacketIDsInBucket(snapshot)
-	ids := make([]uuid.UUID, 0, len(call.Packets))
-	for _, packet := range call.Packets {
-		if _, ok := written[packet.ID]; !ok {
-			continue
-		}
-		ids = append(ids, packet.ID)
-	}
-	return ids
-}
-
 func explanationCodes(items []customradius.Explanation) []string {
 	result := make([]string, 0, len(items))
 	for _, item := range items {
@@ -693,10 +631,6 @@ func boolByte(value bool) uint8 {
 		return 1
 	}
 	return 0
-}
-
-func normalizeIdentity(value string) string {
-	return strings.ToLower(strings.Join(strings.Fields(value), ""))
 }
 
 func redactAttributes(attributes []customradius.Attribute) []customradius.Attribute {

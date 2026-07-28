@@ -87,16 +87,39 @@ Collector подключён к external network `${PROXY_NETWORK:-proxy}` по�
 AntiFraud для этого источника не настраиваются. MinIO/ledger failure оставляет
 локальный файл для автоматического retry.
 
-## Backup
+## Backup and restore
 
-Ежедневно:
+### Daily backup
 
-- `pg_dump -Fc collector`;
-- ClickHouse backup/partition snapshot;
-- MinIO bucket replication либо filesystem snapshot;
-- SFTPGo/PostgreSQL volumes metadata.
+- `pg_dump -Fc collector` (Postgres control plane: users, devices, jobs, settings);
+- ClickHouse backup or partition snapshot of database `collector`;
+- MinIO bucket replication or filesystem snapshot of CDR archive volumes;
+- SFTPGo data volume (`sftpgo_data`) plus compose/env secret material.
 
-Backup хранится вне Docker-хоста, шифруется и проверяется restore-тестом ежеквартально. Single-host deployment не является HA.
+Store backups off the Docker host, encrypted. Single-host deployment is not HA.
+Schedule a quarterly restore drill.
+
+### Restore order (disaster recovery)
+
+1. Stop collector/ingress/export/maintenance containers (leave volumes intact if partial).
+2. Restore Postgres from `pg_dump` into a clean `collector` database; verify `users` and `devices` counts.
+3. Restore ClickHouse `collector` database/partitions; verify `syslog_messages` and `cdr_records` (or Satel tables) row samples for the recovery window.
+4. Restore MinIO / raw CDR volumes; spot-check one object key from `ingest_files`.
+5. Restore SFTPGo volume if FTP home directories must match device credentials.
+6. Restore or recreate empty durable spools (`ingress.db`, `syslog.db`) only if corrupted — prefer empty spools + live SMG catch-up over replaying stale spool bytes blindly.
+7. Start stack; confirm `/health/ready`, admin login, one Syslog datagram from a canary SMG, one CDR file, AntiFraud list for that device.
+
+Consistency note: Postgres job ledgers and ClickHouse snapshots can disagree after a partial restore; after DR, requeue failed projection jobs from Diagnostics and allow catch-up before trusting coverage SLOs.
+
+### Secrets rotation (order)
+
+Rotate one service at a time; keep a brief maintenance window:
+
+1. Postgres (`POSTGRES_PASSWORD` / `DATABASE_URL`) — update env, recreate postgres + collector roles.
+2. ClickHouse (`CLICKHOUSE_PASSWORD`) — update env; recreate clickhouse + collector; optional least-privilege API/export/maintenance users from compose stubs.
+3. MinIO (`MINIO_ROOT_PASSWORD` / `MINIO_SECRET_KEY`) — update env; recreate minio + collector.
+4. SFTPGo admin (`SFTPGO_ADMIN_PASSWORD`) — update env; recreate sftpgo + collector; device FTP user passwords are one-time UI secrets (re-provision if needed).
+5. Confirm `ENVIRONMENT=production` and `SECURE_COOKIES=true`; production rejects default `collector:collector` Postgres URL and other seeded secrets.
 
 ## Retention
 
@@ -108,9 +131,20 @@ Raw CDR остаются в MinIO; lifecycle задаётся эксплуата
 
 Health endpoints:
 
-- `/health/live` — process;
-- `/health/ready` — PostgreSQL и ClickHouse.
+- `/health/live` — process only;
+- `/health/ready` — PostgreSQL и ClickHouse (compose healthcheck collector использует ready);
 - `http://127.0.0.1:18081` на Docker-хосте — source-preserving ingress.
+
+### ClickHouse / Postgres sizing notes
+
+Baseline host (до ~10 SMG / 100 CPS): 16 vCPU / 64 GiB / NVMe ≥2 TiB — см. выше.
+In-process query ceilings (`internal/analytics/workload.go`): Interactive 512 MiB /
+2 threads (UI list/cards), CustomReplay 1 GiB / 1 thread (projection write),
+CustomReconcile 256 MiB, Export 512 MiB. Dense AF hours that hit memory overflow
+are windowed in-process; keep headroom so Interactive card lookups and CustomReplay
+do not contend on a saturated CH host. Prefer leaving Postgres/ClickHouse without
+hard Docker memory caps below these ceilings unless the host is dedicated and
+measured.
 
 Операционные параметры AntiFraud / coverage / VoIPmonitor / export / ClickHouse
 admission / **лимиты контейнеров** управляются в **Настройки → Параметры**

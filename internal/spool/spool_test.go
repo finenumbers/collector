@@ -13,10 +13,10 @@ func TestQueuePersistsAndDeletesInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := queue.Enqueue(now, "first", []byte("one")); err != nil {
-		t.Fatal(err)
-	}
-	if err := queue.Enqueue(now.Add(time.Nanosecond), "second", []byte("two")); err != nil {
+	if err := queue.EnqueueBatch([]Entry{
+		{ReceivedAt: now, EventID: "first", Payload: []byte("one")},
+		{ReceivedAt: now.Add(time.Nanosecond), EventID: "second", Payload: []byte("two")},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.Close(); err != nil {
@@ -53,7 +53,9 @@ func TestQueueQuarantinesWithoutDiscardingPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer queue.Close()
-	if err := queue.Enqueue(time.Now().UTC(), "broken", []byte{0xff, 0x00, 0x01}); err != nil {
+	if err := queue.EnqueueBatch([]Entry{{
+		ReceivedAt: time.Now().UTC(), EventID: "broken", Payload: []byte{0xff, 0x00, 0x01},
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	items, err := queue.Peek(1)

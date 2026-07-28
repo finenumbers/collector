@@ -191,7 +191,7 @@ services:
       - cdr_data:/data/cdr
       - spool_data:/data/spool
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/live"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/ready"]
       interval: 10s
       timeout: 3s
       retries: 20

@@ -364,27 +364,17 @@ func (s *Store) NextCustomProjectionSeq(ctx context.Context) (uint64, error) {
 	return seq, err
 }
 
-func (s *Store) ProgressCustomProjection(
-	ctx context.Context,
-	job customprojection.Job,
-	snapshot customprojection.Snapshot,
-	lease time.Duration,
-	activate func(context.Context) error,
-) error {
-	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, false, lease)
-}
-
 func (s *Store) CutoverCustomProjection(
 	ctx context.Context,
 	job customprojection.Job,
 	snapshot customprojection.Snapshot,
 	activate func(context.Context) error,
 ) error {
-	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate, true, 0)
+	return s.applyCustomProjectionCutover(ctx, job, snapshot, activate)
 }
 
-// RefreshCustomProjectionLease extends job + device leases while a progressive
-// windowed rebuild is still writing ClickHouse snapshots outside the cutover tx.
+// RefreshCustomProjectionLease extends job + device leases while a windowed
+// rebuild is still writing ClickHouse snapshots outside the cutover tx.
 func (s *Store) RefreshCustomProjectionLease(
 	ctx context.Context, job customprojection.Job, lease time.Duration,
 ) error {
@@ -420,8 +410,6 @@ func (s *Store) applyCustomProjectionCutover(
 	job customprojection.Job,
 	snapshot customprojection.Snapshot,
 	activate func(context.Context) error,
-	finalize bool,
-	lease time.Duration,
 ) error {
 	conn, err := s.DB.Acquire(ctx)
 	if err != nil {
@@ -497,39 +485,19 @@ func (s *Store) applyCustomProjectionCutover(
 	if tag.RowsAffected() != 1 {
 		return errors.New("projection watermark compare-and-swap failed")
 	}
-	if finalize {
-		if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
-			SET status=CASE WHEN generation=claimed_generation THEN 'completed' ELSE 'pending' END,
-				completed_at=CASE WHEN generation=claimed_generation THEN now() ELSE NULL END,
-				next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
-					ELSE LEAST(next_attempt_at,now()) END,
-				last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
-				lease_expires_at=NULL,worker_id=NULL,updated_at=now()
-			WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
-			WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
-			return err
-		}
-	} else {
-		// Keep the hour job running and refresh leases so progressive publishes
-		// remain visible while later 5m windows continue.
-		if lease <= 0 {
-			lease = 2 * time.Minute
-		}
-		if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
-			SET lease_expires_at=now()+$3::interval,updated_at=now()
-			WHERE id=$1 AND claimed_generation=$2`,
-			job.ID, job.Generation, lease.String()); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE custom_projection_device_leases
-			SET lease_expires_at=now()+$3::interval,updated_at=now()
-			WHERE device_id=$1 AND worker_id=$2`,
-			job.DeviceID, job.WorkerID, lease.String()); err != nil {
-			return err
-		}
+	if _, err := tx.Exec(ctx, `UPDATE custom_projection_jobs
+		SET status=CASE WHEN generation=claimed_generation THEN 'completed' ELSE 'pending' END,
+			completed_at=CASE WHEN generation=claimed_generation THEN now() ELSE NULL END,
+			next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
+				ELSE LEAST(next_attempt_at,now()) END,
+			last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
+			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
+		WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
+		WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

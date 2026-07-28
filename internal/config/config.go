@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -155,7 +156,8 @@ func Load() (Config, error) {
 	}
 	if cfg.Environment == "production" && cfg.Role != "ingress" {
 		if cfg.ClickHousePass == "collector" || cfg.MinIOSecretKey == "collector-change-me" ||
-			cfg.SFTPGoPassword == "collector-change-me" || !cfg.SecureCookies {
+			cfg.SFTPGoPassword == "collector-change-me" || !cfg.SecureCookies ||
+			strings.Contains(cfg.PostgresURL, "://collector:collector@") {
 			return Config{}, fmt.Errorf("production requires non-default service secrets and secure cookies")
 		}
 	}

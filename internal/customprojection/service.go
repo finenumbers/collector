@@ -78,9 +78,6 @@ type Queue interface {
 	NextCustomProjectionSeq(context.Context) (uint64, error)
 	// RefreshCustomProjectionLease extends ownership before slow CH writes.
 	RefreshCustomProjectionLease(context.Context, Job, time.Duration) error
-	// ProgressCustomProjection publishes a mid-hour active snapshot without
-	// completing the job or releasing the per-device lease.
-	ProgressCustomProjection(context.Context, Job, Snapshot, time.Duration, func(context.Context) error) error
 	CutoverCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
 	EnqueueCDRReconciliationBuckets(context.Context, uuid.UUID, uint64, []time.Time) error
 }
@@ -533,19 +530,6 @@ func (w *Worker) finishBucket(
 	return w.publishBucket(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected)
 }
 
-func (w *Worker) publishBucketProgress(
-	ctx context.Context,
-	cfg Config,
-	job Job,
-	from time.Time,
-	result customradius.Result,
-	watermarkTime time.Time,
-	watermarkID uuid.UUID,
-	affected map[time.Time]struct{},
-) error {
-	return w.publishBucketSnapshot(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected, false)
-}
-
 func (w *Worker) publishBucket(
 	ctx context.Context,
 	cfg Config,
@@ -556,27 +540,13 @@ func (w *Worker) publishBucket(
 	watermarkID uuid.UUID,
 	affected map[time.Time]struct{},
 ) error {
-	return w.publishBucketSnapshot(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected, true)
-}
-
-func (w *Worker) publishBucketSnapshot(
-	ctx context.Context,
-	cfg Config,
-	job Job,
-	from time.Time,
-	result customradius.Result,
-	watermarkTime time.Time,
-	watermarkID uuid.UUID,
-	affected map[time.Time]struct{},
-	finalize bool,
-) error {
 	snapshot := Snapshot{
 		ID: stableSnapshotID(job, resultEventIDs(result)), DeviceID: job.DeviceID, BucketStart: from,
 		PolicyRevision: job.PolicyRevision, ProjectionSeq: job.ProjectionSeq,
 		WatermarkTime: watermarkTime, WatermarkID: watermarkID,
 		Result: result,
 	}
-	if finalize && result.NextDeadline != nil {
+	if result.NextDeadline != nil {
 		if err := w.Queue.ScheduleCustomProjectionDeadline(ctx, job, *result.NextDeadline); err != nil {
 			return err
 		}
@@ -589,15 +559,13 @@ func (w *Worker) publishBucketSnapshot(
 			otherBuckets = append(otherBuckets, bucket)
 		}
 	}
-	if finalize {
-		if err := w.Queue.EnqueueCustomProjectionBuckets(
-			ctx, job.DeviceID, job.PolicyRevision, otherBuckets,
-		); err != nil {
-			return err
-		}
+	if err := w.Queue.EnqueueCustomProjectionBuckets(
+		ctx, job.DeviceID, job.PolicyRevision, otherBuckets,
+	); err != nil {
+		return err
 	}
 	// Heartbeat before slow CH write/activate so dense windowed rebuilds cannot
-	// expire the fixed cutover-only lease refresh mid-snapshot.
+	// expire the lease mid-snapshot.
 	if err := w.Queue.RefreshCustomProjectionLease(ctx, job, cfg.Lease); err != nil {
 		return err
 	}
@@ -622,18 +590,12 @@ func (w *Worker) publishBucketSnapshot(
 	activate := func(activateCtx context.Context) error {
 		return w.Warehouse.ActivateCustomProjectionSnapshot(activateCtx, snapshot)
 	}
-	if finalize {
-		if err := w.Queue.CutoverCustomProjection(cutoverCtx, job, snapshot, activate); err != nil {
-			return err
-		}
-		return w.Queue.EnqueueCDRReconciliationBuckets(
-			cutoverCtx, job.DeviceID, job.PolicyRevision, allBuckets,
-		)
+	if err := w.Queue.CutoverCustomProjection(cutoverCtx, job, snapshot, activate); err != nil {
+		return err
 	}
-	// Progressive publishes expose partial hour contents; CDR reconciliation,
-	// sibling-hour enqueue, and durable deadlines stay finalize-only.
-	// Kept for lease-refresh activate paths; windowed rebuild uses finalize only.
-	return w.Queue.ProgressCustomProjection(cutoverCtx, job, snapshot, cfg.Lease, activate)
+	return w.Queue.EnqueueCDRReconciliationBuckets(
+		cutoverCtx, job.DeviceID, job.PolicyRevision, allBuckets,
+	)
 }
 
 func resultEventIDs(result customradius.Result) []customradius.RawEvent {

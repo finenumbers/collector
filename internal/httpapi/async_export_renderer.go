@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -428,11 +427,4 @@ func exportRowAfterSnapshot(
 	}
 	return rowTime.Equal(*highTime) && highID != nil &&
 		bytes.Compare(rowID[:], highID[:]) > 0
-}
-
-func estimatedRows(value *int64) string {
-	if value == nil {
-		return ""
-	}
-	return strconv.FormatInt(*value, 10)
 }

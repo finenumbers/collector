@@ -98,10 +98,6 @@ func (q *Queue) Close() error {
 	return q.db.Close()
 }
 
-func (q *Queue) Enqueue(receivedAt time.Time, eventID string, payload []byte) error {
-	return q.EnqueueBatch([]Entry{{ReceivedAt: receivedAt, EventID: eventID, Payload: payload}})
-}
-
 func (q *Queue) EnqueueBatch(entries []Entry) error {
 	if len(entries) == 0 {
 		return nil

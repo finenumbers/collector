@@ -29,6 +29,27 @@ func enabled() Config {
 	return Config{Enabled: true, ResponseTimeout: 3 * time.Second}
 }
 
+func mergeSessionEventsForTest(existing, additions []RawEvent) []RawEvent {
+	merged := make([]RawEvent, 0, len(existing)+len(additions))
+	seen := make(map[uuid.UUID]struct{}, len(existing)+len(additions))
+	appendEvent := func(event RawEvent) {
+		if event.EventID != uuid.Nil {
+			if _, exists := seen[event.EventID]; exists {
+				return
+			}
+			seen[event.EventID] = struct{}{}
+		}
+		merged = append(merged, event)
+	}
+	for _, event := range existing {
+		appendEvent(event)
+	}
+	for _, event := range additions {
+		appendEvent(event)
+	}
+	return merged
+}
+
 func TestAllFamiliesAndSemantics(t *testing.T) {
 	events := []RawEvent{
 		raw(1, 0, "[C1] Access-Request [7] Cisco-AVPair='xpgk-request-type=number' Acct-Session-Id=' S-1 '"),
@@ -38,7 +59,7 @@ func TestAllFamiliesAndSemantics(t *testing.T) {
 		raw(5, 2*time.Second, "[C1] Accounting-Request [9] Acct-Session-Id='S-1' Acct-Status-Type=Start"),
 		raw(6, 2*time.Second+time.Millisecond, "[C1] Accounting-Response [9]"),
 	}
-	result := Build(enabled(), events, testBase.Add(10*time.Second))
+	result := BuildAtCutoff(enabled(), events, testBase.Add(10*time.Second))
 	if len(result.Packets) != 6 {
 		t.Fatalf("packets=%d, want 6", len(result.Packets))
 	}
@@ -64,7 +85,7 @@ func TestAllFamiliesAndSemantics(t *testing.T) {
 }
 
 func TestDisabledProducesNothing(t *testing.T) {
-	result := Build(Config{Enabled: false}, []RawEvent{
+	result := BuildAtCutoff(Config{Enabled: false}, []RawEvent{
 		raw(1, 0, "Antifraud-Auth-Request [1] Password=do-not-retain"),
 	}, testBase)
 	if len(result.Packets)+len(result.Calls)+len(result.Unmatched) != 0 {
@@ -73,7 +94,7 @@ func TestDisabledProducesNothing(t *testing.T) {
 }
 
 func TestConservativeDetectionAndFalseCDRGuard(t *testing.T) {
-	result := Build(enabled(), []RawEvent{
+	result := BuildAtCutoff(enabled(), []RawEvent{
 		raw(1, 0, "Access-Request [1] Calling-Station-Id=100 Called-Station-Id=200 Acct-Session-Id=s"),
 		raw(2, time.Second, "RADIUS server rejected: :0 (replied 0)"),
 		raw(3, 2*time.Second, "Access-Request [2] Some-Custom-Hint=yes Acct-Session-Id=x"),
@@ -138,7 +159,7 @@ func TestMalformedQuoteAndPacketIDRange(t *testing.T) {
 }
 
 func TestAssemblySupersededHeaderClosesPriorAnchor(t *testing.T) {
-	result := Build(enabled(), []RawEvent{
+	result := BuildAtCutoff(enabled(), []RawEvent{
 		raw(1, 0, "[C1] Access-Request [1]"),
 		raw(2, time.Millisecond, "[C1] Access-Request [2]"),
 		raw(3, 2*time.Millisecond, "[C1] Cisco-AVPair='xpgk-request-type=check_call' Acct-Session-Id=s2"),
@@ -152,7 +173,7 @@ func TestAssemblySupersededHeaderClosesPriorAnchor(t *testing.T) {
 }
 
 func TestAssemblyKeepsConcurrentContextsSeparate(t *testing.T) {
-	result := Build(enabled(), []RawEvent{
+	result := BuildAtCutoff(enabled(), []RawEvent{
 		raw(1, 0, "[C1] Access-Request [1]"),
 		raw(2, time.Millisecond, "[C2] Access-Request [2]"),
 		raw(3, 2*time.Millisecond, "[C1] Cisco-AVPair='xpgk-request-type=number' Acct-Session-Id=s1"),
@@ -165,7 +186,7 @@ func TestAssemblyKeepsConcurrentContextsSeparate(t *testing.T) {
 
 func TestRetransmissionGroupingAndIDLessAmbiguity(t *testing.T) {
 	request := "Access-Request [4] Cisco-AVPair='xpgk-request-type=check_call' Acct-Session-Id=s1"
-	result := Build(enabled(), []RawEvent{
+	result := BuildAtCutoff(enabled(), []RawEvent{
 		raw(1, 0, request),
 		raw(2, time.Millisecond, request),
 		raw(3, 2*time.Millisecond, "Access-Accept [4]"),
@@ -182,7 +203,7 @@ func TestRetransmissionGroupingAndIDLessAmbiguity(t *testing.T) {
 }
 
 func TestStrictCallIdentity(t *testing.T) {
-	result := Build(enabled(), []RawEvent{
+	result := BuildAtCutoff(enabled(), []RawEvent{
 		raw(1, 0, "Antifraud-Auth-Request [1] Acct-Session-Id=s1 h323-conf-id=H Calling-Station-Id=10 Called-Station-Id=20"),
 		raw(2, time.Second, "Antifraud-Auth-Request [2] Acct-Session-Id=s2 h323-conf-id=h Calling-Station-Id=10 Called-Station-Id=20"),
 		raw(3, 2*time.Second, "Antifraud-Auth-Request [3] h323-conf-id=H"),
@@ -208,15 +229,15 @@ func TestTimeoutAndLateReconciliation(t *testing.T) {
 	events := []RawEvent{
 		raw(1, 0, "Access-Request [9] Cisco-AVPair='xpgk-request-type=check_call' Acct-Session-Id=s"),
 	}
-	pending := Build(enabled(), events, testBase.Add(time.Second))
+	pending := BuildAtCutoff(enabled(), events, testBase.Add(time.Second))
 	if pending.Packets[0].Decision != "" || pending.Packets[0].Status != PacketPending {
 		t.Fatalf("premature fallback: %+v", pending.Packets[0])
 	}
-	fallback := Build(enabled(), events, testBase.Add(4*time.Second))
+	fallback := BuildAtCutoff(enabled(), events, testBase.Add(4*time.Second))
 	if fallback.Packets[0].Decision != DecisionUnavailableFallback {
 		t.Fatalf("missing fallback: %+v", fallback.Packets[0])
 	}
-	reconciled := Build(enabled(), append(events,
+	reconciled := BuildAtCutoff(enabled(), append(events,
 		raw(2, 2*time.Second, "Access-Accept [9]")), testBase.Add(4*time.Second))
 	if reconciled.Packets[0].Decision != DecisionAllow ||
 		reconciled.Packets[0].Status != PacketPaired {
@@ -229,13 +250,13 @@ func TestDeterminismBatchRestartDSTAndJSONSecrecy(t *testing.T) {
 		raw(1, time.Hour, "Antifraud-Auth-Request [1] Cisco-AVPair='xpgk-request-type=number' Acct-Session-Id=dst Password=hidden"),
 		raw(2, time.Hour+time.Millisecond, "Access-Accept [1]"),
 	}
-	baseline := Build(enabled(), events, testBase.Add(2*time.Hour))
+	baseline := BuildAtCutoff(enabled(), events, testBase.Add(2*time.Hour))
 	for seed := int64(0); seed < 20; seed++ {
 		shuffled := append([]RawEvent(nil), events...)
 		rand.New(rand.NewSource(seed)).Shuffle(len(shuffled), func(i, j int) {
 			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 		})
-		restarted := NewEngine(enabled()).Process(shuffled, testBase.Add(2*time.Hour))
+		restarted := NewEngine(enabled()).ProcessAtCutoff(shuffled, testBase.Add(2*time.Hour))
 		if !reflect.DeepEqual(baseline, restarted) {
 			t.Fatalf("seed %d changed deterministic result", seed)
 		}
@@ -388,9 +409,9 @@ func TestCrossHourSessionRecomputeAndDeadline(t *testing.T) {
 		raw(5, 5*time.Hour, "[C3] Accounting-Request [3] Acct-Session-Id=long Acct-Status-Type=Stop Acct-Session-Time=10800"),
 		raw(6, 5*time.Hour+time.Millisecond, "[C3] Accounting-Response [3]"),
 	}
-	merged := MergeSessionEvents(initial, later)
-	merged = MergeSessionEvents(merged, later)
-	result := NewEngine(enabled()).RecomputeSession(merged, testBase.Add(6*time.Hour))
+	merged := mergeSessionEventsForTest(initial, later)
+	merged = mergeSessionEventsForTest(merged, later)
+	result := BuildAtCutoff(enabled(), merged, testBase.Add(6*time.Hour))
 	if len(merged) != 6 || len(result.Calls) != 1 ||
 		result.Calls[0].Status != CallCompleted ||
 		result.Calls[0].Accounting.SessionDuration == nil ||
@@ -442,7 +463,7 @@ func TestContextOnlyUnmatchedRequiresUniqueAuthoritativeCall(t *testing.T) {
 }
 
 func TestGoldenIndication(t *testing.T) {
-	result := Build(enabled(), []RawEvent{
+	result := BuildAtCutoff(enabled(), []RawEvent{
 		raw(81, 0, "Antifraud-Auth-Request [81] Cisco-AVPair='xpgk-request-type=number' Acct-Session-Id=golden"),
 		raw(82, time.Millisecond, "Access-Accept [81]"),
 	}, testBase.Add(time.Second))

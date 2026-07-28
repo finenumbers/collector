@@ -21,11 +21,6 @@ func NewEngine(config Config) *Engine {
 	return &Engine{config: config.normalized()}
 }
 
-// Build is a convenience entry point for stateless batch/restart processing.
-func Build(config Config, events []RawEvent, now time.Time) Result {
-	return BuildAtCutoff(config, events, now)
-}
-
 // BuildAtCutoff evaluates timeout state at the supplied deterministic cutoff.
 func BuildAtCutoff(config Config, events []RawEvent, cutoff time.Time) Result {
 	return NewEngine(config).ProcessAtCutoff(events, cutoff)
@@ -44,12 +39,6 @@ type packetBuilder struct {
 type decodedEvent struct {
 	raw      RawEvent
 	envelope Envelope
-}
-
-// Process is deterministic for the same event set, configuration, and now.
-// Late evidence is handled by recomputing the batch rather than mutating state.
-func (engine *Engine) Process(events []RawEvent, now time.Time) Result {
-	return engine.ProcessAtCutoff(events, now)
 }
 
 // ProcessAtCutoff recomputes the complete projection at an explicit cutoff.

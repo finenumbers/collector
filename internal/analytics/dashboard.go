@@ -25,6 +25,7 @@ type DashboardDevice struct {
 	VoipmonitorUnmatched       uint64     `json:"voipmonitorUnmatched"`
 	LatestSyslogAt             *time.Time `json:"latestSyslogAt"`
 	LatestCDRAt                *time.Time `json:"latestCdrAt"`
+	LatestAntifraudAt          *time.Time `json:"latestAntifraudAt"`
 	ActiveRevision             uint64     `json:"activeRevision"`
 	ActiveTimezone             string     `json:"activeTimezone"`
 	BuildingRevision           uint64     `json:"buildingRevision"`
@@ -157,6 +158,26 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		_ = rows.Close()
 	}
 
+	rows, err = c.Conn.Query(ctx, `SELECT device_id,max(last_seen_at)
+		FROM collector.custom_antifraud_calls_current
+		GROUP BY device_id`)
+	if err != nil {
+		result.Diagnostics = append(result.Diagnostics, "antifraud tip: "+err.Error())
+	} else {
+		for rows.Next() {
+			var id uuid.UUID
+			var latest time.Time
+			if scanErr := rows.Scan(&id, &latest); scanErr != nil {
+				result.Diagnostics = append(result.Diagnostics, "antifraud tip: "+scanErr.Error())
+				break
+			}
+			if !latest.IsZero() {
+				device(id).LatestAntifraudAt = &latest
+			}
+		}
+		_ = rows.Close()
+	}
+
 	rows, err = c.Conn.Query(ctx, `
 		SELECT device_id,
 			countIf(match_status='matched_exact'),
@@ -222,4 +243,32 @@ func ValidateDashboardWindow(value string) (time.Duration, error) {
 		return 7 * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(value)
+}
+
+// DeviceStorageBytes estimates retained payload volume for the given devices.
+// Syslog payload length dominates equipment storage; CDR row byteSize is included
+// when present. Interactive dashboard budget — no FINAL.
+func (c *Client) DeviceStorageBytes(
+	ctx context.Context, deviceIDs []uuid.UUID,
+) (uint64, error) {
+	if len(deviceIDs) == 0 {
+		return 0, nil
+	}
+	ctx, release, err := c.queryContext(ctx, workload.Interactive)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	var syslogBytes, cdrBytes uint64
+	if err := c.Conn.QueryRow(ctx, `SELECT ifNull(sum(length(payload)),0)
+		FROM collector.syslog_messages WHERE device_id IN ?`, deviceIDs).
+		Scan(&syslogBytes); err != nil {
+		return 0, err
+	}
+	if err := c.Conn.QueryRow(ctx, `SELECT ifNull(sum(byteSize(*)),0)
+		FROM collector.cdr_records WHERE device_id IN ?`, deviceIDs).
+		Scan(&cdrBytes); err != nil {
+		return 0, err
+	}
+	return syslogBytes + cdrBytes, nil
 }

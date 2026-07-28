@@ -69,7 +69,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .workspace {
   height: 100%;
   display: grid;
-  grid-template-columns: 226px minmax(0, 1fr);
+  grid-template-columns: 192px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
 }
@@ -83,8 +83,14 @@ button:disabled { opacity: .55; cursor: wait; }
 .device-list { padding: 0 7px 8px; border-bottom: 1px solid var(--line); }
 .device-button { width: 100%; display: flex; align-items: center; gap: 9px;
   min-height: 44px; padding: 5px 8px; text-align: left; }
-.device-button:hover, .device-button.active { background: var(--panel-2); }
-.device-button.active { color: var(--text); }
+.device-button:hover { background: var(--panel-2); }
+.device-button.active {
+  background: #d8f5e4;
+  color: #0f5132;
+  box-shadow: inset 3px 0 0 #16855b;
+}
+.device-button.active strong { color: #0f5132; }
+.device-button.active small { color: #3d7a5c; }
 .device-button span:nth-child(2) { min-width: 0; }
 .device-button strong, .device-button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .device-button strong { font-size: 12px; font-weight: 600; }
@@ -374,6 +380,16 @@ tbody tr { cursor: pointer; }
   color: var(--muted); text-align: left; }
 .settings-tabs button:hover { background: #eef2f7; }
 .settings-tabs button.active { color: #174ea6; background: var(--accent-soft); font-weight: 600; }
+.audit-logs-panel { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.audit-search { display: flex; gap: 8px; align-items: center; }
+.audit-search input { min-width: 220px; }
+.audit-group { border: 1px solid var(--line); background: var(--panel); padding: 10px 12px; }
+.audit-group h4 { margin: 0 0 8px; font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
+.audit-group h4 small { color: var(--muted); font-weight: 500; }
+.audit-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.audit-table th, .audit-table td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+.audit-table th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+.audit-details { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-content { min-width: 0; flex: 1; padding: 14px; border: 1px solid var(--line); background: var(--panel); }
 .user-admin-row { padding: 8px; border: 1px solid var(--line); background: #fbfcfe; }
 .user-admin-row .row-error { grid-column: 1 / -1; margin: 3px 0 0; }

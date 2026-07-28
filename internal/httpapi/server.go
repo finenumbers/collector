@@ -113,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Delete("/system/users/{userID}", s.deleteUser)
 			private.With(s.requireAdmin).Get("/system/retention", s.listRetention)
 			private.With(s.requireAdmin).Patch("/system/retention", s.updateRetention)
+			private.With(s.requireAdmin).Get("/system/audit-logs", s.listAuditLogs)
 			private.Get("/devices", s.listDevices)
 			private.With(s.requireAdmin).Post("/devices", s.createDevice)
 			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
@@ -356,16 +357,17 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	var weightedTalk float64
 	activeDevices := 0
 	type categoryAccumulator struct {
-		totalSources, activeSources                   int
-		calls, failed                                 uint64
-		antifraud, rejects, files, bytes              uint64
-		vmExact, vmFallback, vmAmbiguous, vmUnmatched uint64
-		weightedTalk                                  float64
+		totalSources, activeSources                    int
+		calls, failed                                  uint64
+		antifraud, rejects, files, bytes, storageBytes uint64
+		vmExact, vmFallback, vmAmbiguous, vmUnmatched  uint64
+		weightedTalk                                   float64
 	}
 	categoryTotals := map[string]*categoryAccumulator{
 		equipment.CategoryEquipment:  {},
 		equipment.CategorySoftswitch: {},
 	}
+	equipmentIDs := make([]uuid.UUID, 0)
 	for _, configured := range devices {
 		var metrics *analytics.DashboardDevice
 		var fileMetrics *store.IngestFileMetrics
@@ -378,6 +380,9 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		if configured.SourceCategory == equipment.CategorySoftswitch {
 			ledger := ingestSummaries[configured.ID].Metrics
 			fileMetrics = &ledger
+		}
+		if configured.SourceCategory == equipment.CategoryEquipment {
+			equipmentIDs = append(equipmentIDs, configured.ID)
 		}
 		if configured.Enabled && configured.PurgeState == "active" {
 			activeDevices++
@@ -418,6 +423,11 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		}
 		rows = append(rows, dashboardDeviceRow(configured, metrics, fileMetrics))
 	}
+	if storage, storageErr := s.Analytics.DeviceStorageBytes(request.Context(), equipmentIDs); storageErr != nil {
+		fleet.Diagnostics = append(fleet.Diagnostics, "storage: "+storageErr.Error())
+	} else if category := categoryTotals[equipment.CategoryEquipment]; category != nil {
+		category.storageBytes = storage
+	}
 	averageTalk := float64(0)
 	if calls > 0 {
 		averageTalk = weightedTalk / float64(calls)
@@ -435,7 +445,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			"totalSources": category.totalSources, "activeSources": category.activeSources,
 			"calls": category.calls, "failed": category.failed, "averageTalkMs": average,
 			"antifraud": category.antifraud, "rejects": category.rejects,
-			"files": category.files, "bytes": category.bytes,
+			"files": category.files, "bytes": category.bytes, "storageBytes": category.storageBytes,
 			"voipmonitorMatchedExact":    category.vmExact,
 			"voipmonitorMatchedFallback": category.vmFallback,
 			"voipmonitorAmbiguous":       category.vmAmbiguous,
@@ -489,9 +499,10 @@ func dashboardDeviceRow(
 	metrics *analytics.DashboardDevice,
 	fileMetrics *store.IngestFileMetrics,
 ) map[string]any {
-	var latestSyslogAt, latestCDRAt any
+	var latestSyslogAt, latestCDRAt, latestAntifraudAt any
 	if metrics != nil {
 		latestSyslogAt, latestCDRAt = metrics.LatestSyslogAt, metrics.LatestCDRAt
+		latestAntifraudAt = metrics.LatestAntifraudAt
 	} else if fileMetrics != nil {
 		latestCDRAt = fileMetrics.LatestAt
 	}
@@ -518,6 +529,7 @@ func dashboardDeviceRow(
 		"enabled":          configured.Enabled, "metrics": metrics, "fileMetrics": fileMetrics,
 		"freshness": map[string]any{
 			"latestSyslogAt": latestSyslogAt, "latestCdrAt": latestCDRAt,
+			"latestAntifraudAt": latestAntifraudAt,
 		},
 		"revision": revision,
 	}

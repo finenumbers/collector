@@ -26,6 +26,14 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('container-limits.env')
   })
 
+  it('exposes searchable system audit logs grouped by category', () => {
+    expect(main).toContain('SystemAuditLogsPanel')
+    expect(main).toContain('/system/audit-logs?limit=300')
+    expect(main).toContain('>Логи</button>')
+    expect(main).toContain('AUDIT_CATEGORY_LABELS')
+    expect(main).toContain('Аутентификация')
+  })
+
   it('loads operational diagnostics from the admin endpoint on demand', () => {
     expect(main).toContain('OperationalDiagnosticsPanel')
     expect(main).toContain("'/system/diagnostics'")

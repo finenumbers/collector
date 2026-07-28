@@ -78,16 +78,6 @@ func List() []Template {
 	return result
 }
 
-func ListCategory(category string) []Template {
-	var result []Template
-	for _, template := range List() {
-		if template.Category == category {
-			result = append(result, template)
-		}
-	}
-	return result
-}
-
 func EltexTemplateForFirmware(firmware string) string {
 	if firmware == "3.410" {
 		return TemplateEltex3410

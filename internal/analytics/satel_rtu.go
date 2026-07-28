@@ -417,13 +417,6 @@ func (c *Client) ReinterpretSatelRTUTimes(
 		timezone, timezone, deviceID)
 }
 
-func (c *Client) ListSatelRTUCalls(
-	ctx context.Context, deviceID uuid.UUID, search string, limit uint64,
-) ([]SatelRTUCallRow, error) {
-	page, err := c.ListSatelRTUCallsPage(ctx, deviceID, search, limit, nil)
-	return page.Items, err
-}
-
 func (c *Client) ListSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
 ) (SatelRTUCallPage, error) {

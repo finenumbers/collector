@@ -357,9 +357,6 @@ func TestIsEventLimitError(t *testing.T) {
 	if IsEventLimitError(fmt.Errorf("clickhouse unavailable")) {
 		t.Fatal("non-overflow error misclassified")
 	}
-	if !IsMemoryBoundError(fmt.Errorf("bucket payload bytes 9 exceed memory bound 8")) {
-		t.Fatal("memory bound error not detected")
-	}
 	if !IsClickHouseResourceError(fmt.Errorf("code: 241, message: Query memory limit exceeded: would use 512.85 MiB")) {
 		t.Fatal("clickhouse memory error not detected")
 	}

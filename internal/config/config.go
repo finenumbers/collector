@@ -34,7 +34,6 @@ type Config struct {
 	SFTPGoPassword                 string
 	SessionTTL                     time.Duration
 	SecureCookies                  bool
-	TrustedProxyCount              int
 	CustomProjectionEnabled        bool
 	CustomProjectionBatchSize      int
 	CustomProjectionMaxEvents      int
@@ -101,7 +100,6 @@ func Load() (Config, error) {
 		SFTPGoPassword:                 env("SFTPGO_ADMIN_PASSWORD", "collector-change-me"),
 		SessionTTL:                     12 * time.Hour,
 		SecureCookies:                  envBool("SECURE_COOKIES", false),
-		TrustedProxyCount:              envInt("TRUSTED_PROXY_COUNT", 1),
 		CustomProjectionEnabled:        envBool("CUSTOM_PROJECTION_ENABLED", true),
 		CustomProjectionBatchSize:      envInt("CUSTOM_PROJECTION_BATCH_SIZE", 128),
 		CustomProjectionMaxEvents:      envInt("CUSTOM_PROJECTION_MAX_EVENTS", 50_000),

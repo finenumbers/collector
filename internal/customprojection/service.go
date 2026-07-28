@@ -618,13 +618,6 @@ func IsEventLimitError(err error) bool {
 	return strings.Contains(message, "exceeds") && strings.Contains(message, "events")
 }
 
-func IsMemoryBoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "memory bound")
-}
-
 func IsClickHouseResourceError(err error) bool {
 	if err == nil {
 		return false

@@ -270,6 +270,7 @@ func main() {
 				MinScore:           cfg.VoipmonitorMinScore,
 				DisambiguityMargin: cfg.VoipmonitorDisambiguityMargin,
 				NumberSuffixLen:    cfg.VoipmonitorNumberSuffixLen,
+				UseShareURL:        cfg.VoipmonitorUseShareURL,
 			},
 			Sleep:    cfg.VoipmonitorWorkerSleep,
 			Lease:    cfg.VoipmonitorLease,

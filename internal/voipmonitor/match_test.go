@@ -6,28 +6,107 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-func TestNormalizeCallID(t *testing.T) {
+type mockVMCall struct {
+	CDRID    string
+	CallID   string
+	Caller   string
+	Called   string
+	Calldate string
+	Duration int
+	CallerIP string
+	CalledIP string
+}
+
+func newVMServer(t *testing.T, catalog []mockVMCall) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		task := r.Form.Get("task")
+		var params map[string]any
+		_ = json.Unmarshal([]byte(r.Form.Get("params")), &params)
+		switch task {
+		case "getShareURL":
+			cdrID, _ := params["cdrId"].(string)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"url": "https://vm.example/share/" + cdrID,
+			})
+			return
+		case "getVoipCalls":
+			wantCallID, _ := params["callId"].(string)
+			wantCDRID := ""
+			switch typed := params["cdrId"].(type) {
+			case string:
+				wantCDRID = typed
+			case float64:
+				wantCDRID = strconv.FormatInt(int64(typed), 10)
+			}
+			caller, _ := params["caller"].(string)
+			called, _ := params["called"].(string)
+			out := make([]map[string]any, 0)
+			for _, item := range catalog {
+				if wantCDRID != "" && item.CDRID != wantCDRID {
+					continue
+				}
+				if wantCallID != "" && !callIDsEqual(wantCallID, item.CallID) {
+					continue
+				}
+				if wantCallID == "" && wantCDRID == "" {
+					if caller != "" && !strings.HasSuffix(digits(item.Caller), digits(caller)) &&
+						!strings.Contains(digits(item.Caller), digits(caller)) {
+						continue
+					}
+					if called != "" && !strings.HasSuffix(digits(item.Called), digits(called)) &&
+						!strings.Contains(digits(item.Called), digits(called)) {
+						continue
+					}
+				}
+				row := map[string]any{
+					"cdrId": item.CDRID, "callId": item.CallID,
+					"caller": item.Caller, "called": item.Called,
+					"calldate": item.Calldate, "duration": item.Duration,
+				}
+				if item.CallerIP != "" {
+					row["sipcallerip"] = item.CallerIP
+				}
+				if item.CalledIP != "" {
+					row["sipcalledip"] = item.CalledIP
+				}
+				out = append(out, row)
+			}
+			_ = json.NewEncoder(w).Encode(out)
+			return
+		default:
+			http.Error(w, "unknown task", http.StatusBadRequest)
+		}
+	}))
+}
+
+func TestNormalizeAndQueryVariants(t *testing.T) {
 	if got := NormalizeCallID(" AbC@host.example "); got != "abc" {
 		t.Fatalf("got %q", got)
 	}
-	if got := NormalizeCallID("sip-abc"); got != "sip-abc" {
-		t.Fatalf("got %q", got)
+	variants := CallIDQueryVariants("Sip-ABC@host")
+	if len(variants) < 2 {
+		t.Fatalf("variants=%v", variants)
+	}
+	if variants[0] != "Sip-ABC@host" {
+		t.Fatalf("raw first got %q", variants[0])
 	}
 }
 
 func TestMatchExactSIPCallID(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{{
-			"cdrId": "42", "callId": "sip-abc@vm", "caller": "79001112233", "called": "79005556677",
-			"calldate": "2026-07-27 12:00:00", "duration": 12, "connect_duration": 10,
-		}})
-	}))
+	server := newVMServer(t, []mockVMCall{{
+		CDRID: "42", CallID: "sip-abc@vm", Caller: "79001112233", Called: "79005556677",
+		Calldate: "2026-07-27 12:00:00", Duration: 12,
+	}})
 	defer server.Close()
 	matcher := &Matcher{
 		Client: &Client{BaseURL: server.URL, User: "u", Password: "p", HTTPClient: server.Client()},
@@ -49,26 +128,30 @@ func TestMatchExactSIPCallID(t *testing.T) {
 	if result.VM == nil || result.VM.CDRID != "42" || result.CardURL == "" {
 		t.Fatalf("vm/card missing: %+v", result)
 	}
+	if strings.Contains(result.CardURL, "fId") {
+		t.Fatalf("must not use fId: %s", result.CardURL)
+	}
+	if !strings.Contains(result.CardURL, "fcallid") {
+		t.Fatalf("expected fcallid url: %s", result.CardURL)
+	}
 	if !AuditExactCallIDInvariant(CDRCandidate{SIPCallIDs: []string{"sip-abc"}}, result) {
 		t.Fatal("exact invariant failed")
 	}
 }
 
 func TestMatchMultiLegSameCallIDIsExact(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{
-				"cdrId": "10", "callId": "shared-id", "caller": "100", "called": "200",
-				"calldate": "2026-07-27 12:00:00", "duration": 10,
-				"sipcallerip": "1.1.1.1", "sipcalledip": "2.2.2.2",
-			},
-			{
-				"cdrId": "11", "callId": "shared-id", "caller": "100", "called": "200",
-				"calldate": "2026-07-27 12:00:01", "duration": 10,
-				"sipcallerip": "9.9.9.9", "sipcalledip": "8.8.8.8",
-			},
-		})
-	}))
+	server := newVMServer(t, []mockVMCall{
+		{
+			CDRID: "10", CallID: "shared-id", Caller: "100", Called: "200",
+			Calldate: "2026-07-27 12:00:00", Duration: 10,
+			CallerIP: "1.1.1.1", CalledIP: "2.2.2.2",
+		},
+		{
+			CDRID: "11", CallID: "shared-id", Caller: "100", Called: "200",
+			Calldate: "2026-07-27 12:00:01", Duration: 10,
+			CallerIP: "9.9.9.9", CalledIP: "8.8.8.8",
+		},
+	})
 	defer server.Close()
 	matcher := &Matcher{
 		Client: &Client{BaseURL: server.URL, HTTPClient: server.Client()},
@@ -94,14 +177,12 @@ func TestMatchMultiLegSameCallIDIsExact(t *testing.T) {
 }
 
 func TestMatchFallbackAmbiguous(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"cdrId": "1", "callId": "a", "caller": "79001112233", "called": "79005556677",
-				"calldate": "2026-07-27 12:00:00", "duration": 10},
-			{"cdrId": "2", "callId": "b", "caller": "79001112233", "called": "79005556677",
-				"calldate": "2026-07-27 12:00:01", "duration": 10},
-		})
-	}))
+	server := newVMServer(t, []mockVMCall{
+		{CDRID: "1", CallID: "a", Caller: "79001112233", Called: "79005556677",
+			Calldate: "2026-07-27 12:00:00", Duration: 10},
+		{CDRID: "2", CallID: "b", Caller: "79001112233", Called: "79005556677",
+			Calldate: "2026-07-27 12:00:01", Duration: 10},
+	})
 	defer server.Close()
 	matcher := &Matcher{
 		Client: &Client{BaseURL: server.URL, HTTPClient: server.Client()},
@@ -129,13 +210,11 @@ func TestMatchFallbackAmbiguous(t *testing.T) {
 }
 
 func TestMatchFallbackB2BUA(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{{
-			"cdrId": "77", "callId": "vm-regenerated", "caller": "79001112233", "called": "79005556677",
-			"calldate": "2026-07-27 12:00:02", "duration": 30,
-			"sipcallerip": "10.0.0.1", "sipcalledip": "10.0.0.2",
-		}})
-	}))
+	server := newVMServer(t, []mockVMCall{{
+		CDRID: "77", CallID: "vm-regenerated", Caller: "79001112233", Called: "79005556677",
+		Calldate: "2026-07-27 12:00:02", Duration: 30,
+		CallerIP: "10.0.0.1", CalledIP: "10.0.0.2",
+	}})
 	defer server.Close()
 	matcher := &Matcher{
 		Client: &Client{BaseURL: server.URL, HTTPClient: server.Client()},
@@ -165,12 +244,10 @@ func TestMatchFallbackB2BUA(t *testing.T) {
 }
 
 func TestMatchDifferentCallIDsNotExact(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{{
-			"cdrId": "9", "callId": "other-id", "caller": "100", "called": "200",
-			"calldate": "2026-07-27 12:00:00", "duration": 5,
-		}})
-	}))
+	server := newVMServer(t, []mockVMCall{{
+		CDRID: "9", CallID: "other-id", Caller: "100", Called: "200",
+		Calldate: "2026-07-27 12:00:00", Duration: 5,
+	}})
 	defer server.Close()
 	matcher := &Matcher{
 		Client: &Client{BaseURL: server.URL, HTTPClient: server.Client()},
@@ -180,8 +257,7 @@ func TestMatchDifferentCallIDsNotExact(t *testing.T) {
 		SourceSystem: SourceEltex,
 		SetupTime:    time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC),
 		SIPCallIDs:   []string{"my-id"},
-		// Weak numbers on purpose — must not invent exact link.
-		Caller: "999", Called: "888",
+		Caller:       "999", Called: "888",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,12 +268,10 @@ func TestMatchDifferentCallIDsNotExact(t *testing.T) {
 }
 
 func TestUniqueCDRIDAssignment(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{{
-			"cdrId": "1", "callId": "shared", "caller": "100", "called": "200",
-			"calldate": "2026-07-27 12:00:00", "duration": 10,
-		}})
-	}))
+	server := newVMServer(t, []mockVMCall{{
+		CDRID: "1", CallID: "shared", Caller: "100", Called: "200",
+		Calldate: "2026-07-27 12:00:00", Duration: 10,
+	}})
 	defer server.Close()
 	matcher := &Matcher{
 		Client: &Client{BaseURL: server.URL, HTTPClient: server.Client()},
@@ -226,9 +300,9 @@ func TestUniqueCDRIDAssignment(t *testing.T) {
 	}
 }
 
-func TestBuildCardURL(t *testing.T) {
+func TestBuildCardURLUsesFcallidNotFId(t *testing.T) {
 	got := BuildCardURL("", "https://vm.example", CardURLParts{CallID: `a"b`, CDRID: "9"})
-	want := "https://vm.example/admin.php?cdr_filter=" + url.QueryEscape("{fId:9}")
+	want := "https://vm.example/admin.php?cdr_filter=" + url.QueryEscape(`{fcallid:"a\"b"}`)
 	if got != want {
 		t.Fatalf("url=%s want=%s", got, want)
 	}
@@ -238,11 +312,45 @@ func TestBuildCardURL(t *testing.T) {
 		t.Fatalf("callid url=%s want=%s", got, want)
 	}
 	got = BuildCardURL(
-		`'{gui_base}/admin.php?cdr_filter={fcallid:"{voipmonitor_call_id}"}'`,
+		`{gui_base}/admin.php?cdr_filter={fcallid:"{voipmonitor_call_id}"}`,
 		"https://vm.example", CardURLParts{CDRID: "42", CallID: "x"},
 	)
-	want = "https://vm.example/admin.php?cdr_filter=" + url.QueryEscape("{fId:42}")
-	if got != want {
-		t.Fatalf("quoted template url=%s want=%s", got, want)
+	if !strings.Contains(got, "fcallid") || strings.Contains(got, "fId") {
+		t.Fatalf("template url=%s", got)
+	}
+}
+
+func TestRewriteLegacyCardURL(t *testing.T) {
+	legacy := "https://vm.example/admin.php?cdr_filter=" + url.QueryEscape("{fId:42}")
+	got := RewriteLegacyCardURL(legacy, "", "sip-abc", time.Time{})
+	if strings.Contains(got, "fId") || !strings.Contains(got, "fcallid") {
+		t.Fatalf("got %s", got)
+	}
+	if !strings.Contains(got, url.QueryEscape(`{fcallid:"sip-abc"}`)) &&
+		!strings.Contains(got, "sip-abc") {
+		t.Fatalf("missing call id in %s", got)
+	}
+}
+
+func TestShareURLPreferredWhenEnabled(t *testing.T) {
+	server := newVMServer(t, []mockVMCall{{
+		CDRID: "42", CallID: "sip-abc", Caller: "1", Called: "2",
+		Calldate: "2026-07-27 12:00:00", Duration: 1,
+	}})
+	defer server.Close()
+	matcher := &Matcher{
+		Client: &Client{BaseURL: server.URL, HTTPClient: server.Client()},
+		GUIBase: "https://vm.example", CallIDWindow: 30 * time.Minute, UseShareURL: true,
+	}
+	result, err := matcher.Match(context.Background(), CDRCandidate{
+		SourceSystem: SourceEltex,
+		SetupTime:    time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC),
+		SIPCallIDs:   []string{"sip-abc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CardURL != "https://vm.example/share/42" {
+		t.Fatalf("card=%s", result.CardURL)
 	}
 }

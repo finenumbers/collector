@@ -68,6 +68,7 @@ type Config struct {
 	VoipmonitorDisambiguityMargin  int
 	VoipmonitorNumberSuffixLen     int
 	VoipmonitorRateLimitPerSec     int
+	VoipmonitorUseShareURL         bool
 	ClickHouseAdmissionCapacity    int
 	ExportPageSize                 int
 }
@@ -134,6 +135,7 @@ func Load() (Config, error) {
 		VoipmonitorDisambiguityMargin: envInt("VOIPMONITOR_DISAMBIGUITY_MARGIN", 8),
 		VoipmonitorNumberSuffixLen:    envInt("VOIPMONITOR_NUMBER_SUFFIX_LEN", 10),
 		VoipmonitorRateLimitPerSec:    envInt("VOIPMONITOR_RATE_LIMIT_PER_SEC", 5),
+		VoipmonitorUseShareURL:        envBool("VOIPMONITOR_USE_SHARE_URL", false),
 		ClickHouseAdmissionCapacity: envInt("CLICKHOUSE_ADMISSION_CAPACITY", 8),
 		ExportPageSize:              envInt("EXPORT_PAGE_SIZE", 1000),
 	}

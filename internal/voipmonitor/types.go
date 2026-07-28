@@ -97,7 +97,8 @@ type Link struct {
 }
 
 type CardURLParts struct {
-	GUIBase string
-	CDRID   string
-	CallID  string
+	GUIBase  string
+	CDRID    string
+	CallID   string
+	CallDate time.Time // optional; narrows fcallid deep-link with fdatefrom/fdateto
 }

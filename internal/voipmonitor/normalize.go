@@ -17,7 +17,7 @@ func NormalizeCallID(value string) string {
 	return strings.TrimSpace(value)
 }
 
-// CallIDVariants returns lookup keys for a raw Call-ID (normalized + host-stripped form).
+// CallIDVariants returns normalized lookup keys for a raw Call-ID.
 func CallIDVariants(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -39,6 +39,35 @@ func CallIDVariants(raw string) []string {
 	add(raw)
 	if at := strings.IndexByte(raw, '@'); at > 0 {
 		add(raw[:at])
+	}
+	return out
+}
+
+// CallIDQueryVariants returns distinct strings to try as getVoipCalls callId params:
+// raw, lower, host-stripped, lower host-stripped — in that order.
+func CallIDQueryVariants(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	add(raw)
+	add(strings.ToLower(raw))
+	if at := strings.IndexByte(raw, '@'); at > 0 {
+		add(raw[:at])
+		add(strings.ToLower(raw[:at]))
 	}
 	return out
 }
@@ -140,4 +169,12 @@ func cdrCalledNumbers(cdr CDRCandidate) []string {
 		return cdr.CalledNumbers
 	}
 	return uniqueNonEmpty(cdr.Called)
+}
+
+func callIDsEqual(a, b string) bool {
+	if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) {
+		return true
+	}
+	na, nb := NormalizeCallID(a), NormalizeCallID(b)
+	return na != "" && na == nb
 }

@@ -7,14 +7,17 @@ import (
 )
 
 type OperationalDiagnostics struct {
-	ProjectionLagSeconds int64             `json:"projectionLagSeconds"`
-	Calls                uint64            `json:"calls"`
-	Packets              uint64            `json:"packets"`
-	Orphans              uint64            `json:"orphans"`
-	Ambiguity            uint64            `json:"ambiguity"`
-	Coverage             map[string]uint64 `json:"coverage"`
-	CoverageSLOMet       bool              `json:"coverageSloMet"`
-	ProjectionSLOMet     bool              `json:"projectionSloMet"`
+	ProjectionLagSeconds          int64             `json:"projectionLagSeconds"`
+	MaxDeviceProjectionLagSeconds int64             `json:"maxDeviceProjectionLagSeconds"`
+	Calls                         uint64            `json:"calls"`
+	Packets                       uint64            `json:"packets"`
+	Orphans                       uint64            `json:"orphans"`
+	Ambiguity                     uint64            `json:"ambiguity"`
+	Coverage                      map[string]uint64 `json:"coverage"`
+	CoverageSLOMet                bool              `json:"coverageSloMet"`
+	ProjectionSLOMet              bool              `json:"projectionSloMet"`
+	AnyDeviceFailed               bool              `json:"anyDeviceFailed"`
+	AnyClassificationGap          bool              `json:"anyClassificationGap"`
 }
 
 func (c *Client) OperationalDiagnostics(ctx context.Context) (OperationalDiagnostics, error) {

@@ -198,20 +198,38 @@ func (s *Store) ClaimCustomProjectionJob(
 	var cursorID *uuid.UUID
 	err := s.DB.QueryRow(ctx, `WITH eligible AS (
 			SELECT DISTINCT ON (device_id) id
-			FROM custom_projection_jobs
-			WHERE (status='pending' AND next_attempt_at<=now())
-			   OR (status='running' AND lease_expires_at<now())
+			FROM custom_projection_jobs job
+			WHERE ((status='pending' AND next_attempt_at<=now())
+			   OR (status='running' AND job.lease_expires_at<now()))
+			  AND NOT EXISTS (
+				SELECT 1 FROM custom_projection_device_leases lease
+				WHERE lease.device_id=job.device_id AND lease.lease_expires_at>=now()
+			  )
 			ORDER BY device_id,updated_at,created_at
 		), picked AS (
 			SELECT job.id FROM custom_projection_jobs job
 			JOIN eligible USING (id)
-			ORDER BY job.updated_at,job.created_at
+			LEFT JOIN custom_projection_watermarks watermark
+				ON watermark.device_id=job.device_id
+			ORDER BY COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at), 1e12) DESC,
+				job.updated_at,job.created_at
 			FOR UPDATE OF job SKIP LOCKED LIMIT 1
+		), leased AS (
+			INSERT INTO custom_projection_device_leases
+				(device_id,worker_id,lease_expires_at)
+			SELECT job.device_id,$1,now()+$2::interval
+			FROM custom_projection_jobs job JOIN picked USING (id)
+			ON CONFLICT (device_id) DO UPDATE SET
+				worker_id=EXCLUDED.worker_id,lease_expires_at=EXCLUDED.lease_expires_at,
+				updated_at=now()
+			WHERE custom_projection_device_leases.lease_expires_at<now()
+			   OR custom_projection_device_leases.worker_id=EXCLUDED.worker_id
+			RETURNING device_id
 		)
 		UPDATE custom_projection_jobs job
 		SET status='running',worker_id=$1,lease_expires_at=now()+$2::interval,
 			claimed_generation=generation,attempts=attempts+1,updated_at=now()
-		FROM picked WHERE job.id=picked.id
+		FROM picked,leased WHERE job.id=picked.id AND leased.device_id=job.device_id
 		RETURNING job.id,job.device_id,job.policy_revision,job.projection_seq,job.kind,
 			job.bucket_start,job.cursor_received_at,job.cursor_event_id,
 			job.generation,job.cutoff_at`,
@@ -242,6 +260,14 @@ func (s *Store) ClaimCustomProjectionJob(
 	return job, true, nil
 }
 
+func (s *Store) releaseCustomProjectionDeviceLease(
+	ctx context.Context, deviceID uuid.UUID, workerID string,
+) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM custom_projection_device_leases
+		WHERE device_id=$1 AND worker_id=$2`, deviceID, workerID)
+	return err
+}
+
 func (s *Store) AdvanceCustomProjectionDiscovery(
 	ctx context.Context, job customprojection.Job, discovery customprojection.Discovery,
 ) error {
@@ -259,6 +285,9 @@ func (s *Store) AdvanceCustomProjectionDiscovery(
 			next_attempt_at=$4,lease_expires_at=NULL,worker_id=NULL,completed_at=NULL,updated_at=now()
 		WHERE id=$1 AND policy_revision=$5`,
 		job.ID, nextTime, nextID, nextAttempt, job.PolicyRevision)
+	if err == nil {
+		err = s.releaseCustomProjectionDeviceLease(ctx, job.DeviceID, job.WorkerID)
+	}
 	return err
 }
 
@@ -295,6 +324,10 @@ func (s *Store) CompleteCustomProjectionJob(
 				ELSE LEAST(next_attempt_at,now()) END,
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
 		WHERE id=$1`, job.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
+		WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -390,6 +423,10 @@ func (s *Store) CutoverCustomProjection(
 		WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
+		WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -405,7 +442,36 @@ func (s *Store) FailCustomProjectionJob(
 			last_error=$2,next_attempt_at=now()+$3::interval,
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
 		WHERE id=$1`, job.ID, redact.Text(cause.Error()), retryAfter.String())
+	if err == nil {
+		err = s.releaseCustomProjectionDeviceLease(ctx, job.DeviceID, job.WorkerID)
+	}
 	return err
+}
+
+func (s *Store) RequeueFailedProjectionJobs(
+	ctx context.Context, deviceID uuid.UUID,
+) (int64, error) {
+	tag, err := s.DB.Exec(ctx, `UPDATE custom_projection_jobs
+		SET status='pending',attempts=0,next_attempt_at=now(),last_error=NULL,
+			lease_expires_at=NULL,worker_id=NULL,completed_at=NULL,updated_at=now()
+		WHERE device_id=$1 AND status='failed'`, deviceID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *Store) RequeueFailedOverflowProjectionJobs(ctx context.Context) (int64, error) {
+	tag, err := s.DB.Exec(ctx, `UPDATE custom_projection_jobs
+		SET status='pending',attempts=0,next_attempt_at=now(),last_error=NULL,
+			lease_expires_at=NULL,worker_id=NULL,completed_at=NULL,updated_at=now()
+		WHERE status='failed'
+		  AND (last_error ILIKE '%exceeds%events%'
+			OR last_error ILIKE '%memory bound%')`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 type CustomProjectionQueueStats struct {
@@ -413,6 +479,18 @@ type CustomProjectionQueueStats struct {
 	OldestAge   time.Duration `json:"oldestAge"`
 	Failed      uint64        `json:"failed"`
 	Backfilling uint64        `json:"backfilling"`
+}
+
+type CustomProjectionDeviceStats struct {
+	DeviceID            uuid.UUID     `json:"deviceId"`
+	Name                string        `json:"name"`
+	Depth               uint64        `json:"depth"`
+	Failed              uint64        `json:"failed"`
+	Backfilling         uint64        `json:"backfilling"`
+	OldestAge           time.Duration `json:"oldestAge"`
+	WatermarkState      string        `json:"watermarkState"`
+	WatermarkLagSeconds int64         `json:"watermarkLagSeconds"`
+	LastError           string        `json:"lastError,omitempty"`
 }
 
 func (s *Store) CustomProjectionQueueStats(
@@ -430,4 +508,47 @@ func (s *Store) CustomProjectionQueueStats(
 		Scan(&stats.Depth, &oldestSeconds, &stats.Failed, &stats.Backfilling)
 	stats.OldestAge = time.Duration(oldestSeconds * float64(time.Second))
 	return stats, err
+}
+
+func (s *Store) CustomProjectionDeviceStats(
+	ctx context.Context,
+) ([]CustomProjectionDeviceStats, error) {
+	rows, err := s.DB.Query(ctx, `SELECT device.id,device.name,
+		count(job.id) FILTER (WHERE job.status IN ('pending','running')),
+		count(job.id) FILTER (WHERE job.status='failed'),
+		count(job.id) FILTER (WHERE job.kind='discover' AND job.status IN ('pending','running')),
+		COALESCE(EXTRACT(epoch FROM now()-min(job.created_at)
+			FILTER (WHERE job.status IN ('pending','running'))),0),
+		COALESCE(watermark.state,'disabled'),
+		GREATEST(0,COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at),0))::bigint,
+		COALESCE((
+			SELECT j.last_error FROM custom_projection_jobs j
+			WHERE j.device_id=device.id AND j.last_error IS NOT NULL AND j.last_error<>''
+			ORDER BY j.updated_at DESC LIMIT 1
+		),'')
+		FROM devices device
+		LEFT JOIN custom_projection_jobs job ON job.device_id=device.id
+		LEFT JOIN custom_projection_watermarks watermark ON watermark.device_id=device.id
+		WHERE device.antifraud_enabled AND device.enabled AND device.purge_state='active'
+		GROUP BY device.id,device.name,watermark.state,watermark.watermark_received_at
+		ORDER BY GREATEST(0,COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at),0)) DESC,
+			device.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]CustomProjectionDeviceStats, 0)
+	for rows.Next() {
+		var item CustomProjectionDeviceStats
+		var oldestSeconds float64
+		if err := rows.Scan(
+			&item.DeviceID, &item.Name, &item.Depth, &item.Failed, &item.Backfilling,
+			&oldestSeconds, &item.WatermarkState, &item.WatermarkLagSeconds, &item.LastError,
+		); err != nil {
+			return nil, err
+		}
+		item.OldestAge = time.Duration(oldestSeconds * float64(time.Second))
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }

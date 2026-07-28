@@ -46,7 +46,11 @@ and CDR time interpretations. MinIO stores immutable source CDR files.
 
 `syslog_messages` is the extension boundary for the pure `customradius`
 engine. PostgreSQL owns policy revisions, durable discovery/bucket jobs,
-generation counters, deadline cursors, deployment-wide leases, and watermarks.
+generation counters, deadline cursors, per-device projection leases (≤1 running
+job per SMG), deployment-wide ClickHouse heavy-lane lock for snapshot
+write/cutover, and watermarks. Claim prefers devices with the oldest watermark.
+Hour buckets that exceed `CUSTOM_PROJECTION_MAX_EVENTS` are loaded via 15m→5m
+split windows in-process so a dense SMG cannot terminal-fail the hour.
 Every arrival increments its bucket generation, including arrivals while a
 worker owns the lease. ClickHouse stores staged complete snapshots. A final
 active marker is the visibility boundary; retries reuse the deterministic

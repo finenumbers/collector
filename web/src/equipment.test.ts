@@ -66,7 +66,11 @@ describe('equipment templates', () => {
     expect(main).not.toContain('label="Софтсвитчи"')
     expect(main).not.toContain('label="Оборудование"')
     expect(main).toContain('fleet-panel')
-    expect(main).toContain('className="table-fill"')
+    expect(main).toContain('className="table-fit"')
+    expect(main).toContain('title="Последний CDR"')
+    expect(main.indexOf('title="Последний CDR"')).toBeLessThan(
+      main.lastIndexOf('title="Последний приём Syslog"'),
+    )
     // Dashboard order: services → softswitches → equipment.
     const servicesAt = main.indexOf('<h4>Сервисы</h4>')
     const softAt = main.indexOf('<h4>Софтсвитчи</h4><span>Типизированные')

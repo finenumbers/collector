@@ -25,6 +25,7 @@ import (
 	"collector/internal/exportworker"
 	ftpclient "collector/internal/ftp"
 	"collector/internal/ingest"
+	"collector/internal/runtimesettings"
 	"collector/internal/spool"
 	"collector/internal/store"
 	"collector/internal/workload"
@@ -37,33 +38,42 @@ import (
 
 const sessionCookie = "collector_session"
 
+func (s *Server) customProjectionEnabled() bool {
+	if s.Runtime != nil {
+		return s.Runtime.Snapshot().Projection.Enabled
+	}
+	return s.Config.CustomProjectionEnabled
+}
+
 type costlyRate struct {
 	window time.Time
 	count  int
 }
 
 type Server struct {
-	Config             config.Config
-	Store              *store.Store
-	Analytics          *analytics.Client
-	FTP                *ftpclient.Provisioner
-	Archive            *archive.Archive
-	StaticDir          string
-	Version            string
-	Metrics            *ingest.Metrics
-	Spool              *spool.Queue
-	NATS               *nats.Conn
-	IngressStatusPath  string
-	ExportHealth       *exportworker.Health
-	ReconcileRetention func(context.Context) error
-	diagnosticsMu      sync.Mutex
-	diagnosticsAt      time.Time
-	diagnosticsValue   map[string]any
-	diagnosticsErr     error
-	diagnosticsRunning chan struct{}
-	diagnosticsLoad    func(context.Context) (map[string]any, error)
-	rateMu             sync.Mutex
-	costlyRates        map[uuid.UUID]costlyRate
+	Config                   config.Config
+	Store                    *store.Store
+	Analytics                *analytics.Client
+	FTP                      *ftpclient.Provisioner
+	Archive                  *archive.Archive
+	StaticDir                string
+	Version                  string
+	Metrics                  *ingest.Metrics
+	Spool                    *spool.Queue
+	NATS                     *nats.Conn
+	IngressStatusPath        string
+	ExportHealth             *exportworker.Health
+	ReconcileRetention       func(context.Context) error
+	Runtime                  *runtimesettings.Manager
+	OnRuntimeSettingsChanged func(runtimesettings.Document)
+	diagnosticsMu            sync.Mutex
+	diagnosticsAt            time.Time
+	diagnosticsValue         map[string]any
+	diagnosticsErr           error
+	diagnosticsRunning       chan struct{}
+	diagnosticsLoad          func(context.Context) (map[string]any, error)
+	rateMu                   sync.Mutex
+	costlyRates              map[uuid.UUID]costlyRate
 }
 
 type contextKey string
@@ -87,6 +97,14 @@ func (s *Server) Handler() http.Handler {
 			private.Post("/auth/logout", s.logout)
 			private.Get("/system/info", s.systemInfo)
 			private.With(s.requireAdmin).Get("/system/diagnostics", s.systemDiagnostics)
+			private.With(s.requireAdmin).Get("/system/runtime-settings", s.getRuntimeSettings)
+			private.With(s.requireAdmin).Patch("/system/runtime-settings", s.patchRuntimeSettings)
+			private.With(s.requireAdmin).Get(
+				"/system/runtime-settings/container-limits.env", s.downloadContainerLimitsEnv,
+			)
+			private.With(s.requireAdmin).Post(
+				"/devices/{deviceID}/projection/requeue-failed", s.requeueFailedProjection,
+			)
 			private.Get("/dashboard", s.dashboard)
 			private.Get("/equipment-templates", s.listEquipmentTemplates)
 			private.With(s.requireAdmin).Get("/system/users", s.listUsers)
@@ -273,7 +291,7 @@ func (s *Server) listDevices(writer http.ResponseWriter, request *http.Request) 
 	for _, device := range devices {
 		items = append(items, deviceWithReplay{
 			Device: device, Replay: summaries[device.ID].Replay,
-			CustomAntifraudAvailable: s.Config.CustomProjectionEnabled &&
+			CustomAntifraudAvailable: s.customProjectionEnabled() &&
 				device.Capabilities.Antifraud && device.Capabilities.Radius,
 		})
 	}
@@ -376,7 +394,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		if metrics != nil {
 			calls += metrics.Calls
 			failed += metrics.FailedCalls
-			if s.Config.CustomProjectionEnabled && configured.AntifraudEnabled {
+			if s.customProjectionEnabled() && configured.AntifraudEnabled {
 				antifraud += metrics.Antifraud
 				rejects += metrics.AntifraudRejected
 				incomplete += metrics.AntifraudIncomplete
@@ -384,7 +402,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
 			category.calls += metrics.Calls
 			category.failed += metrics.FailedCalls
-			if s.Config.CustomProjectionEnabled && configured.AntifraudEnabled {
+			if s.customProjectionEnabled() && configured.AntifraudEnabled {
 				category.antifraud += metrics.Antifraud
 				category.rejects += metrics.AntifraudRejected
 			}
@@ -460,7 +478,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		"system": map[string]any{
 			"version": s.Version, "services": services, "runtime": runtime,
 			"spoolDepth": spoolDepth, "natsStreamMessages": natsMessages,
-			"customProjectionEnabled": s.Config.CustomProjectionEnabled,
+			"customProjectionEnabled": s.customProjectionEnabled(),
 		},
 		"diagnostics": fleet.Diagnostics,
 	})
@@ -1132,7 +1150,7 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) listAntifraudCalls(writer http.ResponseWriter, request *http.Request) {
-	if !s.Config.CustomProjectionEnabled {
+	if !s.customProjectionEnabled() {
 		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
 		return
 	}
@@ -1210,7 +1228,7 @@ func (s *Server) listAntifraudCalls(writer http.ResponseWriter, request *http.Re
 }
 
 func (s *Server) antifraudCallDetail(writer http.ResponseWriter, request *http.Request) {
-	if !s.Config.CustomProjectionEnabled {
+	if !s.customProjectionEnabled() {
 		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
 		return
 	}
@@ -1274,7 +1292,7 @@ func (s *Server) callCard(writer http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
 	customReady := false
-	if s.Config.CustomProjectionEnabled && device.AntifraudEnabled {
+	if s.customProjectionEnabled() && device.AntifraudEnabled {
 		customReady, _ = s.Store.CustomAntifraudReady(request.Context(), deviceID)
 	}
 	card, err := s.Analytics.CallCard(

@@ -42,6 +42,9 @@ func TestProjectionGenerationAndReconciliationLease(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("first claim: ok=%v err=%v", ok, err)
 	}
+	if _, ok, err := control.ClaimCustomProjectionJob(ctx, "worker-b", time.Minute); err != nil || ok {
+		t.Fatalf("same-device concurrent projection claim: ok=%v err=%v", ok, err)
+	}
 	if err := control.EnqueueCustomProjectionBuckets(
 		ctx, device.ID, 1, []time.Time{bucket},
 	); err != nil {

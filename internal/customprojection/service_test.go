@@ -3,6 +3,7 @@ package customprojection
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -91,12 +92,20 @@ type projectionWarehouseMock struct {
 	disabled       int
 	beforeActivate func()
 	admitted       bool
+	loadCalls      int
+	loadFn         func(from, to time.Time, limit int) ([]customradius.RawEvent, error)
 }
 
 func (m *projectionWarehouseMock) DiscoverSyslogBuckets(context.Context, uuid.UUID, time.Time, uuid.UUID, int) (Discovery, error) {
 	return m.discovery, nil
 }
-func (m *projectionWarehouseMock) LoadCustomRadiusEvents(context.Context, uuid.UUID, time.Time, time.Time, int) ([]customradius.RawEvent, error) {
+func (m *projectionWarehouseMock) LoadCustomRadiusEvents(
+	_ context.Context, _ uuid.UUID, from, to time.Time, limit int,
+) ([]customradius.RawEvent, error) {
+	m.loadCalls++
+	if m.loadFn != nil {
+		return m.loadFn(from, to, limit)
+	}
 	return m.events, nil
 }
 func (m *projectionWarehouseMock) LoadCustomRadiusSessionEvents(
@@ -273,6 +282,44 @@ func TestCrossDaySessionRecomputesSingleCall(t *testing.T) {
 	}
 	if len(queue.projectionBuckets) < 2 {
 		t.Fatalf("affected cross-day buckets were not enqueued: %v", queue.projectionBuckets)
+	}
+}
+
+func TestOverflowSplitsHourLoad(t *testing.T) {
+	deviceID := uuid.New()
+	bucket := time.Date(2026, 7, 27, 3, 0, 0, 0, time.UTC)
+	queue := &projectionQueueMock{policy: Policy{DeviceID: deviceID, Enabled: true, Revision: 1}}
+	warehouse := &projectionWarehouseMock{
+		loadFn: func(from, to time.Time, limit int) ([]customradius.RawEvent, error) {
+			if to.Sub(from) > 30*time.Minute {
+				return nil, fmt.Errorf("custom projection bucket exceeds %d events", limit)
+			}
+			return []customradius.RawEvent{
+				projectionRaw(deviceID, uuid.New(), from.Add(time.Minute), "not radius"),
+			}, nil
+		},
+	}
+	worker := &Worker{Queue: queue, Warehouse: warehouse, Config: Config{MaxEvents: 100}}
+	if err := worker.process(context.Background(), worker.Config.normalized(), Job{
+		ID: uuid.New(), DeviceID: deviceID, PolicyRevision: 1, ProjectionSeq: 1,
+		Kind: JobBucket, BucketStart: bucket,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if warehouse.loadCalls < 2 {
+		t.Fatalf("expected split loads after overflow, got %d", warehouse.loadCalls)
+	}
+	if len(warehouse.activations) != 1 {
+		t.Fatalf("split load should still activate once: %v", warehouse.activations)
+	}
+}
+
+func TestIsEventLimitError(t *testing.T) {
+	if !IsEventLimitError(fmt.Errorf("custom projection bucket exceeds %d events", 5000)) {
+		t.Fatal("overflow error not detected")
+	}
+	if IsEventLimitError(fmt.Errorf("clickhouse unavailable")) {
+		t.Fatal("non-overflow error misclassified")
 	}
 }
 

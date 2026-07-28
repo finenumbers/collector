@@ -112,12 +112,24 @@ Health endpoints:
 - `/health/ready` — PostgreSQL и ClickHouse.
 - `http://127.0.0.1:18081` на Docker-хосте — source-preserving ingress.
 
+Операционные параметры AntiFraud / coverage / VoIPmonitor / export / **лимиты
+контейнеров** управляются в **Настройки → Параметры**
+(`GET`/`PATCH /api/system/runtime-settings`). Они хранятся в PostgreSQL; `.env`
+нужен для seed пустой БД и инфраструктурных секретов (БД, MinIO, SFTPGo, порты).
+Лимиты CPU/RAM: после сохранения скачайте
+`/api/system/runtime-settings/container-limits.env`, перенесите значения в host
+`.env` и выполните `docker compose up -d --force-recreate` (копия также пишется в
+`/data/spool/container-limits.env`).
+
 Административная панель «Диагностика» (lazy `GET /api/system/diagnostics`) показывает
-очередь Custom projection (depth/lag/failed/backfill), coverage states и SLO,
-orphans/ambiguity, очередь reconciliation и export queued/running/oldest. Legacy
-category breakdown и lifecycle counters удалены. Обязательные алерты: container restart,
-оба local spool depth/size (`ingress.db`, `syslog.db`), handoff errors, NATS lag/storage,
-projection lag >5 мин, coverage late+missing >1% после grace, CDR ingest age,
+очередь Custom projection (depth/lag/failed/backfill), **per-device** watermark/AF lag,
+classification gap, coverage states и SLO, orphans/ambiguity, очередь reconciliation и
+export queued/running/oldest. Global `lagSeconds` может оставаться зелёным при stall одного
+SMG — операторский критерий: `maxDeviceLagSeconds`, `anyDeviceFailed`,
+`anyClassificationGap`, и SLO по каждому устройству в `projectionDevices`.
+Обязательные алерты: container restart, оба local spool depth/size (`ingress.db`,
+`syslog.db`), handoff errors, NATS lag/storage, **per-device** projection lag >5 мин или
+`failed>0`, classification gap, coverage late+missing >1% после grace, CDR ingest age,
 disk >75/85%, ClickHouse insert errors, SFTPGo unavailable, backup age.
 
 IANA timezone выбирается из выпадающего списка в настройках конкретного SMG и применяется
@@ -146,3 +158,29 @@ IANA timezone выбирается из выпадающего списка в �
    не должен голодать.
 5. Только после успешного canary включайте остальные SMG; рост lag или доли
    `late`/`missing`/`ambiguous` — причина остановки.
+
+### Catch-up: AntiFraud projection stall на одном SMG
+
+Симптом: syslog/CDR свежие, а `custom_antifraud_calls` / coverage отстают на часы на
+одном устройстве; другие SMG в норме. Global lag в diagnostics может врать.
+
+1. В «Диагностика» откройте `projectionDevices` для проблемного SMG: `failed`,
+   `lastError`, `watermarkLagSeconds`, `classificationGap`.
+2. Если `lastError` содержит `exceeds … events` / `memory bound`:
+   - временно снизьте нагрузку async export (делит ClickHouse heavy lane);
+   - поднимите `CUSTOM_PROJECTION_MAX_EVENTS` (≥50000) и
+     `CUSTOM_PROJECTION_MAX_MEMORY_BYTES` (≥256MiB), `CUSTOM_PROJECTION_SLEEP=1s`;
+   - `CUSTOM_PROJECTION_THREADS=2` допустим (есть per-device lease).
+3. Requeue failed jobs: admin
+   `POST /api/devices/{deviceID}/projection/requeue-failed`
+   (сбрасывает `failed`→`pending` для устройства и overflow-failed глобально).
+   Либо SQL: `UPDATE custom_projection_jobs SET status='pending', attempts=0,
+   next_attempt_at=now(), last_error=NULL WHERE device_id=$1 AND status='failed'`.
+4. Worker при overflow сам режет час на окна 15m→5m; после релиза не оставляйте
+   terminal `failed` на пиках без requeue.
+5. Если jobs complete, syslog lag мал, но `afAuthHeaders6h=0` и
+   `classificationGap=true` — это не очередь: на SMG нет classifiable AF RADIUS
+   (логирование AntiFraud / диалект), поднимать MaxEvents бесполезно.
+6. Дождитесь drain: per-device lag ≤5 мин; новые CDR снова получают coverage.
+7. Toggle `antifraudEnabled` off→on — только после поднятых лимитов, если нужен
+   новый discover/backfill.

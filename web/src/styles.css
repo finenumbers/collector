@@ -150,18 +150,6 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .service-grid { display: flex; flex-wrap: wrap; gap: 8px 22px; padding: 12px; font-size: 11px; }
 .service-grid span { display: inline-flex; align-items: center; gap: 5px; }
 .fleet-panel { overflow-x: auto; }
-.fleet-panel table.table-fill {
-  width: 100%;
-  min-width: 100%;
-  max-width: 100%;
-  table-layout: fixed;
-}
-.fleet-panel table.table-fill > thead > tr > th,
-.fleet-panel table.table-fill > tbody > tr > td {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .fleet-panel td small { display: block; margin-top: 2px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .timezone-rebuild { margin: 0 0 8px; padding: 7px 10px; border: 1px solid #f3c969;
   border-radius: 6px; background: #fff8dc; color: #684c00; font-size: 12px; }
@@ -186,6 +174,7 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .diagnostic-panel { margin: -2px 0 9px; border: 1px solid var(--line); background: var(--panel); font-size: 10px; }
 .diagnostic-panel summary { padding: 6px 9px; color: #475467; cursor: pointer; }
 .diagnostic-facts { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 7px 9px; border-top: 1px solid var(--line); }
+.diagnostic-device-list { flex: 1 1 100%; display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .diagnostic-breakdown { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
 .diagnostic-breakdown span { padding: 5px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-bottom: 1px solid #e8ecf2; }
 .toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
@@ -269,46 +258,44 @@ tbody tr { cursor: pointer; }
 .parse-status.incomplete, .parse-status.fragment { color: #975a00; background: #fff2d6; }
 .satel-cdr-table, .eltex-cdr-table { width: max-content; min-width: 0; }
 /*
- * Summary / AntiFraud / Dashboard fleet: exactly panel width.
- * Columns share the viewport (table-layout: fixed); long cells ellipsis —
- * table must NOT grow wider than the screen.
+ * Full-viewport tables: compact columns size to the longest cell/header;
+ * .col-flex absorbs remaining width (ellipsis). Two .col-flex-pair share equally.
  */
-.table-fill,
-.satel-cdr-table.table-fill,
-.eltex-cdr-table.table-fill,
-.antifraud-table.table-fill {
-  width: 100%;
-  min-width: 100%;
-  max-width: 100%;
-  table-layout: fixed;
-}
-.table-fill > thead > tr > th,
-.table-fill > tbody > tr > td {
-  width: auto;
-  max-width: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* Syslog: panel width; meta columns compact; Payload takes the rest. */
+.table-fit,
+.satel-cdr-table.table-fit,
+.eltex-cdr-table.table-fit,
+.antifraud-table.table-fit,
 .syslog-table {
   width: 100%;
   min-width: 100%;
   max-width: 100%;
-  table-layout: fixed;
+  table-layout: auto;
 }
-.syslog-table > thead > tr > th:not(.col-payload),
-.syslog-table > tbody > tr > td:not(.message-cell) {
+.table-fit > thead > tr > th:not(.col-flex):not(.col-flex-pair),
+.table-fit > tbody > tr > td:not(.col-flex):not(.col-flex-pair),
+.syslog-table > thead > tr > th:not(.col-flex),
+.syslog-table > tbody > tr > td:not(.col-flex) {
   width: 1%;
   max-width: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.syslog-table > thead > tr > th.col-payload,
-.syslog-table > tbody > tr > td.message-cell {
-  width: auto;
-  min-width: 0;
+.table-fit > thead > tr > th.col-flex,
+.table-fit > tbody > tr > td.col-flex,
+.syslog-table > thead > tr > th.col-flex,
+.syslog-table > tbody > tr > td.col-flex {
+  width: 100%;
+  min-width: 8rem;
+  max-width: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.table-fit > thead > tr > th.col-flex-pair,
+.table-fit > tbody > tr > td.col-flex-pair {
+  width: 50%;
+  min-width: 6rem;
   max-width: none;
   white-space: nowrap;
   overflow: hidden;
@@ -390,6 +377,18 @@ tbody tr { cursor: pointer; }
 .settings-content { min-width: 0; flex: 1; padding: 14px; border: 1px solid var(--line); background: var(--panel); }
 .user-admin-row { padding: 8px; border: 1px solid var(--line); background: #fbfcfe; }
 .user-admin-row .row-error { grid-column: 1 / -1; margin: 3px 0 0; }
+.runtime-settings { display: flex; flex-direction: column; gap: 12px; }
+.runtime-card { border: 1px solid var(--line); background: var(--panel); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.runtime-card h4 { margin: 0; font-size: 13px; }
+.runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.runtime-grid label { margin: 0; display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted); }
+.runtime-grid input { min-height: var(--control-height); }
+.checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.runtime-note { margin: 0; color: var(--muted); font-size: 10px; }
+a.button-link { display: inline-flex; align-items: center; justify-content: center;
+  min-height: var(--control-height); padding: 0 10px; border: 1px solid var(--line);
+  background: #fff; color: inherit; text-decoration: none; font-size: 12px; }
+a.button-link:hover { background: #eef2f7; }
 .retention-list { display: flex; flex-direction: column; gap: 8px; }
 .retention-row { display: grid; grid-template-columns: minmax(220px, 1fr) 120px 130px auto;
   align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--line); background: #fbfcfe; }

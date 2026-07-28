@@ -104,7 +104,7 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "AntiFraud export format must be csv_zip")
 		return
 	}
-	if validated.Dataset == "antifraud" && !s.Config.CustomProjectionEnabled {
+	if validated.Dataset == "antifraud" && !s.customProjectionEnabled() {
 		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
 		return
 	}

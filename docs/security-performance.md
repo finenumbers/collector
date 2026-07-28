@@ -1,103 +1,111 @@
-# Security and performance operating contract
+# Безопасность и производительность
+
+Операционный контракт admission, redaction, bounds и staging SLO.
+RBAC/сессии — [auth-and-ui.md](auth-and-ui.md); роли Compose —
+[architecture.md](architecture.md); секреты production —
+[deployment.md](deployment.md#5-секреты-и-first-bootstrap).
+
+---
 
 ## ClickHouse admission
 
-Every production query is classified as `interactive`, `export`,
-`custom_replay`, `custom_reconcile`, `ingest`, or `diagnostics`. The weighted
-process-wide admission budget defaults to 8. Interactive waiters are selected
-before background waiters, cancellation removes a waiter without leaking
-capacity. A dedicated PostgreSQL advisory lock permits only one `export` or
-`custom_replay` across all split-role processes, while the local heavy lease
-prevents overlap inside a process. Queries receive a generated query ID, a class-only log comment,
-execution timeout, thread and memory limits, and result row/byte limits. Query
-text, filter values, and credentials are never emitted by diagnostics.
+Каждый production-запрос классифицируется: `interactive`, `export`,
+`custom_replay`, `custom_reconcile`, `ingest`, `diagnostics`.
 
-Lock order is:
+Weighted process-wide budget по умолчанию **8**
+(`platform.clickhouseAdmissionCapacity`). Interactive waiters выбираются раньше
+background. Cancellation снимает waiter без утечки capacity.
+
+Отдельный PostgreSQL advisory lock: только один `export` **или** `custom_replay`
+на весь deployment; локальный heavy lease не даёт overlap внутри процесса.
+
+Запросам назначаются query ID, class-only log comment, timeout, thread/memory
+limits, row/byte limits. Текст запроса, фильтры и credentials diagnostics
+**не** логирует.
+
+Порядок блокировок:
 
 1. workload admission;
 2. device write/purge lock;
-3. PostgreSQL transaction or ClickHouse operation.
+3. PostgreSQL transaction / ClickHouse operation.
 
-Code must never wait for admission while holding a device lock. Custom
-projection acquires its cutover lease before `LockDeviceWrites`; tests enforce
-this ordering. Syslog discover cursors use `custom_reconcile` (non-heavy);
-hour snapshot write+activate share one `custom_replay` admission lease.
+Нельзя ждать admission, удерживая device lock. Custom projection берёт cutover
+lease **до** `LockDeviceWrites`. Discover-курсоры — класс `custom_reconcile`
+(non-heavy); hour snapshot write+activate — один `custom_replay`.
 
-## Roles
+In-process ceilings (ориентир): Interactive **512 MiB** / 2 threads; CustomReplay
+1 GiB / 1 thread; CustomReconcile 256 MiB; Export 512 MiB.
 
-`COLLECTOR_ROLE=app` remains the all-in-one default. Split deployments use:
+---
 
-- `api-ingest`: HTTP, authenticated API/downloads, NATS raw consumer and CDR watcher;
-- `export`: exactly the asynchronous export worker;
-- `maintenance`: custom projection/replay, reconciliation and retention;
-- `ingress`: the existing source-preserving host-network UDP edge.
+## Роли процессов
 
-Compose exposes the split services under the `split` profile. Start them with
-`docker compose --profile split up --scale collector=0`; running the default
-`collector` at the same time would intentionally be rejected operationally
-because it duplicates ownership. CPU and memory limits are configurable per
-role. Separate ClickHouse usernames/passwords can be supplied after operators
-provision corresponding least-privilege users and quotas.
+| Role | Владение |
+|------|----------|
+| `app` | All-in-one default |
+| `api-ingest` | HTTP, downloads, NATS raw consumer, CDR watcher |
+| `export` | Только async export |
+| `maintenance` | Projection/replay, reconciliation, retention |
+| `ingress` | Host-network UDP |
 
-Runtime settings PATCH is applied immediately in the API process and every
-long-lived `api-ingest` / `export` / `maintenance` process polls PostgreSQL
-(~2s) to hot-apply the same document locally (projection gate, worker
-fingerprints, ClickHouse admission capacity, container-limits env). Split
-`api-ingest` does not run the export worker in-process; dashboard and create-job
-liveness use `export_jobs` heartbeats instead of a local Health probe.
+Split: `docker compose --profile split up --scale collector=0`. Не поднимать
+рядом default `collector`. Опционально отдельные CH users/quotas после
+провижининга least-privilege.
 
-## Secret handling and raw Syslog risk
+Runtime PATCH применяется сразу в API-процессе; long-lived роли полят PG (~2s)
+и hot-apply документ локально. Split `api-ingest` не гоняет export in-process —
+liveness смотрит heartbeats `export_jobs`.
 
-The server recognizes Password/User-Password, CHAP, digest/preimage,
-authenticator, token, credential, authorization, API/private keys, shared
-keys/secrets, and secret-like vendor AVPair keys. The immutable
-`syslog_messages` payload is preserved byte-for-byte in ClickHouse so its
-stored SHA-256 remains verifiable. Redaction is enforced when building DTOs,
-exports, errors, frontend displays, and derived projections.
+---
 
-Authenticated viewers continue to see raw Syslog rows for their selected
-device, but displayed payload has recognized secrets removed.
-Payload text remains operationally sensitive because unknown vendor formats,
-phone numbers, topology, and identifiers can still be present. Exports remain
-authenticated and device-scoped and downloads are audited. There is no
-unredacted download route. ClickHouse access therefore remains an
-operator-only trust boundary and must use encrypted storage and least-privilege
-credentials. Production boots reject default seeded secrets (including a
-`postgres://collector:collector@…` URL), default ClickHouse/MinIO/SFTPGo
-passwords, and `SECURE_COOKIES=false`.
+## Секреты и риск raw Syslog
 
-## Bounds and search safeguards
+Redaction при сборке DTO, exports, errors, UI и derived projections распознаёт
+Password/User-Password, CHAP, digest/preimage, authenticator, token, credential,
+authorization, API/private keys, shared secrets, secret-like vendor AVPair.
 
-List pages are capped at 1,000. Payload substring and call searches require a
-device-local date; asynchronous administrators may explicitly request
-`allTime` search. Dated search exports are capped at 31 days and search text at
-256 characters. Export pages default to 1,000 and are configurable from
-100–5,000. Export progress checks cancellation between pages, and workload
-admission permits one export/replay heavy lane.
+Immutable `syslog_messages.payload` хранится byte-for-byte (SHA-256 верифицируем).
+Authenticated viewers видят raw rows устройства, но displayed payload с
+удалёнными распознанными секретами. Неизвестные vendor-форматы, номера и
+топология всё равно чувствительны. Unredacted download route **нет**.
+ClickHouse — operator-only trust boundary: шифрование диска, least privilege.
 
-Call cards cap packets, exchanges, members, attributes, attribute values and
-approximately 2 MiB of JSON. Truncation is deterministic and reported through
-`truncated` and `warnings`; call outcome and packet count are computed from the
-full aggregate rather than the retained evidence.
+Production boot отклоняет: default CH/MinIO/SFTPGo passwords, `SECURE_COOKIES=false`,
+`DATABASE_URL` с `://collector:collector@`.
 
-## Diagnostics and staging SLO
+---
 
-`GET /api/system/diagnostics` is admin-only, lazy, cached for 30 seconds, and
-coalesces concurrent refreshes under an independent 8-second context. It
-reports workload active/waiting/admitted/duration/rejections, raw ingest
-counters, projection queue depth/oldest/lag, calls/packets/orphans/ambiguity,
-coverage states/SLO, and export queued/running/oldest.
+## Bounds и search
 
-CI verifies invariants rather than machine timing. Before promotion, replay a
-fixed anonymized capture at expected peak plus 50% for 30 minutes and record:
+| Ограничение | Значение |
+|-------------|----------|
+| List page | ≤ 1000 |
+| Search | нужен device-local date; admin может `allTime` |
+| Dated export range | ≤ 31 день |
+| Search text | ≤ 256 символов |
+| Export page size | 100–5000 (default 1000) |
+| Sync export rows | ≤ 50 000 |
+| Call card JSON | ~2 MiB + caps на packets/exchanges/attrs; truncation явная |
 
-- interactive p95 under 2 seconds and p99 under 5 seconds;
-- zero admission leaks/deadlocks and bounded cancellation under 1 second;
-- projection lag under 5 minutes after load stops;
-- coverage late+missing at or below 1% after the configured grace;
-- export/replay never overlap in the heavy lane;
-- no container OOM, ClickHouse overcommit, or unbounded response.
+Export проверяет cancellation между страницами; heavy lane — один export/replay.
 
-Run the same capture and configuration for baseline and candidate, preserve
-the diagnostics snapshots, and compare throughput and queue drain time. Do not
-encode these staging timing thresholds as brittle shared-runner CI assertions.
+---
+
+## Diagnostics и staging SLO
+
+`GET /api/system/diagnostics` — admin-only, lazy, cache ~30s, coalesce под
+отдельным 8s context. Отдаёт admission counters, raw ingest, projection
+depth/lag/failed, orphans/ambiguity, coverage SLO, export queue.
+
+CI проверяет инварианты, не хрупкий timing. Перед promotion: replay
+анонимизированного capture на peak+50% / 30 минут и зафиксировать:
+
+- interactive p95 ниже 2s, p99 ниже 5s;
+- zero admission leaks/deadlocks; cancel ниже 1s;
+- projection lag ниже 5 мин после снятия нагрузки;
+- coverage late+missing ≤ 1% после grace;
+- export/replay не overlap в heavy lane;
+- нет container OOM / CH overcommit / unbounded response.
+
+Сравнивайте baseline и candidate на одном capture; не кодируйте эти пороги
+как brittle shared-runner CI asserts.

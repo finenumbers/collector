@@ -1,80 +1,142 @@
-# Collector data dictionary
+# Словарь данных
 
-## PostgreSQL control plane
+Control-plane (PostgreSQL), аналитика (ClickHouse) и object keys (MinIO).
+Модель AF — [correlation.md](correlation.md); архитектура — [architecture.md](architecture.md).
 
-`devices.antifraud_enabled` is the sole AntiFraud mode switch.
-`antifraud_policy_revision` changes on every toggle. `custom_projection_jobs`
-and `custom_projection_watermarks` provide durable discovery, generation-aware
-per-hour replay, explicit deadlines, leases, cursors, cutover, and rollback
-provenance. `custom_reconciliation_jobs` and its per-device lease serialize
-one-to-one assignment across deployment instances. The legacy `antifraud_mode`
-column and `syslog_parser_rebuild_jobs` table are removed by migration 017.
+Актуальные миграции: PostgreSQL до **023**, ClickHouse до **030**.
 
-`ingest_files` is the immutable CDR archive ledger. `export_jobs` is the
-durable asynchronous export queue. Users, sessions, retention policies, and
-audit records remain control-plane data.
+---
 
-## Immutable Syslog
+## PostgreSQL (control plane)
 
-`collector.syslog_messages` is the only persisted Syslog model in this
-foundation:
+### `users` / `sessions`
 
-- `event_id UUID`: stable ID created at ingress;
-- `device_id UUID`: source resolved from the original sender IP;
-- `received_at DateTime64(6, 'UTC')`: collector receive instant;
-- `source_ip IPv6` and `source_port UInt16`: original UDP peer;
-- `transport LowCardinality(String)`: currently `udp`;
-- `payload String`: exact datagram bytes;
-- `payload_sha256 FixedString(64)`: lowercase hexadecimal digest.
+Роли: `admin` | `analyst` | `viewer`. Lockout: `failed_attempts`, `locked_until`.
+Сессии: `id_hash`, `csrf_hash`, `expires_at` (TTL 12h на стороне приложения).
 
-The table is monthly-partitioned `MergeTree`, ordered by
-`(device_id, received_at, event_id)`. This order is the API keyset cursor.
-There are no parser, category, component, RADIUS, construct, correlation, or
-AntiFraud columns. The Custom worker reads this immutable table and owns a
-separate marker-selected projection.
+### `devices`
 
-`GET /api/devices/{deviceID}/syslog-messages` returns the same flat fields.
-The endpoint rejects a `category` query parameter. Search applies only to
-payload, with device/date predicates and bound query arguments.
+Ключевые поля: шаблон (`template_key` / firmware profile), `syslog_source_ip`,
+`device_sign`, `timezone`, FTP home/username, `antifraud_enabled`,
+`antifraud_policy_revision`, `voipmonitor_enabled`, category/capabilities шаблона.
 
-## CDR
+`antifraud_enabled` — единственный runtime-switch AF. Каждый toggle меняет
+`antifraud_policy_revision`. Legacy `antifraud_mode` / parser rebuild queue
+удалены миграциями foundation.
 
-`collector.cdr_records` retains Eltex typed CDR and its immutable `raw_fields`.
-`cdr_time_interpretations` and `cdr_time_facts` remain because CDR timezone
-interpretation is independent of removed Syslog parsing.
+### `ingest_files`
 
-`collector.satel_rtu_cdr` and `collector.satel_rtu_cdr_time_facts` retain the
-header-driven Satel RTU model. The full vendor row remains in `raw_fields`.
-Satel and Eltex tables are intentionally separate.
+Immutable ledger raw CDR: `object_key`, `sha256`, `status`
+(`received`/`processing`/`processed`/`quarantined`/`failed`), counts, errors.
+Не цель retention policy classes.
 
-Raw CDR files remain in MinIO and are referenced by `ingest_files`.
+### `export_jobs`
 
-## Custom AntiFraud projection and CDR coverage
+Durable async export queue. Важные колонки:
 
-Migrations 024–025 add `custom_radius_packets`,
+| Поле | Смысл |
+|------|--------|
+| `dataset` | `calls` / `syslog` / `antifraud` |
+| `format` | `auto` / `xlsx` / `csv_zip` |
+| `status` | `queued`/`running`/`completed`/`failed`/`cancelled`/`expired` |
+| `search`, `range_from`/`range_to` | Фильтры |
+| `object_key`, `sha256`, `size_bytes` | Артефакт в MinIO |
+| `rows_estimated` / `rows_processed` | Прогресс |
+| `cancel_requested_at` | Мягкая отмена running |
+| `heartbeat_at` / `lease_expires_at` / `worker_id` | Владение worker’ом |
+| `expires_at` | TTL артефакта (обычно +7d) |
+| `active_revision`, `raw_high_watermark*` | Согласованность с snapshot/syslog tip |
+| `template_key` / `parser_version` / `timezone` | Контекст устройства |
+
+Контракт API — [exports.md](exports.md).
+
+### `system_runtime_settings`
+
+Одна строка `id=1`, документ JSONB `settings` (группы `projection`, `coverage`,
+`voipmonitor`, `platform`, `containers`). Каталог ключей —
+[auth-and-ui.md](auth-and-ui.md#параметры-runtime).
+
+### Projection / reconciliation queues
+
+`custom_projection_jobs`, `custom_projection_watermarks` — discovery, generation,
+deadlines, leases, cursors, cutover. `custom_reconciliation_jobs` (+ per-device
+lease) — one-to-one assignment CDR↔AF. Аналогично dirty/job таблицы для
+VoIPmonitor (см. миграции PG рядом с worker’ом).
+
+### Retention / audit
+
+Retention policies (4 класса) — API admin; reconcile hourly.
+`audit_log` — действия пользователей.
+
+---
+
+## ClickHouse
+
+### Immutable Syslog — `collector.syslog_messages`
+
+| Колонка | Смысл |
+|---------|--------|
+| `event_id` | Стабильный ID с ingress |
+| `device_id` | Резолв по original sender IP |
+| `received_at` | Instant приёма (UTC µs) |
+| `source_ip` / `source_port` | Оригинальный UDP peer |
+| `transport` | Сейчас `udp` |
+| `payload` | Точные байты datagram |
+| `payload_sha256` | Lowercase hex digest |
+
+`MergeTree`, partition monthly, order `(device_id, received_at, event_id)` —
+keyset cursor API. **Нет** parser/category/RADIUS/AF колонок.
+`GET …/syslog-messages` отвергает `category`; search только по payload.
+
+### CDR
+
+- `cdr_records` — typed Eltex + `raw_fields`;
+- `cdr_time_interpretations` / `cdr_time_facts` — timezone interpretation;
+- `satel_rtu_cdr` / `satel_rtu_cdr_time_facts` — header-driven Satel (отдельно от Eltex).
+
+Raw файлы — MinIO, ссылка из `ingest_files`.
+
+### Custom AntiFraud и coverage
+
+Таблицы (ReplacingMergeTree + markers): `custom_radius_packets`,
 `custom_radius_packet_members`, `custom_radius_exchanges`,
-`custom_antifraud_calls`, `custom_antifraud_call_packets`, projection state
-and dirty buckets, plus `cdr_antifraud_coverage`,
-`cdr_antifraud_assignments`, and reconciliation dirty buckets. Derived rows
-are monthly-partitioned `ReplacingMergeTree(projection_seq)` records. Active
-views select only the snapshot named by the active marker, so staged partial
-snapshots are invisible.
+`custom_antifraud_calls`, `custom_antifraud_call_packets`, dirty buckets,
+`cdr_antifraud_coverage`, `cdr_antifraud_assignments`,
+`custom_radius_session_events`.
 
-Ordered redacted attributes, immutable event provenance, orphan/ambiguity
-reasons, explanation codes, match method, evidence, delta, and reconciliation
-version are retained. Matching uses exact normalized Acct-Session-Id first and
-then a unique H323 value present in a real CDR field. Numbers and time are
-supporting evidence only.
+Active views (`*_current`) выбирают snapshot active marker; partial staged
+невидимы. После `ADD COLUMN` views нужно recreate (миграция 028/029).
 
-Migration 026 adds finalized current views for packet members, exchanges, and
-call links plus `custom_radius_session_events`, the bounded authoritative index
-used to recompute sessions spanning hours or days.
+Matching: exact normalized Acct-Session-Id, затем unique H323 из реального CDR
+field. Номера/время — supporting evidence only.
 
-## Retention
+### VoIPmonitor — `cdr_voipmonitor_links`
 
-- `syslog` controls only `syslog_messages`;
-- `cdr` controls Eltex CDR and CDR time tables;
-- `softswitch_cdr` controls Satel RTU tables;
-- `raw_cdr_archive` controls the MinIO CDR prefix.
+Ключевые поля: `source_system`, `source_record_id`, Call-ID поля источника,
+`voipmonitor_cdr_id`, `voipmonitor_call_id`, `voipmonitor_card_url`,
+`match_status`, `match_method`, `match_score`, `match_evidence_json`,
+`policy_revision`, `projection_seq`, `deleted`.
+View: `cdr_voipmonitor_links_current`. Dirty: `voipmonitor_dirty_buckets`.
 
-The legacy `derived` retention class is removed.
+---
+
+## MinIO object keys
+
+| Префикс | Содержание | Lifecycle |
+|---------|------------|-----------|
+| `cdr/` | Immutable raw CDR | retention class `raw_cdr_archive` (7–1095d) |
+| `exports/` | Async export artifacts | **7 дней** |
+
+---
+
+## Retention classes
+
+| Класс | Цель |
+|-------|------|
+| `syslog` | только `syslog_messages` |
+| `cdr` | Eltex CDR + time tables |
+| `softswitch_cdr` | Satel RTU tables |
+| `raw_cdr_archive` | MinIO `cdr/` |
+
+Legacy class `derived` удалён. Диапазон дней: **7–1095**, default 1095.
+Не цели: `ingest_files`, NATS, spools.

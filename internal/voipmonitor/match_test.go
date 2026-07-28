@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -70,8 +71,22 @@ func TestMatchFallbackAmbiguous(t *testing.T) {
 
 func TestBuildCardURL(t *testing.T) {
 	got := BuildCardURL("", "https://vm.example", CardURLParts{CallID: `a"b`, CDRID: "9"})
-	if !containsAll(got, "https://vm.example/admin.php", "fcallid") {
-		t.Fatalf("url=%s", got)
+	want := "https://vm.example/admin.php?cdr_filter=" + url.QueryEscape("{fId:9}")
+	if got != want {
+		t.Fatalf("url=%s want=%s", got, want)
+	}
+	got = BuildCardURL("", "https://vm.example", CardURLParts{CallID: `abc`})
+	want = "https://vm.example/admin.php?cdr_filter=" + url.QueryEscape(`{fcallid:"abc"}`)
+	if got != want {
+		t.Fatalf("callid url=%s want=%s", got, want)
+	}
+	got = BuildCardURL(
+		`'{gui_base}/admin.php?cdr_filter={fcallid:"{voipmonitor_call_id}"}'`,
+		"https://vm.example", CardURLParts{CDRID: "42", CallID: "x"},
+	)
+	want = "https://vm.example/admin.php?cdr_filter=" + url.QueryEscape("{fId:42}")
+	if got != want {
+		t.Fatalf("quoted template url=%s want=%s", got, want)
 	}
 }
 

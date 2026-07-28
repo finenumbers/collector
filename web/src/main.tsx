@@ -2659,6 +2659,7 @@ function SystemSettingsPage({ user }: { user: User }) {
       </section>}
       {tab === 'runtime' && canManageUsers(user.role) && runtime && (
         <RuntimeSettingsEditor
+          key={JSON.stringify(runtime)}
           value={runtime}
           busy={busy}
           onSave={async (next) => {
@@ -2696,23 +2697,23 @@ function SystemSettingsPage({ user }: { user: User }) {
   </section>
 }
 
+function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
+  return {
+    ...value,
+    containers: value.containers || {
+      apiCpus: '2', apiMemory: '2G', exportCpus: '2', exportMemory: '2G',
+      maintenanceCpus: '2', maintenanceMemory: '2G', appCpus: '4', appMemory: '4G',
+    },
+  }
+}
+
 function RuntimeSettingsEditor({ value, busy, onSave }: {
   value: RuntimeSettings
   busy: boolean
   onSave: (next: RuntimeSettings) => Promise<void>
 }) {
-  const [form, setForm] = useState(value)
+  const [form, setForm] = useState(() => normalizeRuntimeSettings(value))
   const [password, setPassword] = useState('')
-  useEffect(() => {
-    setForm({
-      ...value,
-      containers: value.containers || {
-        apiCpus: '2', apiMemory: '2G', exportCpus: '2', exportMemory: '2G',
-        maintenanceCpus: '2', maintenanceMemory: '2G', appCpus: '4', appMemory: '4G',
-      },
-    })
-    setPassword('')
-  }, [value])
   const updateProjection = (patch: Partial<RuntimeSettings['projection']>) =>
     setForm((current) => ({ ...current, projection: { ...current.projection, ...patch } }))
   const updateCoverage = (patch: Partial<RuntimeSettings['coverage']>) =>

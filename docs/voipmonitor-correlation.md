@@ -2,7 +2,8 @@
 
 Collector matches ingested Eltex / Satel CDR records to VoIPmonitor CDRs and stores
 deep-links in ClickHouse (`collector.cdr_voipmonitor_links`). Matching is gated by
-global `VOIPMONITOR_ENABLED` and per-device `devices.voipmonitor_enabled`.
+global runtime `voipmonitor.enabled` (**Настройки → Параметры**) and per-device
+`devices.voipmonitor_enabled`. Env `VOIPMONITOR_*` only seeds an empty DB.
 
 **Axiom:** every SMG / softswitch CDR exists in VoIPmonitor. An empty VoIPmonitor
 cell is a matcher coverage defect after both legs’ Call-IDs were tried via API —
@@ -26,9 +27,9 @@ when `voipmonitor_call_id` is present (fixes UI without rematch).
 ## Algorithm
 
 1. **Ingest dirty buckets** — hour jobs in Postgres / ClickHouse dirty buckets.
-2. **Discover** — enabling a device fans out recent hours (`CUSTOM_PROJECTION_LOOKBACK`).
+2. **Discover** — enabling a device fans out recent hours (`projection.lookback`).
 3. **Bucket match (hybrid):**
-   - **Hour fetch:** `getVoipCalls` over `[from-CALLID_WINDOW, to+CALLID_WINDOW]`
+   - **Hour fetch:** `getVoipCalls` over `[from-callIdWindow, to+callIdWindow]`
      in 15‑minute slices → in-memory Call-ID index (few API calls per hour).
    - **Stage 1 exact:** normalized Call-ID lookup in that index; multi-leg →
      `matched_exact` (not `ambiguous`).
@@ -39,7 +40,7 @@ when `voipmonitor_call_id` is present (fixes UI without rematch).
    - Unique VM `cdrId` per device-hour; hour-fetch failure fails the job (retry),
      does not write a batch of false `unmatched`.
 4. **Deep-link:** official `{fcallid:"<vm.callId>"}` (+ optional date bound);
-   optional `getShareURL` when `VOIPMONITOR_USE_SHARE_URL=true`.
+   optional `getShareURL` when `voipmonitor.useShareUrl=true`.
 5. **Policy revision** — toggle `voipmonitor_enabled` bumps revision and rediscovers.
 
 ### Identity fields
@@ -59,24 +60,28 @@ when `voipmonitor_call_id` is present (fixes UI without rematch).
 | `unmatched` | Gates failed; evidence has `miss_reason` |
 | `pending` | Reserved |
 
-## Environment
+## Runtime settings (live tuning)
 
-| Variable | Default | Role |
-|----------|---------|------|
-| `VOIPMONITOR_ENABLED` | `false` | Start match worker |
-| `VOIPMONITOR_API_URL` | | GUI origin; `/php/api.php` appended |
-| `VOIPMONITOR_USER` / `PASSWORD` | | API credentials |
-| `VOIPMONITOR_GUI_URL` | | Base for `fcallid` deep-links |
-| `VOIPMONITOR_CARD_URL_TEMPLATE` | empty → official `fcallid` | Opt-in custom template (do **not** use `{fId:…}`) |
-| `VOIPMONITOR_CALLID_WINDOW` | `30m` | Pad for Call-ID API search |
-| `VOIPMONITOR_TIME_SKEW` | alias → `CALLID_WINDOW` | Deprecated |
-| `VOIPMONITOR_FALLBACK_WINDOW` | `2m` | Heuristic time gate |
-| `VOIPMONITOR_FALLBACK_WINDOW_MAX` | `10m` | Expand once on clock skew |
-| `VOIPMONITOR_MIN_SCORE` | `60` | Fallback floor |
-| `VOIPMONITOR_DISAMBIGUITY_MARGIN` | `8` | Fallback winner margin |
-| `VOIPMONITOR_NUMBER_SUFFIX_LEN` | `10` | Primary suffix (+1/+2 tried) |
-| `VOIPMONITOR_RATE_LIMIT_PER_SEC` | `5` | API throttle |
-| `VOIPMONITOR_USE_SHARE_URL` | `false` | Prefer `getShareURL(cdrId)` when share enabled |
+Edit in **Настройки → Параметры** (`PATCH /api/system/runtime-settings`).
+Env `VOIPMONITOR_*` only seeds PostgreSQL when the settings row is empty.
+
+| Runtime key | Default | Role |
+|-------------|---------|------|
+| `voipmonitor.enabled` | `false` | Start match worker |
+| `voipmonitor.apiUrl` | | GUI origin; `/php/api.php` appended |
+| `voipmonitor.user` / `password` | | API credentials |
+| `voipmonitor.guiUrl` | | Base for `fcallid` deep-links |
+| `voipmonitor.cardUrlTemplate` | empty → official `fcallid` | Opt-in custom template (do **not** use `{fId:…}`) |
+| `voipmonitor.callIdWindow` | `30m` | Pad for Call-ID API search |
+| `voipmonitor.fallbackWindow` | `2m` | Heuristic time gate |
+| `voipmonitor.fallbackWindowMax` | `10m` | Expand once on clock skew |
+| `voipmonitor.minScore` | `60` | Fallback floor |
+| `voipmonitor.disambiguityMargin` | `8` | Fallback winner margin |
+| `voipmonitor.numberSuffixLen` | `10` | Primary suffix (+1/+2 tried) |
+| `voipmonitor.rateLimitPerSec` | `5` | API throttle |
+| `voipmonitor.useShareUrl` | `false` | Prefer `getShareURL(cdrId)` when share enabled |
+
+Discover lookback uses shared `projection.lookback` (same settings document).
 
 ## Acceptance checks (post-deploy)
 

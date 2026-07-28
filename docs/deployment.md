@@ -112,10 +112,12 @@ Health endpoints:
 - `/health/ready` — PostgreSQL и ClickHouse.
 - `http://127.0.0.1:18081` на Docker-хосте — source-preserving ingress.
 
-Операционные параметры AntiFraud / coverage / VoIPmonitor / export / **лимиты
-контейнеров** управляются в **Настройки → Параметры**
+Операционные параметры AntiFraud / coverage / VoIPmonitor / export / ClickHouse
+admission / **лимиты контейнеров** управляются в **Настройки → Параметры**
 (`GET`/`PATCH /api/system/runtime-settings`). Они хранятся в PostgreSQL; `.env`
 нужен для seed пустой БД и инфраструктурных секретов (БД, MinIO, SFTPGo, порты).
+`platform.clickhouseAdmissionCapacity` применяется сразу для новых запросов;
+уже выполняющиеся запросы сохраняют прежние лимиты до завершения.
 Лимиты CPU/RAM: после сохранения скачайте
 `/api/system/runtime-settings/container-limits.env`, перенесите значения в host
 `.env` и выполните `docker compose up -d --force-recreate` (копия также пишется в
@@ -168,9 +170,10 @@ IANA timezone выбирается из выпадающего списка в �
    `lastError`, `watermarkLagSeconds`, `classificationGap`.
 2. Если `lastError` содержит `exceeds … events` / `memory bound`:
    - временно снизьте нагрузку async export (делит ClickHouse heavy lane);
-   - поднимите `CUSTOM_PROJECTION_MAX_EVENTS` (≥50000) и
-     `CUSTOM_PROJECTION_MAX_MEMORY_BYTES` (≥256MiB), `CUSTOM_PROJECTION_SLEEP=1s`;
-   - `CUSTOM_PROJECTION_THREADS=2` допустим (есть per-device lease).
+   - в **Настройки → Параметры** поднимите `projection.maxEvents` (≥50000),
+     `projection.maxMemoryBytes` (≥256MiB) и `projection.sleep=1s`
+     (env `CUSTOM_PROJECTION_*` — только seed пустой БД);
+   - `projection.threads=2` допустим (есть per-device lease).
 3. Requeue failed jobs: admin
    `POST /api/devices/{deviceID}/projection/requeue-failed`
    (сбрасывает `failed`→`pending` для устройства и overflow-failed глобально).

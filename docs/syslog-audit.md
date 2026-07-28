@@ -1,5 +1,11 @@
 # Аудит Syslog Eltex SMG-1016M
 
+> **Superseded for runtime contracts.** This document is a historical corpus /
+> taxonomy audit from the legacy parser UI era. Live Syslog storage and ops
+> contracts are immutable ClickHouse `syslog_messages` plus Custom AntiFraud
+> coverage — see [data-dictionary.md](data-dictionary.md). Keep this file for
+> fixture provenance and Eltex taxonomy notes only.
+
 ## Нормативные источники
 
 - Eltex «SMG-1016M/SMG-2016/SMG-3016. Руководство пользователя,

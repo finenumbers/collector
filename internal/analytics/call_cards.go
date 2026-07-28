@@ -348,11 +348,21 @@ func (c *Client) AntifraudCallDetail(
 	defer release()
 	var detail AntifraudCallDetail
 	var attributes, unmatched string
-	err = c.Conn.QueryRow(ctx, `SELECT snapshot_id,contract_key,call_id,first_seen_at,last_seen_at,acct_session_id,
-		acct_session_ids,h323_conf_id,calling,called,status,coverage_state,explanation_codes,accounting_start,accounting_stop,
-		session_duration_seconds,ordered_attributes_json,unmatched_provenance_json,orphan_packet_ids
-		FROM collector.custom_antifraud_calls_current WHERE device_id=? AND call_id=? LIMIT 1`,
-		deviceID, callID).Scan(
+	err = c.Conn.QueryRow(ctx, `SELECT call.snapshot_id,call.contract_key,call.call_id,call.first_seen_at,call.last_seen_at,call.acct_session_id,
+		call.acct_session_ids,call.h323_conf_id,call.calling,call.called,call.status,call.coverage_state,call.explanation_codes,call.accounting_start,call.accounting_stop,
+		call.session_duration_seconds,call.ordered_attributes_json,call.unmatched_provenance_json,call.orphan_packet_ids
+		FROM collector.custom_antifraud_calls AS call FINAL
+		INNER JOIN (
+			SELECT device_id,bucket_start,argMax(snapshot_id,projection_seq) AS snapshot_id,
+				argMax(marker,projection_seq) AS marker
+			FROM collector.custom_projection_state
+			WHERE device_id=?
+			GROUP BY device_id,bucket_start
+		) AS state ON state.device_id=call.device_id AND state.bucket_start=call.bucket_start
+			AND state.snapshot_id=call.snapshot_id
+		WHERE call.device_id=? AND call.call_id=? AND call.deleted=0 AND state.marker='active'
+		LIMIT 1`,
+		deviceID, deviceID, callID).Scan(
 		&detail.SnapshotID, &detail.ContractKey, &detail.CallID, &detail.FirstSeenAt,
 		&detail.LastSeenAt, &detail.AcctSessionID, &detail.AcctSessionIDs,
 		&detail.H323ConfID, &detail.Calling, &detail.Called, &detail.Status,

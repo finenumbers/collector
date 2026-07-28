@@ -118,7 +118,15 @@ func main() {
 			slog.Error("custom projection global gate setup failed", "error", err)
 		}
 	}
+	applyClickHouseAdmission := func(doc runtimesettings.Document) {
+		// Replaces the admission manager; in-flight queries keep their current
+		// lease/limits until they finish, while new queries use the new capacity.
+		warehouse.ConfigureWorkloads(analytics.WorkloadOptions{
+			Capacity: doc.Platform.ClickHouseAdmissionCapacity,
+		})
+	}
 	applyProjectionGate(runtimeDoc)
+	applyClickHouseAdmission(runtimeDoc)
 	if err := writeContainerLimitsEnv("/data/spool/container-limits.env", runtimeDoc); err != nil {
 		slog.Error("container limits env write failed", "error", err)
 	}
@@ -180,6 +188,7 @@ func main() {
 		Runtime:            runtime,
 		OnRuntimeSettingsChanged: func(doc runtimesettings.Document) {
 			applyProjectionGate(doc)
+			applyClickHouseAdmission(doc)
 			if err := writeContainerLimitsEnv("/data/spool/container-limits.env", doc); err != nil {
 				slog.Error("container limits env write failed", "error", err)
 			}
@@ -187,6 +196,7 @@ func main() {
 				"projectionEnabled", doc.Projection.Enabled,
 				"projectionThreads", doc.Projection.Threads,
 				"voipmonitorEnabled", doc.Voipmonitor.Enabled,
+				"clickhouseAdmissionCapacity", doc.Platform.ClickHouseAdmissionCapacity,
 				"apiMemory", doc.Containers.APIMemory)
 		},
 	}

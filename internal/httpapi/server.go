@@ -1287,13 +1287,25 @@ func (s *Server) antifraudCallDetail(writer http.ResponseWriter, request *http.R
 	defer cancel()
 	detail, err := s.Analytics.AntifraudCallDetail(ctx, deviceID, callID)
 	if err != nil {
-		if writeAdmissionError(writer, err) {
-			return
-		}
-		writeError(writer, http.StatusNotFound, "AntiFraud call not found")
+		writeAntifraudCallDetailError(writer, err, deviceID, callID)
 		return
 	}
 	writeJSON(writer, http.StatusOK, detail)
+}
+
+func writeAntifraudCallDetailError(
+	writer http.ResponseWriter, err error, deviceID, callID uuid.UUID,
+) {
+	if writeAdmissionError(writer, err) {
+		return
+	}
+	if errors.Is(err, analytics.ErrAntifraudCallNotFound) {
+		writeError(writer, http.StatusNotFound, "AntiFraud call not found")
+		return
+	}
+	slog.Error("antifraud call detail failed",
+		"deviceId", deviceID, "callId", callID, "error", err)
+	writeError(writer, http.StatusInternalServerError, "unable to load AntiFraud call card")
 }
 
 func (s *Server) callCard(writer http.ResponseWriter, request *http.Request) {

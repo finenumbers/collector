@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -22,6 +23,9 @@ const (
 	maxCallAttributeBytes = 1024
 	maxCallCardJSONBytes  = 2 << 20
 )
+
+// ErrAntifraudCallNotFound is returned when the active projection has no call row.
+var ErrAntifraudCallNotFound = errors.New("antifraud call not found")
 
 type CoverageSummary struct {
 	State           string         `json:"state"`
@@ -356,26 +360,37 @@ func (c *Client) AntifraudCallDetail(
 		&detail.SessionDurationSeconds, &attributes, &unmatched, &detail.OrphanPacketIDs,
 	)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return detail, ErrAntifraudCallNotFound
+		}
 		return detail, err
 	}
 	detail.SortTime = detail.FirstSeenAt
 	detail.Attributes = safeOrderedAttributes(attributes)
 	detail.Unmatched = safeJSONValue(unmatched)
+	// Keep the call shell visible when dense-SMG packet/CDR enrichment fails;
+	// list→card previously mapped every secondary error to a false "not found".
 	if err := c.loadAntifraudPackets(ctx, deviceID, callID, &detail); err != nil {
-		return detail, err
+		detail.Warnings = append(detail.Warnings,
+			"packets unavailable: "+redact.Text(err.Error()))
 	}
 	if err := c.loadAntifraudExchanges(ctx, deviceID, &detail); err != nil {
-		return detail, err
+		detail.Warnings = append(detail.Warnings,
+			"exchanges unavailable: "+redact.Text(err.Error()))
 	}
 	if err := c.loadCallCoverage(ctx, deviceID, callID, &detail.Coverage); err != nil {
-		return detail, err
-	}
-	detail.Coverage.State = deriveAFCoverageState(len(detail.Coverage.LinkedCDRIDs) > 0,
-		detail.Coverage.Ambiguous, detail.FirstSeenAt, time.Now().UTC())
-	if len(detail.Coverage.LinkedCDRIDs) > 0 {
-		detail.LinkedCDRs, err = c.loadCDRFacts(ctx, deviceID, detail.Coverage.LinkedCDRIDs)
-		if err != nil {
-			return detail, err
+		detail.Warnings = append(detail.Warnings,
+			"coverage unavailable: "+redact.Text(err.Error()))
+	} else {
+		detail.Coverage.State = deriveAFCoverageState(len(detail.Coverage.LinkedCDRIDs) > 0,
+			detail.Coverage.Ambiguous, detail.FirstSeenAt, time.Now().UTC())
+		if len(detail.Coverage.LinkedCDRIDs) > 0 {
+			detail.LinkedCDRs, err = c.loadCDRFacts(ctx, deviceID, detail.Coverage.LinkedCDRIDs)
+			if err != nil {
+				detail.Warnings = append(detail.Warnings,
+					"linked CDR unavailable: "+redact.Text(err.Error()))
+				detail.LinkedCDRs = nil
+			}
 		}
 	}
 	enrichAntifraudDetail(&detail)
@@ -432,8 +447,8 @@ func (c *Client) loadAntifraudPackets(
 		LEFT JOIN collector.custom_radius_exchanges_current exchange
 			ON exchange.device_id=packet.device_id AND exchange.snapshot_id=packet.snapshot_id
 			AND exchange.request_id=packet.packet_id AND exchange.deleted=0
-		WHERE links.device_id=? AND links.call_id=? AND links.deleted=0
-		ORDER BY links.packet_order LIMIT ?`, deviceID, callID, maxCallDetailPackets+1)
+		WHERE links.device_id=? AND links.snapshot_id=? AND links.call_id=? AND links.deleted=0
+		ORDER BY links.packet_order LIMIT ?`, deviceID, detail.SnapshotID, callID, maxCallDetailPackets+1)
 	if err != nil {
 		return err
 	}

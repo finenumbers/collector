@@ -1,12 +1,42 @@
 package analytics
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+func TestAntifraudCallDetailSoftFailsEnrichmentAndScopesPackets(t *testing.T) {
+	body, err := os.ReadFile("call_cards.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(body)
+	if !strings.Contains(source, "ErrAntifraudCallNotFound") {
+		t.Fatal("missing ErrAntifraudCallNotFound")
+	}
+	if !strings.Contains(source, "WHERE links.device_id=? AND links.snapshot_id=? AND links.call_id=?") {
+		t.Fatal("packet load must scope by snapshot_id")
+	}
+	detailFn := source[strings.Index(source, "func (c *Client) AntifraudCallDetail"):]
+	detailFn = detailFn[:strings.Index(detailFn, "\nfunc (c *Client) loadAntifraudExchanges")]
+	for _, needle := range []string{
+		`"packets unavailable: "`,
+		`"exchanges unavailable: "`,
+		`"coverage unavailable: "`,
+		`"linked CDR unavailable: "`,
+	} {
+		if !strings.Contains(detailFn, needle) {
+			t.Fatalf("missing soft-fail warning %s", needle)
+		}
+	}
+	if strings.Contains(detailFn, "if err := c.loadAntifraudPackets(ctx, deviceID, callID, &detail); err != nil {\n\t\treturn detail, err") {
+		t.Fatal("packet enrichment must soft-fail instead of aborting the card")
+	}
+}
 
 func TestSafeOrderedAttributesRedactsSecretsAndKeepsOrder(t *testing.T) {
 	attributes := safeOrderedAttributes(`[

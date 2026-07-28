@@ -58,10 +58,15 @@ type Config struct {
 	VoipmonitorPassword            string
 	VoipmonitorGUIURL              string
 	VoipmonitorCardURLTemplate     string
-	VoipmonitorTimeSkew            time.Duration
+	VoipmonitorCallIDWindow        time.Duration
+	VoipmonitorFallbackWindow      time.Duration
+	VoipmonitorFallbackWindowMax   time.Duration
+	VoipmonitorTimeSkew            time.Duration // deprecated alias of CallIDWindow
 	VoipmonitorWorkerSleep         time.Duration
 	VoipmonitorLease               time.Duration
 	VoipmonitorMinScore            int
+	VoipmonitorDisambiguityMargin  int
+	VoipmonitorNumberSuffixLen     int
 	VoipmonitorRateLimitPerSec     int
 	ClickHouseAdmissionCapacity    int
 	ExportPageSize                 int
@@ -118,12 +123,17 @@ func Load() (Config, error) {
 		VoipmonitorUser:                env("VOIPMONITOR_USER", ""),
 		VoipmonitorPassword:            env("VOIPMONITOR_PASSWORD", ""),
 		VoipmonitorGUIURL:              env("VOIPMONITOR_GUI_URL", ""),
-		VoipmonitorCardURLTemplate: env("VOIPMONITOR_CARD_URL_TEMPLATE", ""),
-		VoipmonitorTimeSkew:        envDuration("VOIPMONITOR_TIME_SKEW", 5*time.Second),
-		VoipmonitorWorkerSleep:     envDuration("VOIPMONITOR_WORKER_SLEEP", 5*time.Second),
-		VoipmonitorLease:           envDuration("VOIPMONITOR_LEASE", 2*time.Minute),
-		VoipmonitorMinScore:        envInt("VOIPMONITOR_MIN_SCORE", 60),
-		VoipmonitorRateLimitPerSec: envInt("VOIPMONITOR_RATE_LIMIT_PER_SEC", 5),
+		VoipmonitorCardURLTemplate:    env("VOIPMONITOR_CARD_URL_TEMPLATE", ""),
+		VoipmonitorCallIDWindow:       envDuration("VOIPMONITOR_CALLID_WINDOW", 0),
+		VoipmonitorFallbackWindow:     envDuration("VOIPMONITOR_FALLBACK_WINDOW", 2*time.Minute),
+		VoipmonitorFallbackWindowMax:  envDuration("VOIPMONITOR_FALLBACK_WINDOW_MAX", 10*time.Minute),
+		VoipmonitorTimeSkew:           envDuration("VOIPMONITOR_TIME_SKEW", 0),
+		VoipmonitorWorkerSleep:        envDuration("VOIPMONITOR_WORKER_SLEEP", 5*time.Second),
+		VoipmonitorLease:              envDuration("VOIPMONITOR_LEASE", 2*time.Minute),
+		VoipmonitorMinScore:           envInt("VOIPMONITOR_MIN_SCORE", 60),
+		VoipmonitorDisambiguityMargin: envInt("VOIPMONITOR_DISAMBIGUITY_MARGIN", 8),
+		VoipmonitorNumberSuffixLen:    envInt("VOIPMONITOR_NUMBER_SUFFIX_LEN", 10),
+		VoipmonitorRateLimitPerSec:    envInt("VOIPMONITOR_RATE_LIMIT_PER_SEC", 5),
 		ClickHouseAdmissionCapacity: envInt("CLICKHOUSE_ADMISSION_CAPACITY", 8),
 		ExportPageSize:              envInt("EXPORT_PAGE_SIZE", 1000),
 	}
@@ -148,6 +158,18 @@ func Load() (Config, error) {
 			cfg.SFTPGoPassword == "collector-change-me" || !cfg.SecureCookies {
 			return Config{}, fmt.Errorf("production requires non-default service secrets and secure cookies")
 		}
+	}
+	// CALLID_WINDOW preferred; TIME_SKEW is a deprecated alias; default 30m.
+	if cfg.VoipmonitorCallIDWindow <= 0 {
+		if cfg.VoipmonitorTimeSkew > 0 {
+			cfg.VoipmonitorCallIDWindow = cfg.VoipmonitorTimeSkew
+		} else {
+			cfg.VoipmonitorCallIDWindow = 30 * time.Minute
+		}
+	}
+	cfg.VoipmonitorTimeSkew = cfg.VoipmonitorCallIDWindow
+	if cfg.VoipmonitorFallbackWindowMax < cfg.VoipmonitorFallbackWindow {
+		cfg.VoipmonitorFallbackWindowMax = cfg.VoipmonitorFallbackWindow
 	}
 	return cfg, nil
 }

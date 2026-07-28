@@ -97,7 +97,7 @@ func (w *Worker) process(ctx context.Context, job store.VoipmonitorJob) error {
 	}
 	batch := w.BatchSize
 	if batch <= 0 {
-		batch = 100
+		batch = 2000
 	}
 	switch job.Kind {
 	case "discover":
@@ -132,31 +132,32 @@ func (w *Worker) process(ctx context.Context, job store.VoipmonitorJob) error {
 func (w *Worker) matchBucket(
 	ctx context.Context, device store.Device, revision uint64, from, to time.Time, batch int,
 ) error {
-	var candidates []CDRCandidate
-	var err error
-	if device.TemplateKey == "satel-rtu-cdr-v1" {
-		candidates, err = w.Store.LoadVoipmonitorSatelCandidates(
-			ctx, device.ID, from, to, revision, batch,
-		)
-	} else {
-		candidates, err = w.Store.LoadVoipmonitorEltexCandidates(
-			ctx, device.ID, from, to, revision, batch,
-		)
-	}
+	candidates, err := w.loadAllCandidates(ctx, device, revision, from, to, batch)
 	if err != nil {
 		return err
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	results, matchErr := w.Matcher.MatchBucket(ctx, candidates)
+	if matchErr != nil {
+		slog.Warn("voipmonitor hour fetch failed",
+			"device", device.ID, "from", from, "to", to, "error", matchErr)
+	}
+	if issues := AuditLinkInvariants(candidates, results); len(issues) > 0 {
+		slog.Warn("voipmonitor match invariant issues",
+			"device", device.ID, "from", from, "issues", issues)
 	}
 	links := make([]Link, 0, len(candidates))
 	now := time.Now().UTC()
 	seq := uint64(now.UnixNano())
-	for _, candidate := range candidates {
-		result, matchErr := w.Matcher.Match(ctx, candidate)
-		if matchErr != nil {
-			slog.Warn("voipmonitor match attempt failed",
-				"device", device.ID, "record", candidate.SourceRecordID, "error", matchErr)
+	for i, candidate := range candidates {
+		result := results[i]
+		if result.Status == "" {
 			result = MatchResult{
 				Status: StatusUnmatched, Method: "error", Score: 0,
-				EvidenceJSON: mustJSON(map[string]any{"error": matchErr.Error()}),
+				MissReason:   MissAPIError,
+				EvidenceJSON: mustJSON(map[string]any{"miss_reason": MissAPIError}),
 			}
 		}
 		link := Link{
@@ -177,4 +178,13 @@ func (w *Worker) matchBucket(
 		seq++
 	}
 	return w.Store.WriteVoipmonitorLinks(ctx, links)
+}
+
+func (w *Worker) loadAllCandidates(
+	ctx context.Context, device store.Device, revision uint64, from, to time.Time, batch int,
+) ([]CDRCandidate, error) {
+	if device.TemplateKey == "satel-rtu-cdr-v1" {
+		return w.Store.LoadVoipmonitorSatelCandidates(ctx, device.ID, from, to, revision, batch)
+	}
+	return w.Store.LoadVoipmonitorEltexCandidates(ctx, device.ID, from, to, revision, batch)
 }

@@ -117,12 +117,13 @@ func (c *Client) LoadVoipmonitorEltexCandidates(
 		return nil, err
 	}
 	defer release()
-	if limit <= 0 || limit > 500 {
-		limit = 200
+	if limit <= 0 || limit > 5000 {
+		limit = 2000
 	}
 	rows, err := c.Conn.Query(ctx, `SELECT c.record_id,
 		coalesce(t.setup_time,c.setup_time,c.ingested_at),
-		c.duration_ms,c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,c.outgoing_cdpn,
+		c.duration_ms,c.connect_time,c.disconnect_time,
+		c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,c.outgoing_cdpn,
 		ifNull(toString(c.incoming_ip),''),ifNull(toString(c.outgoing_ip),''),
 		c.incoming_sip_call_id,c.outgoing_sip_call_id,c.unique_tag,c.release_cause
 		FROM collector.cdr_records AS c FINAL
@@ -146,10 +147,11 @@ func (c *Client) LoadVoipmonitorEltexCandidates(
 	for rows.Next() {
 		var item voipmonitor.CDRCandidate
 		var durationMS *uint64
+		var connectTime, disconnectTime *time.Time
 		var inA, outA, inB, outB, inSIP, outSIP string
 		var inIP, outIP string
 		if err := rows.Scan(
-			&item.SourceRecordID, &item.SetupTime, &durationMS,
+			&item.SourceRecordID, &item.SetupTime, &durationMS, &connectTime, &disconnectTime,
 			&inA, &outA, &inB, &outB, &inIP, &outIP, &inSIP, &outSIP, &item.SourceCDRID,
 			&item.ReleaseCause,
 		); err != nil {
@@ -159,11 +161,17 @@ func (c *Client) LoadVoipmonitorEltexCandidates(
 		item.SourceSystem = voipmonitor.SourceEltex
 		item.Caller = firstNonEmpty(outA, inA)
 		item.Called = firstNonEmpty(outB, inB)
+		item.CallerNumbers = nonEmptyStrings(outA, inA)
+		item.CalledNumbers = nonEmptyStrings(outB, inB)
 		item.CallerIP = inIP
 		item.CalledIP = outIP
 		if durationMS != nil {
 			sec := int64(*durationMS / 1000)
 			item.DurationSec = &sec
+		}
+		if connectTime != nil && disconnectTime != nil && disconnectTime.After(*connectTime) {
+			sec := int64(disconnectTime.Sub(*connectTime).Seconds())
+			item.ConnectDurationSec = &sec
 		}
 		item.SIPCallIDs = nonEmptyStrings(inSIP, outSIP)
 		item.SourceCallID = firstNonEmpty(inSIP, outSIP)
@@ -181,13 +189,15 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		return nil, err
 	}
 	defer release()
-	if limit <= 0 || limit > 500 {
-		limit = 200
+	if limit <= 0 || limit > 5000 {
+		limit = 2000
 	}
 	rows, err := c.Conn.Query(ctx, `SELECT c.record_id,
 		coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at),
-		c.duration_ms,c.bill_ani,c.bill_dnis,c.in_ani,c.in_dnis,c.out_ani,c.out_dnis,
-		c.out_leg_call_id,c.src_out_leg_call_id,c.src_in_leg_conf_id,c.in_leg_call_id,c.conf_id,c.cdr_id
+		c.duration_ms,c.connect_time,c.disconnect_time,
+		c.bill_ani,c.bill_dnis,c.in_ani,c.in_dnis,c.out_ani,c.out_dnis,
+		c.out_leg_call_id,c.src_out_leg_call_id,c.in_leg_call_id,c.src_in_leg_conf_id,c.conf_id,c.cdr_id,
+		c.remote_src_sig_address,c.remote_dst_sig_address,c.local_src_sig_address,c.local_dst_sig_address
 		FROM collector.satel_rtu_cdr AS c FINAL
 		LEFT JOIN collector.satel_rtu_cdr_time_facts AS t FINAL
 			ON t.device_id=c.device_id AND t.record_id=c.record_id
@@ -209,12 +219,15 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 	for rows.Next() {
 		var item voipmonitor.CDRCandidate
 		var durationMS *uint64
+		var connectTime, disconnectTime *time.Time
 		var billA, billB, inA, inB, outA, outB string
-		var outLeg, srcOut, srcConf, inLeg, confID, cdrID string
+		var outLeg, srcOut, inLeg, srcConf, confID, cdrID string
+		var remoteSrc, remoteDst, localSrc, localDst string
 		if err := rows.Scan(
-			&item.SourceRecordID, &item.SetupTime, &durationMS,
+			&item.SourceRecordID, &item.SetupTime, &durationMS, &connectTime, &disconnectTime,
 			&billA, &billB, &inA, &inB, &outA, &outB,
-			&outLeg, &srcOut, &srcConf, &inLeg, &confID, &cdrID,
+			&outLeg, &srcOut, &inLeg, &srcConf, &confID, &cdrID,
+			&remoteSrc, &remoteDst, &localSrc, &localDst,
 		); err != nil {
 			return nil, err
 		}
@@ -222,15 +235,24 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		item.SourceSystem = voipmonitor.SourceSatel
 		item.Caller = firstNonEmpty(billA, outA, inA)
 		item.Called = firstNonEmpty(billB, outB, inB)
+		item.CallerNumbers = nonEmptyStrings(billA, outA, inA)
+		item.CalledNumbers = nonEmptyStrings(billB, outB, inB)
+		item.CallerIP = firstNonEmpty(remoteSrc, localSrc)
+		item.CalledIP = firstNonEmpty(remoteDst, localDst)
 		if durationMS != nil {
 			sec := int64(*durationMS / 1000)
 			item.DurationSec = &sec
+		}
+		if connectTime != nil && disconnectTime != nil && disconnectTime.After(*connectTime) {
+			sec := int64(disconnectTime.Sub(*connectTime).Seconds())
+			item.ConnectDurationSec = &sec
 		}
 		item.SourceCallIDOutProto = firstNonEmpty(outLeg, srcOut)
 		item.SourceProtocolConfID = firstNonEmpty(srcConf, confID)
 		item.SourceCallID = firstNonEmpty(inLeg, confID)
 		item.SourceCDRID = cdrID
-		item.SIPCallIDs = nonEmptyStrings(outLeg, srcOut, srcConf, inLeg, confID)
+		// Prefer dialog IDs that VoIPmonitor is most likely to index.
+		item.SIPCallIDs = nonEmptyStrings(outLeg, srcOut, inLeg, srcConf, confID)
 		item.EventMonth = item.SetupTime
 		out = append(out, item)
 	}

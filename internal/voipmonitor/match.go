@@ -483,7 +483,7 @@ func orderLegs(cdr CDRCandidate, hits []VMCall, suffixLen int) ([]VMCall, uint8)
 }
 
 func cloneEvidence(in map[string]any) map[string]any {
-	out := make(map[string]any, len(in)+2)
+	out := make(map[string]any, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

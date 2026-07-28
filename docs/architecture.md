@@ -112,3 +112,10 @@ arrivals dirty the same UTC reconciliation buckets. The fair scheduler also
 ages expected rows without new arrivals. Exact normalized Acct-Session-Id is
 the only primary key; H323 fallback requires a unique value from a real CDR
 field. Number and time similarity never select a candidate.
+
+AntiFraud call cards load the active call shell from
+`custom_antifraud_calls_current`, then enrich packets/exchanges/CDR. Enrichment
+failures return the shell with warnings instead of a false “call not found”.
+If cards still 404 after a list hit, recreate current views through migration
+029 — ClickHouse expands `SELECT *` at `CREATE VIEW` time and can drift after
+accounting columns land.

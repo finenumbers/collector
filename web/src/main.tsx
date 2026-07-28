@@ -1420,6 +1420,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setCursor(null)
       setHasMore(false)
       setSelectedEvent(null)
+      setSelectedCall(null)
+      setSelectedSatelCall(null)
+      setSelectedAntifraud(null)
       setLoadError('')
       if (tableShellRef.current) tableShellRef.current.scrollTop = 0
       setBusy(true)

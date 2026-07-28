@@ -155,6 +155,13 @@ describe('equipment templates', () => {
     expect(main).toContain('function devicesPollFingerprint(devices: Device[])')
   })
 
+	it('clears open drawers when the table date or dataset reloads', () => {
+    expect(main).toContain('setSelectedAntifraud(null)')
+    expect(main).toContain('setSelectedCall(null)')
+    expect(main).toContain('setSelectedSatelCall(null)')
+    expect(main).toContain('setSelectedEvent(null)')
+  })
+
   it('formats softswitch dashboard freshness in the device timezone', () => {
     const softswitchBlock = main.slice(
       main.indexOf('title="Последний CDR"'),

@@ -55,6 +55,33 @@ func TestExportWorkerHealthyRequiresStoreWhenHealthNil(t *testing.T) {
 	}
 }
 
+func TestWriteAntifraudCallDetailErrorMapping(t *testing.T) {
+	deviceID, callID := uuid.New(), uuid.New()
+
+	notFound := httptest.NewRecorder()
+	writeAntifraudCallDetailError(notFound, analytics.ErrAntifraudCallNotFound, deviceID, callID)
+	if notFound.Code != http.StatusNotFound ||
+		!strings.Contains(notFound.Body.String(), "AntiFraud call not found") {
+		t.Fatalf("not-found mapping: status=%d body=%s", notFound.Code, notFound.Body.String())
+	}
+
+	internal := httptest.NewRecorder()
+	writeAntifraudCallDetailError(internal, errors.New("clickhouse memory limit exceeded"), deviceID, callID)
+	if internal.Code != http.StatusInternalServerError ||
+		!strings.Contains(internal.Body.String(), "unable to load AntiFraud call card") {
+		t.Fatalf("internal mapping: status=%d body=%s", internal.Code, internal.Body.String())
+	}
+	if strings.Contains(internal.Body.String(), "AntiFraud call not found") {
+		t.Fatal("non-NoRows errors must not be masked as call not found")
+	}
+
+	timeout := httptest.NewRecorder()
+	writeAntifraudCallDetailError(timeout, context.DeadlineExceeded, deviceID, callID)
+	if timeout.Code != http.StatusGatewayTimeout {
+		t.Fatalf("timeout mapping: status=%d body=%s", timeout.Code, timeout.Body.String())
+	}
+}
+
 func TestDashboardDeviceRowExposesConfiguredAndActiveTimezones(t *testing.T) {
 	latest := time.Date(2026, 7, 26, 12, 30, 0, 0, time.UTC)
 	device := store.Device{

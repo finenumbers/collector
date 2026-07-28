@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type Matcher struct {
 	MinScore           int
 	DisambiguityMargin int
 	NumberSuffixLen    int
+	UseShareURL        bool
 	Now                func() time.Time
 
 	// Deprecated: aliased to CallIDWindow when CallIDWindow is unset.
@@ -49,8 +51,25 @@ func buildCallIndex(calls []VMCall) *callIndex {
 		for _, key := range CallIDVariants(call.CallID) {
 			idx.byCallID[key] = append(idx.byCallID[key], call)
 		}
+		// Also index raw/lower forms for exact string hits from API.
+		for _, key := range CallIDQueryVariants(call.CallID) {
+			norm := NormalizeCallID(key)
+			if norm == "" {
+				continue
+			}
+			idx.byCallID[norm] = appendUniqueCall(idx.byCallID[norm], call)
+		}
 	}
 	return idx
+}
+
+func appendUniqueCall(list []VMCall, call VMCall) []VMCall {
+	for _, existing := range list {
+		if existing.CDRID != "" && existing.CDRID == call.CDRID {
+			return list
+		}
+	}
+	return append(list, call)
 }
 
 func (m *Matcher) opts() matchOpts {
@@ -103,7 +122,7 @@ type matchOpts struct {
 	suffixLen    int
 }
 
-// MatchBucket matches all hour candidates against one VM fetch window.
+// MatchBucket resolves candidates via Call-ID-first getVoipCalls queries.
 func (m *Matcher) MatchBucket(ctx context.Context, candidates []CDRCandidate) ([]MatchResult, error) {
 	opts := m.opts()
 	now := time.Now().UTC()
@@ -116,29 +135,59 @@ func (m *Matcher) MatchBucket(ctx context.Context, candidates []CDRCandidate) ([
 	from, to := bucketBounds(candidates)
 	fetchFrom := from.Add(-opts.callIDWindow)
 	fetchTo := to.Add(opts.callIDWindow)
-	calls, err := m.Client.ListVoipCallsRange(ctx, fetchFrom, fetchTo)
-	if err != nil {
-		results := make([]MatchResult, len(candidates))
-		for i := range candidates {
-			results[i] = missResult(MissAPIError, map[string]any{
-				"stage": "fetch", "error": err.Error(),
-				"fetch_from": fetchFrom.Format(time.RFC3339),
-				"fetch_to":   fetchTo.Format(time.RFC3339),
-			})
+
+	queries := uniqueCallIDQueries(candidates)
+	var allHits []VMCall
+	queryAttempts := make([]any, 0, len(queries))
+	var fetchErr error
+	for _, q := range queries {
+		hits, err := m.Client.GetVoipCalls(ctx, map[string]any{
+			"startTime":   fetchFrom.Format("2006-01-02 15:04:05"),
+			"startTimeTo": fetchTo.Format("2006-01-02 15:04:05"),
+			"callId":      q,
+		})
+		attempt := map[string]any{"callId": q, "hits": len(hits)}
+		if err != nil {
+			attempt["error"] = err.Error()
+			fetchErr = err
+			queryAttempts = append(queryAttempts, attempt)
+			continue
 		}
-		return results, err
+		queryAttempts = append(queryAttempts, attempt)
+		allHits = append(allHits, hits...)
 	}
-	idx := buildCallIndex(calls)
-	return m.assignBucket(candidates, idx, opts, now), nil
+	idx := buildCallIndex(allHits)
+	results := m.assignBucket(ctx, candidates, idx, opts, now, queryAttempts)
+	if fetchErr != nil && len(allHits) == 0 {
+		return results, fetchErr
+	}
+	return results, nil
 }
 
-// Match keeps a single-CDR API for tests; it still uses the batch path.
+// Match keeps a single-CDR API for tests.
 func (m *Matcher) Match(ctx context.Context, cdr CDRCandidate) (MatchResult, error) {
 	results, err := m.MatchBucket(ctx, []CDRCandidate{cdr})
 	if len(results) == 0 {
 		return MatchResult{Status: StatusUnmatched, Method: "none", Score: 0}, err
 	}
 	return results[0], err
+}
+
+func uniqueCallIDQueries(candidates []CDRCandidate) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, cdr := range candidates {
+		for _, raw := range cdr.SIPCallIDs {
+			for _, q := range CallIDQueryVariants(raw) {
+				if _, ok := seen[q]; ok {
+					continue
+				}
+				seen[q] = struct{}{}
+				out = append(out, q)
+			}
+		}
+	}
+	return out
 }
 
 func bucketBounds(candidates []CDRCandidate) (time.Time, time.Time) {
@@ -153,7 +202,6 @@ func bucketBounds(candidates []CDRCandidate) (time.Time, time.Time) {
 			to = t
 		}
 	}
-	// Inclusive upper bound for API: add 1s so last call is covered.
 	return from, to.Add(time.Second)
 }
 
@@ -164,18 +212,20 @@ type pendingMatch struct {
 	method   string
 	status   string
 	evidence map[string]any
-	legs     []VMCall // alternate Call-ID legs for unique reassignment
+	legs     []VMCall
 }
 
 func (m *Matcher) assignBucket(
+	ctx context.Context,
 	candidates []CDRCandidate, idx *callIndex, opts matchOpts, now time.Time,
+	queryAttempts []any,
 ) []MatchResult {
 	results := make([]MatchResult, len(candidates))
-	used := map[string]int{} // cdrId -> cand index
+	used := map[string]int{}
 
 	var exact []pendingMatch
 	for i, cdr := range candidates {
-		pm, ok := m.stageExact(cdr, idx, opts)
+		pm, ok := m.stageExact(cdr, idx, opts, queryAttempts)
 		if !ok {
 			continue
 		}
@@ -209,7 +259,7 @@ func (m *Matcher) assignBucket(
 			ev["selected"] = map[string]any{
 				"cdrId": leg.CDRID, "callId": leg.CallID, "score": pm.score,
 			}
-			results[pm.candIdx] = m.success(leg, pm.status, pm.method, pm.score, ev, now)
+			results[pm.candIdx] = m.success(ctx, leg, pm.status, pm.method, pm.score, ev, now)
 			assigned[pm.candIdx] = true
 			picked = true
 			break
@@ -225,7 +275,7 @@ func (m *Matcher) assignBucket(
 		if assigned[i] {
 			continue
 		}
-		pm, miss, ok := m.stageFallback(cdr, idx, opts, used)
+		pm, miss, ok := m.stageFallbackAPI(ctx, cdr, opts, used)
 		if !ok {
 			results[i] = miss
 			continue
@@ -253,14 +303,14 @@ func (m *Matcher) assignBucket(
 			}
 			used[pm.call.CDRID] = pm.candIdx
 		}
-		results[pm.candIdx] = m.success(pm.call, pm.status, pm.method, pm.score, pm.evidence, now)
+		results[pm.candIdx] = m.success(ctx, pm.call, pm.status, pm.method, pm.score, pm.evidence, now)
 		assigned[pm.candIdx] = true
 	}
 
 	for i := range results {
 		if results[i].Status == "" {
 			results[i] = missResult(MissNoCandidatesInWindow, map[string]any{
-				"stage": "unassigned",
+				"stage":                      "unassigned",
 				"source_call_ids_normalized": sourceCallIDNorms(candidates[i]),
 			})
 		}
@@ -268,22 +318,29 @@ func (m *Matcher) assignBucket(
 	return results
 }
 
-func (m *Matcher) stageExact(cdr CDRCandidate, idx *callIndex, opts matchOpts) (pendingMatch, bool) {
+func (m *Matcher) stageExact(
+	cdr CDRCandidate, idx *callIndex, opts matchOpts, queryAttempts []any,
+) (pendingMatch, bool) {
 	norms := sourceCallIDNorms(cdr)
 	evidence := map[string]any{
 		"stage":                      "exact_call_id",
 		"source_system":              cdr.SourceSystem,
 		"source_call_ids_normalized": norms,
 		"setup_time":                 cdr.SetupTime.UTC().Format(time.RFC3339Nano),
+		"api_call_id_attempts":       queryAttempts,
 	}
-	if len(norms) == 0 {
+	if len(norms) == 0 && len(cdr.SIPCallIDs) == 0 {
 		return pendingMatch{}, false
 	}
 	var hits []VMCall
 	seenCDR := map[string]struct{}{}
 	matchedNorm := ""
 	for i, raw := range cdr.SIPCallIDs {
-		for _, norm := range CallIDVariants(raw) {
+		keys := CallIDVariants(raw)
+		for _, q := range CallIDQueryVariants(raw) {
+			keys = append(keys, NormalizeCallID(q))
+		}
+		for _, norm := range uniqueNonEmpty(keys...) {
 			group := idx.byCallID[norm]
 			if len(group) == 0 {
 				continue
@@ -310,7 +367,7 @@ func (m *Matcher) stageExact(cdr CDRCandidate, idx *callIndex, opts matchOpts) (
 		return pendingMatch{}, false
 	}
 	evidence["vm_legs_with_same_call_id"] = len(hits)
-ordered, score := orderLegs(cdr, hits, opts.suffixLen)
+	ordered, score := orderLegs(cdr, hits, opts.suffixLen)
 	winner := ordered[0]
 	evidence["selected"] = map[string]any{
 		"cdrId": winner.CDRID, "callId": winner.CallID, "score": score,
@@ -334,8 +391,8 @@ ordered, score := orderLegs(cdr, hits, opts.suffixLen)
 	}, true
 }
 
-func (m *Matcher) stageFallback(
-	cdr CDRCandidate, idx *callIndex, opts matchOpts, used map[string]int,
+func (m *Matcher) stageFallbackAPI(
+	ctx context.Context, cdr CDRCandidate, opts matchOpts, used map[string]int,
 ) (pendingMatch, MatchResult, bool) {
 	norms := sourceCallIDNorms(cdr)
 	evidence := map[string]any{
@@ -351,14 +408,22 @@ func (m *Matcher) stageFallback(
 		evidence["miss_reason_seed"] = MissEmptyCallIDWeakSignal
 	}
 
-	scored := scoreFallbackCandidates(cdr, idx.all, used, opts.fallback, opts.suffixLen)
-	evidence["candidates_in_window"] = len(scored)
-	if len(scored) == 0 {
-		// Expand once when numbers look strong under wider skew.
-		scored = scoreFallbackCandidates(cdr, idx.all, used, opts.fallbackMax, opts.suffixLen)
-		evidence["expanded_window"] = true
-		evidence["candidates_in_window"] = len(scored)
+	hits, windowUsed, err := m.fetchFallbackHits(ctx, cdr, opts.fallback)
+	if err != nil {
+		evidence["error"] = err.Error()
+		return pendingMatch{}, missResult(MissAPIError, evidence), false
 	}
+	if len(hits) == 0 {
+		hits, windowUsed, err = m.fetchFallbackHits(ctx, cdr, opts.fallbackMax)
+		evidence["expanded_window"] = true
+		if err != nil {
+			evidence["error"] = err.Error()
+			return pendingMatch{}, missResult(MissAPIError, evidence), false
+		}
+	}
+	evidence["fallback_window"] = windowUsed.String()
+	scored := scoreFallbackCandidates(cdr, hits, used, windowUsed, opts.suffixLen)
+	evidence["candidates_in_window"] = len(scored)
 	if len(scored) == 0 {
 		reason := MissNoCandidatesInWindow
 		if seed, _ := evidence["miss_reason_seed"].(string); seed != "" {
@@ -389,11 +454,8 @@ func (m *Matcher) stageFallback(
 	if !best.NumberOK && !best.IPOK {
 		return pendingMatch{}, missResult(MissEmptyCallIDWeakSignal, evidence), false
 	}
-	if !best.NumberOK {
-		// One-side / IP-only is insufficient unless both number sides empty and IP matches.
-		if !best.AllowIPOnly {
-			return pendingMatch{}, missResult(MissFallbackBelowThreshold, evidence), false
-		}
+	if !best.NumberOK && !best.AllowIPOnly {
+		return pendingMatch{}, missResult(MissFallbackBelowThreshold, evidence), false
 	}
 	if int(best.Score) < opts.minScore {
 		return pendingMatch{}, missResult(MissFallbackBelowThreshold, evidence), false
@@ -405,10 +467,78 @@ func (m *Matcher) stageFallback(
 			MissReason: MissFallbackAmbiguous, EvidenceJSON: mustJSON(evidence),
 		}, false
 	}
+
+	// Verify: getVoipCalls(cdrId=…) must return the same record.
+	if best.Call.CDRID != "" {
+		center := best.Call.CallDate
+		if center.IsZero() {
+			center = cdr.SetupTime
+		}
+		verified, err := m.Client.GetVoipCalls(ctx, map[string]any{
+			"cdrId":       best.Call.CDRID,
+			"startTime":   center.UTC().Add(-time.Hour).Format("2006-01-02 15:04:05"),
+			"startTimeTo": center.UTC().Add(time.Hour).Format("2006-01-02 15:04:05"),
+		})
+		if err != nil {
+			evidence["verify_error"] = err.Error()
+			return pendingMatch{}, missResult(MissAPIError, evidence), false
+		}
+		ok := false
+		for _, v := range verified {
+			if v.CDRID == best.Call.CDRID {
+				ok = true
+				best.Call = v
+				break
+			}
+		}
+		if !ok {
+			evidence["verify_failed"] = true
+			return pendingMatch{}, missResult(MissFallbackBelowThreshold, evidence), false
+		}
+		evidence["verified_cdr_id"] = true
+	}
+
 	return pendingMatch{
 		call: best.Call, score: best.Score, method: "fallback_numbers_ip_time",
 		status: StatusMatchedFallback, evidence: evidence,
 	}, MatchResult{}, true
+}
+
+func (m *Matcher) fetchFallbackHits(
+	ctx context.Context, cdr CDRCandidate, window time.Duration,
+) ([]VMCall, time.Duration, error) {
+	setup := cdr.SetupTime.UTC()
+	params := map[string]any{
+		"startTime":   setup.Add(-window).Format("2006-01-02 15:04:05"),
+		"startTimeTo": setup.Add(window).Format("2006-01-02 15:04:05"),
+	}
+	caller := preferredNumber(cdrCallerNumbers(cdr), 10)
+	called := preferredNumber(cdrCalledNumbers(cdr), 10)
+	if caller != "" {
+		params["caller"] = caller
+	}
+	if called != "" {
+		params["called"] = called
+	}
+	if caller == "" && called == "" {
+		return nil, window, nil
+	}
+	hits, err := m.Client.GetVoipCalls(ctx, params)
+	return hits, window, err
+}
+
+func preferredNumber(values []string, suffixLen int) string {
+	for _, v := range values {
+		d := digits(v)
+		if d == "" {
+			continue
+		}
+		if len(d) > suffixLen {
+			return d[len(d)-suffixLen:]
+		}
+		return d
+	}
+	return ""
 }
 
 type scoredCall struct {
@@ -438,7 +568,6 @@ func scoreFallbackCandidates(
 		if scored.Score == 0 {
 			continue
 		}
-		// Forbidden: time-only or single-number-only without corroboration.
 		if !scored.NumberOK && !scored.IPOK {
 			continue
 		}
@@ -478,7 +607,6 @@ func orderLegs(cdr CDRCandidate, hits []VMCall, suffixLen int) ([]VMCall, uint8)
 	for i := range scored {
 		out[i] = scored[i].Call
 	}
-	// Call-ID identity is ground truth; always report full confidence.
 	return out, 100
 }
 
@@ -501,7 +629,7 @@ func cdrIDLess(a, b string) bool {
 	ai, ea := strconv.ParseInt(digits(a), 10, 64)
 	bi, eb := strconv.ParseInt(digits(b), 10, 64)
 	if ea == nil && eb == nil && ai != bi {
-		return ai > bi // prefer higher cdrId on ties
+		return ai > bi
 	}
 	return a > b
 }
@@ -522,13 +650,12 @@ func scoreOne(cdr CDRCandidate, hit VMCall, suffixLen int, requireStrong bool) s
 		numberOK = true
 		score += 40
 		if callerSide == "swap" || calledSide == "swap" {
-			score += 5 // transit / direction swap with both sides
+			score += 5
 		}
 	case callerMatch || calledMatch:
-		// Single-side number match needs IP corroboration for fallback.
 		score += 18
 		if requireStrong {
-			numberOK = false // provisional; IP may elevate
+			numberOK = false
 		} else {
 			numberOK = true
 		}
@@ -542,7 +669,7 @@ func scoreOne(cdr CDRCandidate, hit VMCall, suffixLen int, requireStrong bool) s
 		score += 20
 	}
 	if requireStrong && (callerMatch || calledMatch) && ipOK {
-		numberOK = true // one side + IP is acceptable
+		numberOK = true
 		score += 10
 	}
 	if requireStrong && !callerMatch && !calledMatch && ipOK &&
@@ -609,10 +736,22 @@ func bestNumberMatch(sources []string, primary, alternate []string, suffixLen in
 }
 
 func (m *Matcher) success(
+	ctx context.Context,
 	call VMCall, status, method string, score uint8, evidence map[string]any, now time.Time,
 ) MatchResult {
 	matchedAt := now
-	url := BuildCardURL(m.CardTpl, m.GUIBase, CardURLParts{CDRID: call.CDRID, CallID: call.CallID})
+	url := BuildCardURL(m.CardTpl, m.GUIBase, CardURLParts{
+		CDRID: call.CDRID, CallID: call.CallID, CallDate: call.CallDate,
+	})
+	if m.UseShareURL && m.Client != nil {
+		if share, err := m.Client.GetShareURL(ctx, call.CDRID, call.CallID); err == nil && share != "" {
+			url = share
+			if evidence == nil {
+				evidence = map[string]any{}
+			}
+			evidence["share_url"] = true
+		}
+	}
 	if evidence == nil {
 		evidence = map[string]any{}
 	}
@@ -657,8 +796,10 @@ func methodForCallIDAttempt(source string, index int) string {
 	case 2:
 		return "rtu_call_id_in"
 	case 3:
-		return "rtu_src_in_leg_conf_id"
+		return "rtu_src_in_leg_call_id"
 	case 4:
+		return "rtu_src_in_leg_conf_id"
+	case 5:
 		return "rtu_conf_id"
 	default:
 		return fmt.Sprintf("rtu_call_id_%d", index)
@@ -674,7 +815,7 @@ func mustJSON(value any) string {
 }
 
 // AuditExactCallIDInvariant returns false when a matched_exact result does not
-// share a normalized Call-ID with the source candidate.
+// share a Call-ID with the source candidate (raw or normalized).
 func AuditExactCallIDInvariant(cdr CDRCandidate, result MatchResult) bool {
 	if result.Status != StatusMatchedExact {
 		return true
@@ -682,12 +823,8 @@ func AuditExactCallIDInvariant(cdr CDRCandidate, result MatchResult) bool {
 	if result.VM == nil {
 		return false
 	}
-	vmNorm := NormalizeCallID(result.VM.CallID)
-	if vmNorm == "" {
-		return false
-	}
-	for _, norm := range sourceCallIDNorms(cdr) {
-		if norm == vmNorm {
+	for _, raw := range cdr.SIPCallIDs {
+		if callIDsEqual(raw, result.VM.CallID) {
 			return true
 		}
 	}
@@ -705,6 +842,12 @@ func AuditLinkInvariants(candidates []CDRCandidate, results []MatchResult) []str
 		if result.CardURL != "" &&
 			result.Status != StatusMatchedExact && result.Status != StatusMatchedFallback {
 			issues = append(issues, fmt.Sprintf("url_without_match_status[%d]=%s", i, result.Status))
+		}
+		if result.CardURL != "" &&
+			(strings.Contains(result.CardURL, "fId:") ||
+				strings.Contains(result.CardURL, "fId%3A") ||
+				strings.Contains(result.CardURL, "fId%3a")) {
+			issues = append(issues, fmt.Sprintf("legacy_fid_url[%d]", i))
 		}
 		if (result.Status == StatusUnmatched || result.Status == StatusAmbiguous) &&
 			result.MissReason == "" {

@@ -89,6 +89,33 @@ func (c *Client) ListVoipCallsRange(ctx context.Context, from, to time.Time) ([]
 }
 
 func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMCall, error) {
+	payload, err := c.postTask(ctx, "getVoipCalls", params, 32<<20)
+	if err != nil {
+		return nil, err
+	}
+	return parseVoipCallsResponse(payload)
+}
+
+// GetShareURL asks VoIPmonitor for a shareable CDR link (getShareURL).
+// Returns empty string without error when the feature is disabled / unavailable.
+func (c *Client) GetShareURL(ctx context.Context, cdrID, callID string) (string, error) {
+	params := map[string]any{"validDays": 30, "sip_history": true}
+	switch {
+	case strings.TrimSpace(cdrID) != "":
+		params["cdrId"] = strings.TrimSpace(cdrID)
+	case strings.TrimSpace(callID) != "":
+		params["callId"] = strings.TrimSpace(callID)
+	default:
+		return "", fmt.Errorf("cdrId or callId required for getShareURL")
+	}
+	payload, err := c.postTask(ctx, "getShareURL", params, 1<<20)
+	if err != nil {
+		return "", err
+	}
+	return parseShareURLResponse(payload)
+}
+
+func (c *Client) postTask(ctx context.Context, task string, params map[string]any, maxBody int64) ([]byte, error) {
 	if c == nil || strings.TrimSpace(c.BaseURL) == "" {
 		return nil, fmt.Errorf("voipmonitor API URL is not configured")
 	}
@@ -104,7 +131,7 @@ func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMC
 		return nil, err
 	}
 	form := url.Values{}
-	form.Set("task", "getVoipCalls")
+	form.Set("task", task)
 	form.Set("user", c.User)
 	form.Set("password", c.Password)
 	form.Set("params", string(paramsJSON))
@@ -125,14 +152,47 @@ func (c *Client) GetVoipCalls(ctx context.Context, params map[string]any) ([]VMC
 		return nil, err
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if maxBody <= 0 {
+		maxBody = 8 << 20
+	}
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("voipmonitor API HTTP %d: %s", resp.StatusCode, truncate(string(payload), 200))
 	}
-	return parseVoipCallsResponse(payload)
+	return payload, nil
+}
+
+func parseShareURLResponse(payload []byte) (string, error) {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+	var asString string
+	if err := json.Unmarshal(trimmed, &asString); err == nil {
+		return strings.TrimSpace(asString), nil
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		text := strings.TrimSpace(string(trimmed))
+		if strings.HasPrefix(text, "http://") || strings.HasPrefix(text, "https://") {
+			return text, nil
+		}
+		return "", fmt.Errorf("decode getShareURL response: %w", err)
+	}
+	if errMsg := apiErrorMessage(envelope); errMsg != "" {
+		return "", fmt.Errorf("voipmonitor API: %s", errMsg)
+	}
+	for _, key := range []string{"url", "shareurl", "shareUrl", "link", "data", "result"} {
+		if value := firstString(envelope, key); value != "" {
+			if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+				return value, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 func apiEndpoint(base string) (string, error) {
@@ -329,13 +389,7 @@ func BuildCardURL(template, guiBase string, parts CardURLParts) string {
 		}
 		return ""
 	}
-	// Prefer stable numeric CDR id when the template still points at Call-ID only.
-	if parts.CDRID != "" && strings.Contains(template, "{voipmonitor_call_id}") &&
-		!strings.Contains(template, "{voipmonitor_cdr_id}") {
-		if filter := cardFilter(CardURLParts{CDRID: parts.CDRID}); filter != "" {
-			return base + "/admin.php?cdr_filter=" + url.QueryEscape(filter)
-		}
-	}
+	// Official deep-link is fcallid. Do not rewrite Call-ID templates to undocumented fId.
 	replaced := strings.NewReplacer(
 		"{gui_base}", base,
 		"{voipmonitor_cdr_id}", digitsOnly(parts.CDRID),
@@ -344,10 +398,40 @@ func BuildCardURL(template, guiBase string, parts CardURLParts) string {
 	return encodeCDRFilterQuery(replaced)
 }
 
-func cardFilter(parts CardURLParts) string {
-	if id := digitsOnly(parts.CDRID); id != "" {
-		return "{fId:" + id + "}"
+// RewriteLegacyCardURL replaces undocumented {fId:…} URLs with official fcallid links
+// when a VoIPmonitor Call-ID is available. Used at attach-time for already-stored rows.
+func RewriteLegacyCardURL(cardURL, guiBase, vmCallID string, callDate time.Time) string {
+	if vmCallID == "" {
+		return cardURL
 	}
+	legacy := cardURL == "" ||
+		strings.Contains(cardURL, "fId:") ||
+		strings.Contains(cardURL, "fId%3A") ||
+		strings.Contains(cardURL, "fId%3a")
+	if !legacy {
+		return cardURL
+	}
+	if guiBase == "" {
+		guiBase = guiBaseFromCardURL(cardURL)
+	}
+	if guiBase == "" {
+		return cardURL
+	}
+	return BuildCardURL("", guiBase, CardURLParts{CallID: vmCallID, CallDate: callDate})
+}
+
+func guiBaseFromCardURL(cardURL string) string {
+	parsed, err := url.Parse(cardURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// cardFilter builds the official VoIPmonitor browser CDR filter.
+// Documented form: {fcallid:"…"}. Optional fdatefrom/fdateto narrow collisions.
+// Undocumented {fId:N} must NOT be used — GUI ignores it and shows an unrelated list.
+func cardFilter(parts CardURLParts) string {
 	if parts.CallID == "" {
 		return ""
 	}
@@ -355,7 +439,13 @@ func cardFilter(parts CardURLParts) string {
 	if err != nil {
 		return ""
 	}
-	return `{fcallid:` + string(quoted) + `}`
+	filter := `{fcallid:` + string(quoted)
+	if !parts.CallDate.IsZero() {
+		from := parts.CallDate.UTC().Add(-24 * time.Hour).Format("2006-01-02T15:04:05")
+		to := parts.CallDate.UTC().Add(24 * time.Hour).Format("2006-01-02T15:04:05")
+		filter += `,"fdatefrom":"` + from + `","fdateto":"` + to + `"`
+	}
+	return filter + `}`
 }
 
 func digitsOnly(value string) string {

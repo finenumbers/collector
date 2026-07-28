@@ -196,7 +196,8 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at),
 		c.duration_ms,c.connect_time,c.disconnect_time,
 		c.bill_ani,c.bill_dnis,c.in_ani,c.in_dnis,c.out_ani,c.out_dnis,
-		c.out_leg_call_id,c.src_out_leg_call_id,c.in_leg_call_id,c.src_in_leg_conf_id,c.conf_id,c.cdr_id,
+		c.out_leg_call_id,c.src_out_leg_call_id,c.in_leg_call_id,c.src_in_leg_call_id,
+		c.src_in_leg_conf_id,c.conf_id,c.cdr_id,
 		c.remote_src_sig_address,c.remote_dst_sig_address,c.local_src_sig_address,c.local_dst_sig_address
 		FROM collector.satel_rtu_cdr AS c FINAL
 		LEFT JOIN collector.satel_rtu_cdr_time_facts AS t FINAL
@@ -221,12 +222,12 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		var durationMS *uint64
 		var connectTime, disconnectTime *time.Time
 		var billA, billB, inA, inB, outA, outB string
-		var outLeg, srcOut, inLeg, srcConf, confID, cdrID string
+		var outLeg, srcOut, inLeg, srcIn, srcConf, confID, cdrID string
 		var remoteSrc, remoteDst, localSrc, localDst string
 		if err := rows.Scan(
 			&item.SourceRecordID, &item.SetupTime, &durationMS, &connectTime, &disconnectTime,
 			&billA, &billB, &inA, &inB, &outA, &outB,
-			&outLeg, &srcOut, &inLeg, &srcConf, &confID, &cdrID,
+			&outLeg, &srcOut, &inLeg, &srcIn, &srcConf, &confID, &cdrID,
 			&remoteSrc, &remoteDst, &localSrc, &localDst,
 		); err != nil {
 			return nil, err
@@ -249,10 +250,10 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 		}
 		item.SourceCallIDOutProto = firstNonEmpty(outLeg, srcOut)
 		item.SourceProtocolConfID = firstNonEmpty(srcConf, confID)
-		item.SourceCallID = firstNonEmpty(inLeg, confID)
+		item.SourceCallID = firstNonEmpty(inLeg, srcIn, confID)
 		item.SourceCDRID = cdrID
-		// Prefer dialog IDs that VoIPmonitor is most likely to index.
-		item.SIPCallIDs = nonEmptyStrings(outLeg, srcOut, inLeg, srcConf, confID)
+		// Prefer dialog IDs VoIPmonitor is most likely to index; conf last.
+		item.SIPCallIDs = nonEmptyStrings(outLeg, srcOut, inLeg, srcIn, srcConf, confID)
 		item.EventMonth = item.SetupTime
 		out = append(out, item)
 	}
@@ -364,7 +365,9 @@ func (c *Client) AttachVoipmonitorToCallRows(
 		if link, ok := links[items[index].RecordID]; ok {
 			items[index].VoipmonitorCDRID = link.VoipmonitorCDRID
 			items[index].VoipmonitorCallID = link.VoipmonitorCallID
-			items[index].VoipmonitorCardURL = link.VoipmonitorCardURL
+			items[index].VoipmonitorCardURL = voipmonitor.RewriteLegacyCardURL(
+				link.VoipmonitorCardURL, "", link.VoipmonitorCallID, time.Time{},
+			)
 			items[index].VoipmonitorMatchStatus = link.MatchStatus
 			items[index].VoipmonitorMatchMethod = link.MatchMethod
 			items[index].VoipmonitorMatchScore = link.MatchScore
@@ -388,7 +391,9 @@ func (c *Client) AttachVoipmonitorToSatelRows(
 		if link, ok := links[items[index].RecordID]; ok {
 			items[index].VoipmonitorCDRID = link.VoipmonitorCDRID
 			items[index].VoipmonitorCallID = link.VoipmonitorCallID
-			items[index].VoipmonitorCardURL = link.VoipmonitorCardURL
+			items[index].VoipmonitorCardURL = voipmonitor.RewriteLegacyCardURL(
+				link.VoipmonitorCardURL, "", link.VoipmonitorCallID, time.Time{},
+			)
 			items[index].VoipmonitorMatchStatus = link.MatchStatus
 			items[index].VoipmonitorMatchMethod = link.MatchMethod
 			items[index].VoipmonitorMatchScore = link.MatchScore

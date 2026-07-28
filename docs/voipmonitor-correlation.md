@@ -5,75 +5,105 @@ deep-links in ClickHouse (`collector.cdr_voipmonitor_links`). Matching is gated 
 global `VOIPMONITOR_ENABLED` and per-device `devices.voipmonitor_enabled`.
 
 **Axiom:** every SMG / softswitch CDR exists in VoIPmonitor. An empty VoIPmonitor
-cell is a matcher coverage defect (wrong window, weak Call-ID normalize, false
-`ambiguous`, thin number/IP coverage), not “call missing upstream”. Never invent a
-link; residual `unmatched`/`ambiguous` rows carry `miss_reason` for triage.
+cell is a matcher coverage defect after both legs’ Call-IDs were tried via API —
+not “call missing upstream”. Never invent a link.
+
+## Phase 0 evidence (calltrace / WEB API)
+
+From [VoIPmonitor WEB API](https://www.voipmonitor.org/doc/WEB_API):
+
+| Fact | Implication for Collector |
+|------|---------------------------|
+| Official browser deep-link is `admin.php?cdr_filter={fcallid:"…"}` | Default card URL **must** use `fcallid` with the exact VM `callId` |
+| Documented GUI filters include `fcallid`, `fdatefrom`, `fcaller`, … — **not** `fId` | `{fId:N}` is ignored → unrelated CDR list (production symptom) |
+| `getVoipCalls` supports `callId`, `cdrId`, `caller`/`called`, time range | Exact match = API query by Call-ID; not hour-dump alone |
+| `getShareURL` with `cdrId`/`callId` | Optional true card link when share is enabled on GUI |
+| `cdrId` is for API/PCAP/recording, not undocumented `cdr_filter` keys | Store `cdrId` for evidence; link via `fcallid` or share URL |
+
+Attach-time rewrite: stored legacy `{fId:…}` URLs are rewritten to `{fcallid:"…"}`
+when `voipmonitor_call_id` is present (fixes UI without rematch).
 
 ## Algorithm
 
-1. **Ingest dirty buckets** — after a successful CDR insert, hour buckets from
-   setup/connect/disconnect (fallback: ingested_at) are enqueued into Postgres
-   `voipmonitor_match_jobs` and ClickHouse `voipmonitor_dirty_buckets`.
-2. **Discover** — enabling a device (or toggling the flag) inserts a `discover` job
-   that fans out recent hour buckets (lookback = `CUSTOM_PROJECTION_LOOKBACK`, default 24h).
-3. **Bucket match** — the worker loads unmatched CDR candidates for the hour, then:
-   - fetches VoIPmonitor CDRs once for `[from - CALLID_WINDOW, to + CALLID_WINDOW]`
-     (15-minute slices) and builds in-memory indexes;
-   - **Stage 1 (exact):** normalized SIP Call-ID lookup. Multi-leg rows sharing the
-     same Call-ID are disambiguated deterministically → `matched_exact` (not
-     `ambiguous`);
-   - **Stage 2 (fallback):** only when Call-ID is absent from the index — gated
-     number suffix (10/11/12) + IP + time + duration scoring → `matched_fallback`;
-   - unique VM `cdrId` assignment per device-hour; write link rows with evidence /
-     `miss_reason`.
-4. **Policy revision** — toggling `voipmonitor_enabled` bumps
-   `voipmonitor_policy_revision`, cancels pending/running jobs, and on enable
-   schedules a fresh `discover`.
+1. **Ingest dirty buckets** — hour jobs in Postgres / ClickHouse dirty buckets.
+2. **Discover** — enabling a device fans out recent hours (`CUSTOM_PROJECTION_LOOKBACK`).
+3. **Bucket match (Call-ID-first):**
+   - Collect unique Call-ID **query variants** (raw, lower, strip `@host`) from all
+     unmatched SMG/RTU candidates in the hour.
+   - For each variant: `getVoipCalls(callId, startTime..startTimeTo)` with
+     `CALLID_WINDOW` pad around the hour.
+   - **Stage 1 exact:** map hits back to candidates; multi-leg same Call-ID →
+     `matched_exact` (deterministic leg pick), never `ambiguous`.
+   - **Stage 2 fallback (B2BUA):** only if all Call-ID probes returned 0 hits —
+     `getVoipCalls(caller, called, tight time)` with number/IP gates; **verify** with
+     `getVoipCalls(cdrId=…)`; status `matched_fallback` only.
+   - Unique VM `cdrId` per device-hour; write evidence / `miss_reason`.
+4. **Deep-link:** official `{fcallid:"<vm.callId>"}` (+ optional date bound);
+   optional `getShareURL` when `VOIPMONITOR_USE_SHARE_URL=true`.
+5. **Policy revision** — toggle `voipmonitor_enabled` bumps revision and rediscovers.
+
+### Identity fields
+
+| Source | Call-ID order for API | Numbers / IP |
+|--------|----------------------|--------------|
+| Eltex SMG | `incoming_sip_call_id`, `outgoing_sip_call_id` | in/out CgPN·CdPN; in/out IP |
+| Satel RTU | `out_leg_call_id`, `src_out_leg_call_id`, `in_leg_call_id`, `src_in_leg_call_id`, then conf IDs | bill/in/out ANI·DNIS; sig IPs |
 
 ## Statuses
 
 | Status | Meaning |
 |--------|---------|
-| `matched_exact` | Normalized source Call-ID equals VM `callId` (multi-leg OK) |
-| `matched_fallback` | Heuristic recovery when Call-ID was regenerated (B2BUA); never promoted to exact |
+| `matched_exact` | API Call-ID hit; VM `callId` equals a source Call-ID (raw or normalized) |
+| `matched_fallback` | Call-ID miss; verified number/IP heuristic |
 | `ambiguous` | Fallback candidates too close (margin); no URL |
 | `unmatched` | Gates failed; evidence has `miss_reason` |
-| `pending` | Reserved / not yet finalized |
+| `pending` | Reserved |
 
 ## Environment
 
 | Variable | Default | Role |
 |----------|---------|------|
-| `VOIPMONITOR_ENABLED` | `false` | Start match worker (app/maintenance) |
-| `VOIPMONITOR_API_URL` | | GUI origin (e.g. `https://vm.example.com`); `/php/api.php` is appended. Also accepts `…/php` or a full `…/php/api.php` |
-| `VOIPMONITOR_USER` / `VOIPMONITOR_PASSWORD` | | API credentials |
-| `VOIPMONITOR_GUI_URL` | | GUI base for card deep-links |
-| `VOIPMONITOR_CARD_URL_TEMPLATE` | empty → `{gui_base}/admin.php?cdr_filter={fId:…}` | Deep-link template; default prefers numeric CDR id and URL-encodes `cdr_filter` |
-| `VOIPMONITOR_CALLID_WINDOW` | `30m` | Pad for hour VM fetch / Call-ID presence |
-| `VOIPMONITOR_TIME_SKEW` | alias → `CALLID_WINDOW` | Deprecated compat alias |
+| `VOIPMONITOR_ENABLED` | `false` | Start match worker |
+| `VOIPMONITOR_API_URL` | | GUI origin; `/php/api.php` appended |
+| `VOIPMONITOR_USER` / `PASSWORD` | | API credentials |
+| `VOIPMONITOR_GUI_URL` | | Base for `fcallid` deep-links |
+| `VOIPMONITOR_CARD_URL_TEMPLATE` | empty → official `fcallid` | Opt-in custom template (do **not** use `{fId:…}`) |
+| `VOIPMONITOR_CALLID_WINDOW` | `30m` | Pad for Call-ID API search |
+| `VOIPMONITOR_TIME_SKEW` | alias → `CALLID_WINDOW` | Deprecated |
 | `VOIPMONITOR_FALLBACK_WINDOW` | `2m` | Heuristic time gate |
-| `VOIPMONITOR_FALLBACK_WINDOW_MAX` | `10m` | Expand when numbers agree but clock skew is large |
-| `VOIPMONITOR_WORKER_SLEEP` | `5s` | Idle poll interval |
-| `VOIPMONITOR_LEASE` | `2m` | Per-device job lease |
-| `VOIPMONITOR_MIN_SCORE` | `60` | Minimum fallback score |
+| `VOIPMONITOR_FALLBACK_WINDOW_MAX` | `10m` | Expand once on clock skew |
+| `VOIPMONITOR_MIN_SCORE` | `60` | Fallback floor |
 | `VOIPMONITOR_DISAMBIGUITY_MARGIN` | `8` | Fallback winner margin |
-| `VOIPMONITOR_NUMBER_SUFFIX_LEN` | `10` | Primary number suffix (also tries +1/+2) |
-| `VOIPMONITOR_RATE_LIMIT_PER_SEC` | `5` | Client-side API throttle |
+| `VOIPMONITOR_NUMBER_SUFFIX_LEN` | `10` | Primary suffix (+1/+2 tried) |
+| `VOIPMONITOR_RATE_LIMIT_PER_SEC` | `5` | API throttle |
+| `VOIPMONITOR_USE_SHARE_URL` | `false` | Prefer `getShareURL(cdrId)` when share enabled |
 
-Device flag: UI checkbox **Корреляция VoIPmonitor** (`voipmonitorEnabled`).
-UI columns expose `voipmonitorCardUrl` (label prefers `voipmonitorCdrId`).
+## Acceptance checks (post-deploy)
 
-## Evidence / miss reasons
+```sql
+-- New links must not use undocumented fId filters
+SELECT count() FROM collector.cdr_voipmonitor_links_current
+WHERE match_status IN ('matched_exact','matched_fallback')
+  AND (voipmonitor_card_url LIKE '%fId:%' OR voipmonitor_card_url LIKE '%fId%3A%');
 
-`match_evidence_json` includes `stage`, `source_call_ids_normalized`, `selected`,
-`runner_up`, `gates`, `vm_legs_with_same_call_id`, and when unlinked `miss_reason`:
+-- Exact rows must carry a VM Call-ID (for fcallid)
+SELECT count() FROM collector.cdr_voipmonitor_links_current
+WHERE match_status='matched_exact' AND voipmonitor_call_id='';
+```
+
+Manual: open 20 Fixer/MTS links — filtered list must show the **same** Call-ID /
+participants as the SMG/RTU row (not an unrelated feed). Toggle correlation
+off→on after upgrade to rematch; attach-time rewrite already repairs legacy `fId`
+URLs when `voipmonitor_call_id` is present.
+
+## Miss reasons
 
 | `miss_reason` | Meaning |
 |---------------|---------|
-| `call_id_not_in_index` | Source Call-IDs present but not in hour VM index |
-| `empty_callid_and_weak_signal` | No Call-ID and insufficient number/IP signal |
-| `fallback_below_threshold` | Best heuristic below `MIN_SCORE` / gates |
+| `call_id_not_in_index` | Source Call-IDs tried via API; 0 hits |
+| `empty_callid_and_weak_signal` | No Call-ID and weak number/IP |
+| `fallback_below_threshold` | Heuristic / verify failed |
 | `fallback_ambiguous` | Two heuristics within margin |
-| `assigned_elsewhere` | Unique `cdrId` already taken by a stronger match |
-| `no_candidates_in_window` | No VM rows in fallback time window |
-| `api_error` | VoIPmonitor fetch failed |
+| `assigned_elsewhere` | VM `cdrId` taken by stronger match |
+| `no_candidates_in_window` | No VM rows in fallback window |
+| `api_error` | VoIPmonitor API failure |

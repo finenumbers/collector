@@ -1354,9 +1354,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       {dataset === 'calls' ? (isSatel
         ? <SatelCallsTable rows={rows as SatelCdrRow[]}
           columns={resolvePresetColumns('satel', columnPresetId)}
+          fillWidth={columnPresetId === 'summary'}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedSatelCall} />
         : <CallsTable rows={rows as CallRow[]}
           columns={resolvePresetColumns('eltex', columnPresetId)}
+          fillWidth={columnPresetId === 'summary'}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedCall} />) :
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
@@ -1482,7 +1484,7 @@ function AntifraudTable({ rows, timezone, onSelect }: {
   timezone: string
   onSelect: (row: AntifraudRow) => void
 }) {
-  return <table><thead><tr>
+  return <table className="antifraud-table table-fill"><thead><tr>
     <th>Начало</th><th>Номер A</th><th>Номер B</th><th>Фазы</th><th>Цепочка</th><th>Статус</th>
     <th>Пакеты</th><th>Покрытие CDR</th><th>Acct-Session-Id</th><th>H323 Conf ID</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.callId}
@@ -1542,13 +1544,15 @@ function eltexCallCell(row: CallRow, column: CdrColumnDef, timezone: string): Re
   }
 }
 
-function CallsTable({ rows, columns, timezone, onSelect }: {
+function CallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
   rows: CallRow[]
   columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: CallRow) => void
+  fillWidth?: boolean
 }) {
-  return <table className="eltex-cdr-table"><thead><tr>
+  return <table className={['eltex-cdr-table', fillWidth ? 'table-fill' : ''].filter(Boolean).join(' ')}>
+    <thead><tr>
     {columns.map((column) => <th key={column.key}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId}
     className={`outcome-row outcome-${cdrOutcome(row.releaseCause)}`}
@@ -1613,13 +1617,15 @@ function satelCallCell(row: SatelCdrRow, column: CdrColumnDef, timezone: string)
   }
 }
 
-function SatelCallsTable({ rows, columns, timezone, onSelect }: {
+function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
   rows: SatelCdrRow[]
   columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: SatelCdrRow) => void
+  fillWidth?: boolean
 }) {
-  return <table className="satel-cdr-table"><thead><tr>
+  return <table className={['satel-cdr-table', fillWidth ? 'table-fill' : ''].filter(Boolean).join(' ')}>
+    <thead><tr>
     {columns.map((column) => <th key={column.key}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => {
     const outcome = satelCallOutcome(row)
@@ -1965,8 +1971,9 @@ function EventsTable({ rows, timezone, onSelect }: {
   timezone: string
   onSelect: (row: EventRow) => void
 }) {
-  return <table><thead><tr><th>Получено</th><th>Источник</th><th>Transport</th>
-      <th>Payload</th><th>SHA-256</th></tr></thead>
+  return <table className="syslog-table"><thead><tr>
+    <th>Получено</th><th>Источник</th><th>Transport</th>
+    <th className="col-payload">Payload</th><th>SHA-256</th></tr></thead>
     <tbody>{rows.map((row) => <EventTableRow key={row.eventId} row={row}
       timezone={timezone} onSelect={onSelect} />)}</tbody></table>
 }

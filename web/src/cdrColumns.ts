@@ -204,7 +204,7 @@ export const ELTEX_SUMMARY_KEYS = [
 ]
 
 export const SATEL_SUMMARY_KEYS = [
-  'connectTime',
+  'setupTime',
   'billAni',
   'billDnis',
   'outOrigDnis',

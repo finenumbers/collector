@@ -11,7 +11,8 @@ const aligned = {
 
 describe('dashboard and read-model timezone messaging', () => {
   it('renders raw receive freshness in the active timezone and labels both', () => {
-    expect(main).toContain('<th>Последний приём Syslog</th>')
+    expect(main).toContain('title="Последний приём Syslog"')
+    expect(main).toContain('Последний приём Syslog')
     expect(main).toContain(
       "formatTime(row.freshness.latestSyslogAt, row.activeTimezone || row.timezone || 'UTC')",
     )

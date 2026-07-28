@@ -138,7 +138,7 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .dashboard-kpi small, .dashboard-kpi strong, .dashboard-kpi span { display: block; }
 .dashboard-kpi small { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
 .dashboard-kpi strong { margin-top: 8px; font-size: 22px; }
-.dashboard-kpi span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.dashboard-kpi span { margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 .dashboard-kpi.good { border-left: 3px solid var(--good); }
 .dashboard-kpi.warn { border-left: 3px solid var(--warn); }
 .dashboard-kpi.bad { border-left: 3px solid var(--bad); }
@@ -150,8 +150,19 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .service-grid { display: flex; flex-wrap: wrap; gap: 8px 22px; padding: 12px; font-size: 11px; }
 .service-grid span { display: inline-flex; align-items: center; gap: 5px; }
 .fleet-panel { overflow-x: auto; }
-.fleet-panel table { width: max-content; min-width: 0; }
-.fleet-panel td small { display: block; margin-top: 2px; color: var(--muted); }
+.fleet-panel table.table-fill {
+  width: 100%;
+  min-width: 100%;
+  max-width: 100%;
+  table-layout: fixed;
+}
+.fleet-panel table.table-fill > thead > tr > th,
+.fleet-panel table.table-fill > tbody > tr > td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-panel td small { display: block; margin-top: 2px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .timezone-rebuild { margin: 0 0 8px; padding: 7px 10px; border: 1px solid #f3c969;
   border-radius: 6px; background: #fff8dc; color: #684c00; font-size: 12px; }
 .pipeline-notice { display: flex; align-items: baseline; gap: 9px; margin: 0 0 8px;
@@ -258,45 +269,46 @@ tbody tr { cursor: pointer; }
 .parse-status.incomplete, .parse-status.fragment { color: #975a00; background: #fff2d6; }
 .satel-cdr-table, .eltex-cdr-table { width: max-content; min-width: 0; }
 /*
- * Summary / AntiFraud: columns shrink-wrap to content (width:1% trick),
- * table spans at least the panel; if wider — horizontal scroll in .table-shell.
- * Do NOT force width:100% alone — browsers then compress columns and clip headers
- * (e.g. VoIPmonitor → "VOIPMO").
+ * Summary / AntiFraud / Dashboard fleet: exactly panel width.
+ * Columns share the viewport (table-layout: fixed); long cells ellipsis —
+ * table must NOT grow wider than the screen.
  */
 .table-fill,
 .satel-cdr-table.table-fill,
 .eltex-cdr-table.table-fill,
 .antifraud-table.table-fill {
-  width: max-content;
+  width: 100%;
   min-width: 100%;
-  max-width: none;
-  table-layout: auto;
+  max-width: 100%;
+  table-layout: fixed;
 }
 .table-fill > thead > tr > th,
 .table-fill > tbody > tr > td {
-  width: 1%;
+  width: auto;
   max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  overflow: visible;
-  text-overflow: clip;
 }
-/* Syslog: content-sized meta columns; Payload absorbs leftover width. */
+/* Syslog: panel width; meta columns compact; Payload takes the rest. */
 .syslog-table {
-  width: max-content;
+  width: 100%;
   min-width: 100%;
-  max-width: none;
-  table-layout: auto;
+  max-width: 100%;
+  table-layout: fixed;
 }
 .syslog-table > thead > tr > th:not(.col-payload),
 .syslog-table > tbody > tr > td:not(.message-cell) {
   width: 1%;
   max-width: none;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .syslog-table > thead > tr > th.col-payload,
 .syslog-table > tbody > tr > td.message-cell {
   width: auto;
-  min-width: 12rem;
+  min-width: 0;
   max-width: none;
   white-space: nowrap;
   overflow: hidden;

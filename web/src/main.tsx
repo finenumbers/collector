@@ -61,6 +61,10 @@ type DashboardDevice = {
     averageTalkMs: number
     antifraud: number
     antifraudRejected: number
+    voipmonitorMatchedExact?: number
+    voipmonitorMatchedFallback?: number
+    voipmonitorAmbiguous?: number
+    voipmonitorUnmatched?: number
   }
   freshness: { latestSyslogAt?: string; latestCdrAt?: string }
   revision: {
@@ -110,6 +114,10 @@ type DashboardCategoryTotals = {
   rejects?: number
   files?: number
   bytes?: number
+  voipmonitorMatchedExact?: number
+  voipmonitorMatchedFallback?: number
+  voipmonitorAmbiguous?: number
+  voipmonitorUnmatched?: number
 }
 type ReplayProgress = {
   pending: number
@@ -874,12 +882,13 @@ function DashboardPage({ devices, onSelectDevice }: {
     </section>
     <div className="dashboard-category-heading"><h4>Софтсвитчи</h4><span>Типизированные и исходные CDR</span></div>
     <div className="dashboard-kpis">
-      <DashboardKPI label="Софтсвитчи"
-        value={`${softswitchTotals.activeSources} / ${softswitchTotals.totalSources}`}
-        detail="активно / всего" />
       <DashboardKPI label="Вызовы" value={formatCount(softswitchTotals.calls)}
         detail={`неуспешных ${formatCount(softswitchTotals.failed)}`}
         tone={softswitchTotals.failed ? 'bad' : 'good'} />
+      <DashboardKPI label="VoIPmonitor"
+        value={formatCount(voipmonitorMatched(softswitchTotals))}
+        detail={formatVoipmonitorDetail(softswitchTotals)}
+        tone={voipmonitorTone(softswitchTotals)} />
       <DashboardKPI label="ASR" value={formatPercent(softswitchTotals.calls, softswitchTotals.failed)}
         detail="для типизированных CDR" />
       <DashboardKPI label="Средний разговор"
@@ -889,10 +898,14 @@ function DashboardPage({ devices, onSelectDevice }: {
     </div>
     <section className="dashboard-panel fleet-panel">
       <div className="panel-heading"><div><h4>Софтсвитчи</h4></div></div>
-      <table><thead><tr><th>Софтсвитч</th><th>Шаблон / timezone</th><th>Статус</th>
-        <th>Вызовы</th><th>Успешные</th><th>Неуспешные</th><th>ASR</th>
-        <th>Средний разговор</th><th>CDR-файлы</th><th>Объём файлов</th>
-        <th>Последний CDR</th></tr></thead>
+      <table className="table-fill"><thead><tr>
+        <th title="Софтсвитч">Софтсвитч</th><th title="Шаблон / timezone">Шаблон / timezone</th>
+        <th title="Статус">Статус</th>
+        <th title="Вызовы">Вызовы</th><th title="Успешные">Успешные</th>
+        <th title="Неуспешные">Неуспешные</th><th title="ASR">ASR</th>
+        <th title="Средний разговор">Средний разговор</th><th title="CDR-файлы">CDR-файлы</th>
+        <th title="Объём файлов">Объём файлов</th>
+        <th title="Последний CDR">Последний CDR</th></tr></thead>
         <tbody>{softswitchRows.map((row) => {
           const typed = sourceCapabilities(row).typedCdr
           return <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
@@ -918,12 +931,13 @@ function DashboardPage({ devices, onSelectDevice }: {
     </section>
     <div className="dashboard-category-heading"><h4>Оборудование</h4><span>Eltex · Syslog, CDR и AntiFraud</span></div>
     <div className="dashboard-kpis">
-      <DashboardKPI label="Оборудование"
-        value={`${equipmentTotals.activeSources} / ${equipmentTotals.totalSources}`}
-        detail="активно / всего" />
       <DashboardKPI label="Вызовы" value={formatCount(equipmentTotals.calls)}
         detail={`неуспешных ${formatCount(equipmentTotals.failed)}`}
         tone={equipmentTotals.failed ? 'bad' : 'good'} />
+      <DashboardKPI label="VoIPmonitor"
+        value={formatCount(voipmonitorMatched(equipmentTotals))}
+        detail={formatVoipmonitorDetail(equipmentTotals)}
+        tone={voipmonitorTone(equipmentTotals)} />
       <DashboardKPI label="ASR" value={formatPercent(equipmentTotals.calls, equipmentTotals.failed)}
         detail="доля успешных вызовов" />
       <DashboardKPI label="Средний разговор"
@@ -933,9 +947,13 @@ function DashboardPage({ devices, onSelectDevice }: {
     </div>
     <section className="dashboard-panel fleet-panel">
       <div className="panel-heading"><div><h4>Оборудование</h4></div></div>
-      <table><thead><tr><th>Оборудование</th><th>Шаблон / timezone</th><th>Статус</th>
-        <th>Вызовы</th><th>Неуспешные</th><th>AntiFraud / reject</th>
-        <th>Последний приём Syslog</th><th>Revision</th></tr></thead>
+      <table className="table-fill"><thead><tr>
+        <th title="Оборудование">Оборудование</th>
+        <th title="Шаблон / timezone">Шаблон / timezone</th><th title="Статус">Статус</th>
+        <th title="Вызовы">Вызовы</th><th title="Неуспешные">Неуспешные</th>
+        <th title="AntiFraud / reject">AntiFraud / reject</th>
+        <th title="Последний приём Syslog">Последний приём Syslog</th>
+        <th title="Revision">Revision</th></tr></thead>
         <tbody>{equipmentRows.map((row) => <tr key={row.id} onClick={() => onSelectDevice(row.id)}>
           <td><strong>{row.name}</strong><small>{row.model}</small></td>
           <td>{row.templateKey || row.firmware || '—'} / {row.timezone || 'UTC'}
@@ -1008,7 +1026,15 @@ function dashboardCategoryTotals(
     rejects: totals.rejects + (row.antifraudEnabled ? row.metrics.antifraudRejected || 0 : 0),
     files: totals.files + (row.fileMetrics?.files || 0),
     bytes: totals.bytes + (row.fileMetrics?.bytes || 0),
-  }), { calls: 0, failed: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0 })
+    voipmonitorMatchedExact: totals.voipmonitorMatchedExact + (row.metrics.voipmonitorMatchedExact || 0),
+    voipmonitorMatchedFallback: totals.voipmonitorMatchedFallback + (row.metrics.voipmonitorMatchedFallback || 0),
+    voipmonitorAmbiguous: totals.voipmonitorAmbiguous + (row.metrics.voipmonitorAmbiguous || 0),
+    voipmonitorUnmatched: totals.voipmonitorUnmatched + (row.metrics.voipmonitorUnmatched || 0),
+  }), {
+    calls: 0, failed: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0,
+    voipmonitorMatchedExact: 0, voipmonitorMatchedFallback: 0,
+    voipmonitorAmbiguous: 0, voipmonitorUnmatched: 0,
+  })
   return {
     activeSources: apiTotals.activeSources ?? sources.filter((source) => source.enabled).length,
     totalSources: apiTotals.totalSources ?? sources.length,
@@ -1019,7 +1045,46 @@ function dashboardCategoryTotals(
     rejects: apiTotals.rejects ?? fallback.rejects,
     files: apiTotals.files ?? fallback.files,
     bytes: apiTotals.bytes ?? fallback.bytes,
+    voipmonitorMatchedExact: apiTotals.voipmonitorMatchedExact ?? fallback.voipmonitorMatchedExact,
+    voipmonitorMatchedFallback: apiTotals.voipmonitorMatchedFallback ?? fallback.voipmonitorMatchedFallback,
+    voipmonitorAmbiguous: apiTotals.voipmonitorAmbiguous ?? fallback.voipmonitorAmbiguous,
+    voipmonitorUnmatched: apiTotals.voipmonitorUnmatched ?? fallback.voipmonitorUnmatched,
   }
+}
+
+function voipmonitorMatched(totals: {
+  voipmonitorMatchedExact?: number
+  voipmonitorMatchedFallback?: number
+}) {
+  return (totals.voipmonitorMatchedExact || 0) + (totals.voipmonitorMatchedFallback || 0)
+}
+
+function formatVoipmonitorDetail(totals: {
+  voipmonitorMatchedExact?: number
+  voipmonitorMatchedFallback?: number
+  voipmonitorAmbiguous?: number
+  voipmonitorUnmatched?: number
+}) {
+  const exact = totals.voipmonitorMatchedExact || 0
+  const fallback = totals.voipmonitorMatchedFallback || 0
+  const ambiguous = totals.voipmonitorAmbiguous || 0
+  const unmatched = totals.voipmonitorUnmatched || 0
+  if (exact + fallback + ambiguous + unmatched === 0) return 'нет сопоставлений'
+  return `exact ${formatCount(exact)} · fb ${formatCount(fallback)} · amb ${formatCount(ambiguous)} · miss ${formatCount(unmatched)}`
+}
+
+function voipmonitorTone(totals: {
+  voipmonitorMatchedExact?: number
+  voipmonitorMatchedFallback?: number
+  voipmonitorAmbiguous?: number
+  voipmonitorUnmatched?: number
+}): 'good' | 'warn' | 'bad' | undefined {
+  const matched = voipmonitorMatched(totals)
+  const open = (totals.voipmonitorAmbiguous || 0) + (totals.voipmonitorUnmatched || 0)
+  if (matched + open === 0) return undefined
+  if (matched === 0) return 'bad'
+  if (open > matched) return 'warn'
+  return 'good'
 }
 
 function formatDurationAverage(value?: number) {
@@ -1553,7 +1618,7 @@ function CallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
 }) {
   return <table className={['eltex-cdr-table', fillWidth ? 'table-fill' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
-    {columns.map((column) => <th key={column.key}>{column.header}</th>)}
+    {columns.map((column) => <th key={column.key} title={column.header}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId}
     className={`outcome-row outcome-${cdrOutcome(row.releaseCause)}`}
     onClick={() => onSelect(row)}>
@@ -1626,7 +1691,7 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
 }) {
   return <table className={['satel-cdr-table', fillWidth ? 'table-fill' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
-    {columns.map((column) => <th key={column.key}>{column.header}</th>)}
+    {columns.map((column) => <th key={column.key} title={column.header}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => {
     const outcome = satelCallOutcome(row)
     return <tr key={row.recordId} className={`outcome-row outcome-${outcome}`}

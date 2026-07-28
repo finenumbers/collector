@@ -1,16 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
-  canManageUsers, canOpenSystemSettings, normalizeFirmwareScheme,
+  canManageUsers, normalizeFirmwareScheme,
   purgeConfirmationReady, purgeRetryLabel, retentionDescription, retentionLabel,
 } from './settings'
 
 describe('system settings RBAC', () => {
-  it('allows every authenticated role to open settings', () => {
-    expect(canOpenSystemSettings('viewer')).toBe(true)
-    expect(canOpenSystemSettings('analyst')).toBe(true)
-    expect(canOpenSystemSettings('admin')).toBe(true)
-  })
-
   it('restricts user management to administrators', () => {
     expect(canManageUsers('admin')).toBe(true)
     expect(canManageUsers('analyst')).toBe(false)

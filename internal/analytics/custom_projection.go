@@ -145,28 +145,116 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 		return nil, err
 	}
 	defer release()
-	// Resolve event IDs from the compact session index first, then fetch payloads by
-	// primary key. A hash JOIN with syslog_messages on the right side OOMs at the
-	// CustomReplay 512MiB cap on dense SMG devices (FillingRightJoinSide).
-	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT message.event_id,message.device_id,
-		message.received_at,toString(message.source_ip),message.source_port,
-		message.transport,message.payload
-		FROM collector.syslog_messages AS message
-		WHERE message.device_id=?
-		  AND message.received_at>=? AND message.received_at<?
-		  AND message.event_id IN (
-			SELECT DISTINCT session.event_id
-			FROM collector.custom_radius_session_events_current AS session
-			WHERE session.device_id=?
-			  AND session.identity_value IN ?
-			  AND session.received_at>=? AND session.received_at<?
-		  )
-		ORDER BY message.received_at,message.event_id LIMIT ?`,
-		deviceID, from, to, deviceID, identities, from, to, limit+1)
+	// Two-phase lookup: session index first (tiny), then syslog by event_id batches.
+	// A single IN-subquery against syslog_messages still spikes past the CustomReplay
+	// memory cap on dense SMG devices (~780MiB observed at 768MiB limit).
+	eventIDs, err := c.loadSessionEventIDs(ctx, deviceID, identities, from, to, limit+1)
 	if err != nil {
 		return nil, err
 	}
-	return scanCustomRadiusEvents(rows, limit)
+	if len(eventIDs) == 0 {
+		return nil, nil
+	}
+	if len(eventIDs) > limit {
+		return nil, fmt.Errorf("custom session scan exceeds %d events", limit)
+	}
+	events := make([]customradius.RawEvent, 0, len(eventIDs))
+	const batchSize = 256
+	for start := 0; start < len(eventIDs); start += batchSize {
+		end := start + batchSize
+		if end > len(eventIDs) {
+			end = len(eventIDs)
+		}
+		part, partErr := c.loadSyslogEventsByID(ctx, deviceID, eventIDs[start:end], from, to)
+		if partErr != nil {
+			return nil, partErr
+		}
+		events = append(events, part...)
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].ReceivedAt.Equal(events[j].ReceivedAt) {
+			return events[i].EventID.String() < events[j].EventID.String()
+		}
+		return events[i].ReceivedAt.Before(events[j].ReceivedAt)
+	})
+	return events, nil
+}
+
+func (c *Client) loadSessionEventIDs(
+	ctx context.Context, deviceID uuid.UUID, identities []string, from, to time.Time, limit int,
+) ([]uuid.UUID, error) {
+	unique := make(map[uuid.UUID]struct{}, limit)
+	ordered := make([]uuid.UUID, 0, limit)
+	const identityBatch = 64
+	for start := 0; start < len(identities); start += identityBatch {
+		end := start + identityBatch
+		if end > len(identities) {
+			end = len(identities)
+		}
+		rows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id
+			FROM collector.custom_radius_session_events_current
+			WHERE device_id=? AND identity_value IN ?
+			  AND received_at>=? AND received_at<?
+			ORDER BY event_id LIMIT ?`,
+			deviceID, identities[start:end], from, to, limit)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var eventID uuid.UUID
+			if err := rows.Scan(&eventID); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if _, seen := unique[eventID]; seen {
+				continue
+			}
+			unique[eventID] = struct{}{}
+			ordered = append(ordered, eventID)
+			if len(ordered) >= limit {
+				_ = rows.Close()
+				return ordered, nil
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return ordered, nil
+}
+
+func (c *Client) loadSyslogEventsByID(
+	ctx context.Context, deviceID uuid.UUID, eventIDs []uuid.UUID, from, to time.Time,
+) ([]customradius.RawEvent, error) {
+	if len(eventIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := c.Conn.Query(ctx, `SELECT event_id,device_id,received_at,toString(source_ip),
+		source_port,transport,payload
+		FROM collector.syslog_messages
+		WHERE device_id=? AND event_id IN ?
+		  AND received_at>=? AND received_at<?`,
+		deviceID, eventIDs, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]customradius.RawEvent, 0, len(eventIDs))
+	for rows.Next() {
+		var event customradius.RawEvent
+		if err := rows.Scan(
+			&event.EventID, &event.DeviceID, &event.ReceivedAt, &event.SourceIP,
+			&event.SourcePort, &event.Transport, &event.Payload,
+		); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func scanCustomRadiusEvents(rows driver.Rows, limit int) ([]customradius.RawEvent, error) {

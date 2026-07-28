@@ -322,6 +322,7 @@ func (s *Store) CompleteCustomProjectionJob(
 			completed_at=CASE WHEN generation=claimed_generation THEN now() ELSE NULL END,
 			next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
 				ELSE LEAST(next_attempt_at,now()) END,
+			last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
 		WHERE id=$1`, job.ID); err != nil {
 		return err
@@ -433,6 +434,7 @@ func (s *Store) CutoverCustomProjection(
 			completed_at=CASE WHEN generation=claimed_generation THEN now() ELSE NULL END,
 			next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
 				ELSE LEAST(next_attempt_at,now()) END,
+			last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
 		WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
 		return err
@@ -541,7 +543,8 @@ func (s *Store) CustomProjectionDeviceStats(
 		GREATEST(0,COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at),0))::bigint,
 		COALESCE((
 			SELECT j.last_error FROM custom_projection_jobs j
-			WHERE j.device_id=device.id AND j.last_error IS NOT NULL AND j.last_error<>''
+			WHERE j.device_id=device.id AND j.status IN ('failed','pending','running')
+			  AND j.last_error IS NOT NULL AND j.last_error<>''
 			ORDER BY j.updated_at DESC LIMIT 1
 		),'')
 		FROM devices device

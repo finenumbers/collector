@@ -85,6 +85,9 @@ describe('equipment templates', () => {
     expect(main).not.toContain('label="Оборудование"')
     expect(main).toContain('fleet-panel')
     expect(main).toContain('className="table-fit"')
+    // v0.1.97 regression: table-layout:fixed on .table-fit crushed dashboard columns.
+    expect(styles).toMatch(/\.table-fit[\s\S]*?table-layout:\s*auto/)
+    expect(styles).not.toMatch(/\.table-fit[\s\S]*?table-layout:\s*fixed/)
     expect(main).toContain('title="Последний CDR"')
     expect(main.indexOf('title="Последний CDR"')).toBeLessThan(
       main.lastIndexOf('title="Последний приём Syslog"'),

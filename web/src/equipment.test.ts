@@ -85,9 +85,12 @@ describe('equipment templates', () => {
     expect(main).not.toContain('label="Оборудование"')
     expect(main).toContain('fleet-panel')
     expect(main).toContain('className="table-fit"')
-    // v0.1.97 regression: table-layout:fixed on .table-fit crushed dashboard columns.
+    // Compact cols shrink-wrap; flex/pair take remaining width without overflowing.
     expect(styles).toMatch(/\.table-fit[\s\S]*?table-layout:\s*auto/)
     expect(styles).not.toMatch(/\.table-fit[\s\S]*?table-layout:\s*fixed/)
+    expect(styles).toMatch(/\.col-flex-pair\s*\{[^}]*width:\s*50%/s)
+    expect(styles).toMatch(/\.col-flex-pair\s*\{[^}]*max-width:\s*0/s)
+    expect(styles).toMatch(/td\.col-flex\s*\{[^}]*max-width:\s*0/s)
     expect(main).toContain('title="Последний CDR"')
     expect(main.indexOf('title="Последний CDR"')).toBeLessThan(
       main.lastIndexOf('title="Последний приём Syslog"'),

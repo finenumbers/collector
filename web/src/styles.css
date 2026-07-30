@@ -241,8 +241,11 @@ tbody tr { cursor: pointer; }
 .parse-status.complete { color: #146c43; background: #e3f5eb; }
 .satel-cdr-table, .eltex-cdr-table { width: max-content; min-width: 0; }
 /*
- * Full-viewport tables: compact columns size to the longest cell/header;
- * .col-flex absorbs remaining width (ellipsis). Two .col-flex-pair share equally.
+ * Full-viewport tables (table-layout:auto + width:100%):
+ * - compact cols: width:1% + nowrap → shrink-wrap to longest cell/header;
+ * - .col-flex / .col-flex-pair: take remaining width with ellipsis.
+ * max-width:0 on flex cols is required so long text cannot inflate the table
+ * past the container (Регион A/B, ASN, disconnect text).
  */
 .table-fit,
 .satel-cdr-table.table-fit,
@@ -252,7 +255,6 @@ tbody tr { cursor: pointer; }
   width: 100%;
   min-width: 100%;
   max-width: 100%;
-  /* auto: compact cols size to content; fixed+width:1% crushes headers (v0.1.97). */
   table-layout: auto;
 }
 .table-fit > thead > tr > th:not(.col-flex):not(.col-flex-pair),
@@ -271,7 +273,7 @@ tbody tr { cursor: pointer; }
 .syslog-table > tbody > tr > td.col-flex {
   width: 100%;
   min-width: 8rem;
-  max-width: none;
+  max-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -281,7 +283,7 @@ tbody tr { cursor: pointer; }
 .table-fit > tbody > tr > td.col-flex-pair {
   width: 50%;
   min-width: 6rem;
-  max-width: none;
+  max-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

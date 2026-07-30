@@ -66,10 +66,14 @@ describe('equipment templates', () => {
     expect(main).toContain('softswitchRows.map')
     expect(main).not.toContain('Метрики Eltex за выбранный интервал')
     expect(main).not.toContain('(snapshot?.devices || []).map((row) => <tr')
-    // KPI strip: VoIPmonitor between Вызовы and ASR; no source-count tiles.
+    // Softswitch KPI strip: enrichment counts instead of ASR / average talk.
     expect(main).toContain('label="VoIPmonitor"')
     expect(main).toContain('label="Неразобранное"')
     expect(main).toContain('softswitchUnresolved')
+    expect(main).toContain('label="Операторы"')
+    expect(main).toContain('label="GeoIP"')
+    expect(main).toContain('softswitchTotals.pstnEnrichedCalls')
+    expect(main).toContain('softswitchTotals.geoipEnrichedCalls')
     expect(main).toContain('label="Объем данных"')
     expect(main).toContain('formatStorageMB')
     expect(styles).toContain('flex-wrap: nowrap')

@@ -119,7 +119,7 @@ func TestClickHouseMigrationsSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	if applied != 30 {
-		t.Fatalf("got %d applied migrations, want 30", applied)
+		t.Fatalf("got %d applied migrations, want 31", applied)
 	}
 	rows, err := client.Conn.Query(ctx, `SELECT name FROM system.tables
 		WHERE database='collector' ORDER BY name`)

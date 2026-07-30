@@ -55,10 +55,10 @@ func TestEnrichSatelRecordsAppliesLookup(t *testing.T) {
 	geoip.HTTPClient = geoipServer.Client()
 	records := []SatelRTURecord{
 		{
-			BillANI: "84996660000", BillDNIS: "4951234567",
+			BillANI: "84996660000", BillDNIS: "74951234567",
 			RemoteSrcSigAddress: "1.2.3.4:5060", RemoteDstSigAddress: "5.6.7.8",
 		},
-		{BillANI: "4996660000", BillDNIS: ""},
+		{BillANI: "74996660000", BillDNIS: ""},
 	}
 	start := time.Now()
 	EnrichSatelRecords(context.Background(), pstn, geoip, records, 8)
@@ -97,7 +97,8 @@ func TestEnrichSatelRecordsSkipsNonEligiblePhones(t *testing.T) {
 	pstn := pstnlookup.New(pstnServer.URL, "token", true)
 	pstn.HTTPClient = pstnServer.Client()
 	records := []SatelRTURecord{
-		{BillANI: "71234567890", BillDNIS: "15551234567"},
+		{BillANI: "71234567890", BillDNIS: "8800205055"},
+		{BillANI: "4712780077", BillDNIS: "4996660000"},
 	}
 	EnrichSatelRecords(context.Background(), pstn, nil, records, 4)
 	if pstnHits.Load() != 0 {
@@ -121,7 +122,7 @@ func TestEnrichSatelRecordsLeavesEmptyOnIncompleteLookup(t *testing.T) {
 	defer pstnServer.Close()
 	pstn := pstnlookup.New(pstnServer.URL, "token", true)
 	pstn.HTTPClient = pstnServer.Client()
-	records := []SatelRTURecord{{BillANI: "9031234567"}}
+	records := []SatelRTURecord{{BillANI: "79031234567"}}
 	EnrichSatelRecords(context.Background(), pstn, nil, records, 2)
 	if records[0].BillANIOperator != "" || records[0].BillANIRegion != "" {
 		t.Fatalf("incomplete lookup must leave fields empty, got %#v", records[0])
@@ -176,7 +177,7 @@ func TestEnrichSatelRecordsFillsHistoricalGapsWithoutWiping(t *testing.T) {
 		// Historical ANI gap (operator present, garTerritory missing).
 		BillANI: "84996660000", BillANIOperator: "OldOp", BillANIRegion: "",
 		// Eligible DNIS gap; API fails — must stay empty (no wipe of siblings).
-		BillDNIS: "9031234567",
+		BillDNIS: "79031234567",
 	}}
 	EnrichSatelRecords(context.Background(), pstn, nil, records, 4)
 	if records[0].BillANIOperator != "Op-4996660000" || records[0].BillANIRegion != "Gar-4996660000" {
@@ -194,7 +195,7 @@ func TestEnrichSatelRecordsFillsHistoricalGapsWithoutWiping(t *testing.T) {
 }
 
 func TestEnrichSatelRecordsNoopWithoutClient(t *testing.T) {
-	records := []SatelRTURecord{{BillANI: "4996660000", RemoteSrcSigAddress: "1.2.3.4"}}
+	records := []SatelRTURecord{{BillANI: "74996660000", RemoteSrcSigAddress: "1.2.3.4"}}
 	EnrichSatelRecords(context.Background(), nil, nil, records, 8)
 	EnrichSatelRecords(
 		context.Background(),
@@ -209,8 +210,15 @@ func TestEnrichSatelRecordsNoopWithoutClient(t *testing.T) {
 }
 
 func TestSatelPSTNEligibilitySQLHelpers(t *testing.T) {
-	if got := satelPSTNEligibleSideExpr("bill_ani"); got == "" {
-		t.Fatal("empty eligible expr")
+	got := satelPSTNEligibleSideExpr("bill_ani")
+	if !strings.Contains(got, "73|74|78|79") || !strings.Contains(got, "length(") {
+		t.Fatalf("eligible expr must require 11-digit 73/74/78/79 prefixes, got %q", got)
+	}
+	if strings.Contains(got, "^[3489]") {
+		t.Fatal("eligible expr must not use bare national 3/4/8/9 prefix")
+	}
+	if !strings.Contains(got, "880") && !strings.Contains(got, "!='0'") {
+		t.Fatalf("eligible expr must exclude 880 toll-free, got %q", got)
 	}
 	if got := satelPSTNCallEnrichedExpr(); got == "" {
 		t.Fatal("empty enriched expr")

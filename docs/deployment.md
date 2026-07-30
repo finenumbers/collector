@@ -87,14 +87,17 @@ Collector подключён к external network `${PROXY_NETWORK:-proxy}` по�
 AntiFraud для этого источника не настраиваются. MinIO/ledger failure оставляет
 локальный файл для автоматического retry.
 
-Bill ANI/DNIS обогащаются на ingest через FineNumbers PSTN lookup (`PSTN_LOOKUP_URL`,
-`PSTN_LOOKUP_TOKEN` в `.env` / compose; пустой token выключает enrichment). Колонки
-«Оператор A/B» и «Регион A/B» заполняются только для новых файлов. Историю после
-выкладки миграции 031 дозаполните явно:
+Satel CDR обогащается на ingest через FineNumbers PSTN и GeoIP. URL/токены
+настраиваются в **Настройки → Параметры** (группа «Обогащение CDR»). Переменные
+`PSTN_LOOKUP_*` / `GEOIP_LOOKUP_*` в `.env` — только seed при пустой БД.
+Колонки «Оператор/Регион A/B» и «GeoIP ISO/City/ASN Org A/B» заполняются для
+новых файлов. Историю после миграций 031–032 дозаполните явно:
 
 ```bash
-docker compose -f deploy/compose.yml run --rm collector pstn-enrich-satel
+docker compose -f deploy/compose.yml run --rm collector satel-enrich
 ```
+
+(`pstn-enrich-satel` остаётся alias на тот же handler.)
 
 ## Backup and restore
 

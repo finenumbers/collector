@@ -47,10 +47,36 @@ func FromEnv(cfg config.Config) Document {
 	doc.Voipmonitor.RateLimitPerSec = cfg.VoipmonitorRateLimitPerSec
 	doc.Voipmonitor.UseShareURL = cfg.VoipmonitorUseShareURL
 
+	if cfg.PstnLookupURL != "" {
+		doc.Enrichment.PSTN.APIURL = cfg.PstnLookupURL
+	}
+	doc.Enrichment.PSTN.Token = cfg.PstnLookupToken
+	if cfg.GeoipLookupURL != "" {
+		doc.Enrichment.GeoIP.APIURL = cfg.GeoipLookupURL
+	}
+	doc.Enrichment.GeoIP.Token = cfg.GeoipLookupToken
+
 	doc.Platform.ClickHouseAdmissionCapacity = cfg.ClickHouseAdmissionCapacity
 	doc.Platform.ExportPageSize = cfg.ExportPageSize
 	doc.Containers = containersFromEnv()
 	return doc
+}
+
+// NormalizeEnrichment fills missing enrichment defaults for documents seeded
+// before the enrichment group existed.
+func NormalizeEnrichment(doc *Document) {
+	if doc == nil {
+		return
+	}
+	defaults := Defaults().Enrichment
+	if doc.Enrichment.PSTN.APIURL == "" {
+		doc.Enrichment.PSTN.APIURL = defaults.PSTN.APIURL
+		doc.Enrichment.PSTN.Enabled = defaults.PSTN.Enabled
+	}
+	if doc.Enrichment.GeoIP.APIURL == "" {
+		doc.Enrichment.GeoIP.APIURL = defaults.GeoIP.APIURL
+		doc.Enrichment.GeoIP.Enabled = defaults.GeoIP.Enabled
+	}
 }
 
 func durationString(value time.Duration, fallback string) string {

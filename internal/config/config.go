@@ -73,6 +73,8 @@ type Config struct {
 	ExportPageSize                 int
 	PstnLookupURL                  string
 	PstnLookupToken                string
+	GeoipLookupURL                 string
+	GeoipLookupToken               string
 }
 
 func Load() (Config, error) {
@@ -141,6 +143,8 @@ func Load() (Config, error) {
 		ExportPageSize:                 envInt("EXPORT_PAGE_SIZE", 1000),
 		PstnLookupURL:                  env("PSTN_LOOKUP_URL", "https://pstn.finenumbers.com/api/v1/lookup"),
 		PstnLookupToken:                env("PSTN_LOOKUP_TOKEN", ""),
+		GeoipLookupURL:                 env("GEOIP_LOOKUP_URL", "https://geoip.finenumbers.com/api/v1/lookup"),
+		GeoipLookupToken:               env("GEOIP_LOOKUP_TOKEN", ""),
 	}
 	switch cfg.Role {
 	case "app", "ingress", "api-ingest", "export", "maintenance":

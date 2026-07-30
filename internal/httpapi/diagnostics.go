@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"collector/internal/analytics"
+	"collector/internal/lookuptelemetry"
 	"collector/internal/store"
 
 	"github.com/google/uuid"
@@ -148,6 +149,7 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		"customProjectionEnabled": s.customProjectionEnabled(),
 		"workloads":               s.Analytics.WorkloadSnapshot(),
 		"rawIngest":               rawIngest,
+		"enrichmentApis":          lookuptelemetry.Default.Snapshot(),
 		"projectionQueue": map[string]any{
 			"depth": projection.Depth, "oldestAge": projection.OldestAge,
 			"failed": projection.Failed, "backfilling": projection.Backfilling,

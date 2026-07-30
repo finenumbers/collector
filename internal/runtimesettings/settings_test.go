@@ -35,6 +35,38 @@ func TestPublicViewRedactsPassword(t *testing.T) {
 	}
 }
 
+func TestMergePatchKeepsEnrichmentTokens(t *testing.T) {
+	base := Defaults()
+	base.Enrichment.PSTN.Token = "pstn-secret"
+	base.Enrichment.GeoIP.Token = "geoip-secret"
+	merged, err := MergePatch(base, json.RawMessage(`{
+		"enrichment":{"pstn":{"enabled":true,"apiUrl":"https://pstn.example/lookup"},
+			"geoip":{"enabled":false,"apiUrl":"https://geoip.example/lookup"}}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Enrichment.PSTN.Token != "pstn-secret" || merged.Enrichment.GeoIP.Token != "geoip-secret" {
+		t.Fatalf("tokens lost: %+v", merged.Enrichment)
+	}
+	if merged.Enrichment.GeoIP.Enabled {
+		t.Fatal("expected geoip disabled")
+	}
+}
+
+func TestPublicViewRedactsEnrichmentTokens(t *testing.T) {
+	doc := Defaults()
+	doc.Enrichment.PSTN.Token = "pstn-secret"
+	doc.Enrichment.GeoIP.Token = "geoip-secret"
+	view := doc.PublicView()
+	if view.Enrichment.PSTN.Token != "" || !view.Enrichment.PSTN.TokenSet {
+		t.Fatalf("pstn public=%+v", view.Enrichment.PSTN)
+	}
+	if view.Enrichment.GeoIP.Token != "" || !view.Enrichment.GeoIP.TokenSet {
+		t.Fatalf("geoip public=%+v", view.Enrichment.GeoIP)
+	}
+}
+
 func TestContainersComposeEnvFragment(t *testing.T) {
 	fragment := Defaults().Containers.ComposeEnvFragment()
 	for _, key := range []string{

@@ -10,6 +10,10 @@ func TestDefaultsValidate(t *testing.T) {
 	if err := Defaults().Validate(); err != nil {
 		t.Fatal(err)
 	}
+	doc := Defaults()
+	if doc.Enrichment.Workers != 24 || !doc.Enrichment.CatchUp.Enabled {
+		t.Fatalf("enrichment defaults: %+v", doc.Enrichment)
+	}
 }
 
 func TestMergePatchKeepsPassword(t *testing.T) {

@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"sync"
 
 	"collector/internal/geoiplookup"
 	"collector/internal/pstnlookup"
@@ -10,26 +11,39 @@ import (
 	"github.com/google/uuid"
 )
 
-// EnrichSatelRecords fills PSTN operator/region and GeoIP fields.
+// EnrichSatelRecords fills PSTN operator/region and GeoIP fields in parallel.
 // Missing clients/tokens or lookup failures leave fields empty; never fails ingest.
 func EnrichSatelRecords(
 	ctx context.Context, pstn *pstnlookup.Client, geoip *geoiplookup.Client, records []SatelRTURecord,
+	workers int,
 ) {
 	if len(records) == 0 {
 		return
 	}
+	if workers < 1 {
+		workers = 8
+	}
+	if workers > 64 {
+		workers = 64
+	}
+	var wg sync.WaitGroup
 	if pstn != nil && pstn.Enabled() {
-		phones := make([]string, 0, len(records)*2)
-		for _, record := range records {
-			if record.BillANI != "" {
-				phones = append(phones, record.BillANI)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			phones := make([]string, 0, len(records)*2)
+			for _, record := range records {
+				if record.BillANI != "" {
+					phones = append(phones, record.BillANI)
+				}
+				if record.BillDNIS != "" {
+					phones = append(phones, record.BillDNIS)
+				}
 			}
-			if record.BillDNIS != "" {
-				phones = append(phones, record.BillDNIS)
+			if len(phones) == 0 {
+				return
 			}
-		}
-		if len(phones) > 0 {
-			byPhone := pstn.LookupMany(ctx, phones, 8)
+			byPhone := pstn.LookupMany(ctx, phones, workers)
 			for index := range records {
 				aniOp, aniReg, dnisOp, dnisReg := pstnlookup.ApplyToPhones(
 					records[index].BillANI, records[index].BillDNIS, byPhone,
@@ -39,20 +53,25 @@ func EnrichSatelRecords(
 				records[index].BillDNISOperator = dnisOp
 				records[index].BillDNISRegion = dnisReg
 			}
-		}
+		}()
 	}
 	if geoip != nil && geoip.Enabled() {
-		addrs := make([]string, 0, len(records)*2)
-		for _, record := range records {
-			if record.RemoteSrcSigAddress != "" {
-				addrs = append(addrs, record.RemoteSrcSigAddress)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addrs := make([]string, 0, len(records)*2)
+			for _, record := range records {
+				if record.RemoteSrcSigAddress != "" {
+					addrs = append(addrs, record.RemoteSrcSigAddress)
+				}
+				if record.RemoteDstSigAddress != "" {
+					addrs = append(addrs, record.RemoteDstSigAddress)
+				}
 			}
-			if record.RemoteDstSigAddress != "" {
-				addrs = append(addrs, record.RemoteDstSigAddress)
+			if len(addrs) == 0 {
+				return
 			}
-		}
-		if len(addrs) > 0 {
-			byIP := geoip.LookupMany(ctx, addrs, 8)
+			byIP := geoip.LookupMany(ctx, addrs, workers)
 			for index := range records {
 				srcISO, srcCity, srcASN, dstISO, dstCity, dstASN := geoiplookup.ApplyToAddrs(
 					records[index].RemoteSrcSigAddress, records[index].RemoteDstSigAddress, byIP,
@@ -64,8 +83,9 @@ func EnrichSatelRecords(
 				records[index].RemoteDstGeoipCity = dstCity
 				records[index].RemoteDstASNOrg = dstASN
 			}
-		}
+		}()
 	}
+	wg.Wait()
 }
 
 func satelEnrichmentSelectColumns() string {
@@ -153,12 +173,21 @@ func scanSatelEnrichmentRecord(scanner interface {
 	return record, err
 }
 
+func satelNeedsEnrichmentPredicate() string {
+	return `((bill_ani!='' OR bill_dnis!='') AND bill_ani_operator='' AND bill_dnis_operator=''
+					AND bill_ani_region='' AND bill_dnis_region='')
+				OR ((remote_src_sig_address!='' OR remote_dst_sig_address!='')
+					AND remote_src_geoip_iso='' AND remote_dst_geoip_iso=''
+					AND remote_src_geoip_city='' AND remote_dst_geoip_city=''
+					AND remote_src_asn_org='' AND remote_dst_asn_org='')`
+}
+
 // ListSatelRTURecordsNeedingEnrichment pages FINAL rows missing PSTN and/or GeoIP
 // enrichment when source phone/IP is present.
 func (c *Client) ListSatelRTURecordsNeedingEnrichment(
 	ctx context.Context, limit uint64, afterRecordID uuid.UUID,
 ) ([]SatelRTURecord, error) {
-	if limit == 0 || limit > 1000 {
+	if limit == 0 || limit > 5000 {
 		limit = 500
 	}
 	ctx, release, err := c.queryContext(ctx, workload.CustomReplay)
@@ -169,14 +198,7 @@ func (c *Client) ListSatelRTURecordsNeedingEnrichment(
 	query := `SELECT ` + satelEnrichmentSelectColumns() + `
 		FROM collector.satel_rtu_cdr FINAL
 		WHERE record_id>?
-			AND (
-				((bill_ani!='' OR bill_dnis!='') AND bill_ani_operator='' AND bill_dnis_operator=''
-					AND bill_ani_region='' AND bill_dnis_region='')
-				OR ((remote_src_sig_address!='' OR remote_dst_sig_address!='')
-					AND remote_src_geoip_iso='' AND remote_dst_geoip_iso=''
-					AND remote_src_geoip_city='' AND remote_dst_geoip_city=''
-					AND remote_src_asn_org='' AND remote_dst_asn_org='')
-			)
+			AND (` + satelNeedsEnrichmentPredicate() + `)
 		ORDER BY record_id ASC
 		LIMIT ?`
 	rows, err := c.Conn.Query(ctx, query, afterRecordID, limit)
@@ -200,4 +222,60 @@ func (c *Client) ListSatelRTURecordsNeedingPSTNEnrichment(
 	ctx context.Context, limit uint64, afterRecordID uuid.UUID,
 ) ([]SatelRTURecord, error) {
 	return c.ListSatelRTURecordsNeedingEnrichment(ctx, limit, afterRecordID)
+}
+
+// EnrichmentCoverageSnapshot is Satel PSTN/GeoIP fill progress for diagnostics.
+type EnrichmentCoverageSnapshot struct {
+	WindowSeconds  uint64  `json:"windowSeconds"`
+	Calls          uint64  `json:"calls"`
+	PstnEligible   uint64  `json:"pstnEligible"`
+	PstnEnriched   uint64  `json:"pstnEnriched"`
+	PstnCoverage   float64 `json:"pstnCoverage"`
+	GeoipEligible  uint64  `json:"geoipEligible"`
+	GeoipEnriched  uint64  `json:"geoipEnriched"`
+	GeoipCoverage  float64 `json:"geoipCoverage"`
+	Backlog        uint64  `json:"backlog"`
+}
+
+func (c *Client) EnrichmentCoverage(ctx context.Context, windowSeconds uint64) (EnrichmentCoverageSnapshot, error) {
+	if windowSeconds == 0 {
+		windowSeconds = 24 * 3600
+	}
+	ctx, release, err := c.queryContext(ctx, workload.Diagnostics)
+	if err != nil {
+		return EnrichmentCoverageSnapshot{}, err
+	}
+	defer release()
+	out := EnrichmentCoverageSnapshot{WindowSeconds: windowSeconds}
+	err = c.Conn.QueryRow(ctx, `
+		SELECT
+			count(),
+			countIf(bill_ani!='' OR bill_dnis!=''),
+			countIf(bill_ani_operator!='' OR bill_dnis_operator!=''
+				OR bill_ani_region!='' OR bill_dnis_region!=''),
+			countIf(remote_src_sig_address!='' OR remote_dst_sig_address!=''),
+			countIf(remote_src_geoip_iso!='' OR remote_dst_geoip_iso!=''
+				OR remote_src_geoip_city!='' OR remote_dst_geoip_city!=''
+				OR remote_src_asn_org!='' OR remote_dst_asn_org!='')
+		FROM collector.satel_rtu_cdr FINAL
+		WHERE ingested_at>=now()-toIntervalSecond(?)`, windowSeconds).Scan(
+		&out.Calls, &out.PstnEligible, &out.PstnEnriched,
+		&out.GeoipEligible, &out.GeoipEnriched,
+	)
+	if err != nil {
+		return EnrichmentCoverageSnapshot{}, err
+	}
+	if out.PstnEligible > 0 {
+		out.PstnCoverage = float64(out.PstnEnriched) / float64(out.PstnEligible)
+	}
+	if out.GeoipEligible > 0 {
+		out.GeoipCoverage = float64(out.GeoipEnriched) / float64(out.GeoipEligible)
+	}
+	if err := c.Conn.QueryRow(ctx, `
+		SELECT count()
+		FROM collector.satel_rtu_cdr FINAL
+		WHERE `+satelNeedsEnrichmentPredicate()).Scan(&out.Backlog); err != nil {
+		return EnrichmentCoverageSnapshot{}, err
+	}
+	return out, nil
 }

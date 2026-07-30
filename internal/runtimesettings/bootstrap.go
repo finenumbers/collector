@@ -77,6 +77,20 @@ func NormalizeEnrichment(doc *Document) {
 		doc.Enrichment.GeoIP.APIURL = defaults.GeoIP.APIURL
 		doc.Enrichment.GeoIP.Enabled = defaults.GeoIP.Enabled
 	}
+	if doc.Enrichment.Workers == 0 {
+		doc.Enrichment.Workers = defaults.Workers
+	}
+	if doc.Enrichment.CatchUp.Sleep == "" && doc.Enrichment.CatchUp.PageSize == 0 {
+		// Entire catch-up block missing (pre-v0.1.95 documents).
+		doc.Enrichment.CatchUp = defaults.CatchUp
+		return
+	}
+	if doc.Enrichment.CatchUp.PageSize == 0 {
+		doc.Enrichment.CatchUp.PageSize = defaults.CatchUp.PageSize
+	}
+	if doc.Enrichment.CatchUp.Sleep == "" {
+		doc.Enrichment.CatchUp.Sleep = defaults.CatchUp.Sleep
+	}
 }
 
 func durationString(value time.Duration, fallback string) string {

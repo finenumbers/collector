@@ -144,12 +144,27 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 	if s.Metrics != nil {
 		rawIngest = s.Metrics.Snapshot()
 	}
+	enrichmentApis := lookuptelemetry.Default.Snapshot()
+	var enrichmentCoverage any
+	if coverage, coverageErr := s.Analytics.EnrichmentCoverage(ctx, 24*3600); coverageErr == nil {
+		enrichmentCoverage = coverage
+	}
+	enrichmentWorkers := 0
+	enrichmentCatchUp := false
+	if s.Runtime != nil {
+		doc := s.Runtime.Snapshot()
+		enrichmentWorkers = doc.Enrichment.Workers
+		enrichmentCatchUp = doc.Enrichment.CatchUp.Enabled
+	}
 	value := map[string]any{
 		"generatedAt":             time.Now().UTC(),
 		"customProjectionEnabled": s.customProjectionEnabled(),
 		"workloads":               s.Analytics.WorkloadSnapshot(),
 		"rawIngest":               rawIngest,
-		"enrichmentApis":          lookuptelemetry.Default.Snapshot(),
+		"enrichmentApis":          enrichmentApis,
+		"enrichmentCoverage":      enrichmentCoverage,
+		"enrichmentWorkers":       enrichmentWorkers,
+		"enrichmentCatchUp":       enrichmentCatchUp,
 		"projectionQueue": map[string]any{
 			"depth": projection.Depth, "oldestAge": projection.OldestAge,
 			"failed": projection.Failed, "backfilling": projection.Backfilling,

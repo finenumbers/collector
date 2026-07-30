@@ -91,6 +91,8 @@ type RuntimeSettings = {
   enrichment?: {
     pstn: { enabled: boolean; apiUrl: string; token?: string; tokenSet?: boolean }
     geoip: { enabled: boolean; apiUrl: string; token?: string; tokenSet?: boolean }
+    workers?: number
+    catchUp?: { enabled: boolean; pageSize: number; sleep: string }
   }
   platform: {
     clickhouseAdmissionCapacity: number
@@ -310,6 +312,19 @@ type OperationalDiagnostics = {
     pstn?: EnrichmentAPIDiagnostics
     geoip?: EnrichmentAPIDiagnostics
   }
+  enrichmentCoverage?: {
+    windowSeconds: number
+    calls: number
+    pstnEligible: number
+    pstnEnriched: number
+    pstnCoverage: number
+    geoipEligible: number
+    geoipEnriched: number
+    geoipCoverage: number
+    backlog: number
+  }
+  enrichmentWorkers?: number
+  enrichmentCatchUp?: boolean
 }
 type EnrichmentAPIDiagnostics = {
   enabled: boolean
@@ -1250,6 +1265,11 @@ function formatPercent(total?: number, failed?: number) {
   return `${Math.max(0, ((total - (failed || 0)) / total) * 100).toFixed(1)}%`
 }
 
+function formatPercentRatio(ratio?: number) {
+  if (ratio == null || Number.isNaN(ratio)) return '—'
+  return `${Math.max(0, ratio * 100).toFixed(1)}%`
+}
+
 function DeviceNavigation({ device, active, onChange }: {
   device: Device
   active: Dataset
@@ -1720,11 +1740,26 @@ function OperationalDiagnosticsPanel() {
         return <span key={name}>{label}: <strong>
           {api?.enabled ? (api.healthy ? 'ok' : 'breach') : 'off'}
           {api?.configured ? '' : ' · no token'} ·
+          lookups {formatCount(api?.lookups)} ·
+          cache {formatCount(api?.cacheHits)} ·
           errors {formatCount(api?.errors)} ·
           p95 {formatCount(api?.p95LatencyMs)} мс
           {api?.lastError ? ` · ${api.lastError}` : ''}
         </strong></span>
       })}
+      {value.enrichmentCoverage && <span>Enrichment coverage 24h · PSTN / GeoIP: <strong>
+        {formatPercentRatio(value.enrichmentCoverage.pstnCoverage)}
+        ({formatCount(value.enrichmentCoverage.pstnEnriched)}/
+        {formatCount(value.enrichmentCoverage.pstnEligible)}) /
+        {formatPercentRatio(value.enrichmentCoverage.geoipCoverage)}
+        ({formatCount(value.enrichmentCoverage.geoipEnriched)}/
+        {formatCount(value.enrichmentCoverage.geoipEligible)})
+      </strong></span>}
+      {value.enrichmentCoverage && <span>Enrichment backlog / workers / catch-up: <strong>
+        {formatCount(value.enrichmentCoverage.backlog)} /
+        {formatCount(value.enrichmentWorkers)} /
+        {value.enrichmentCatchUp ? 'on' : 'off'}
+      </strong></span>}
       <span>Снимок: <strong>{formatTime(value.generatedAt, 'UTC')}</strong></span>
       {devices.length > 0 && <div className="diagnostic-device-list">
         <strong>Projection по устройствам</strong>
@@ -2819,19 +2854,24 @@ function SystemSettingsPage({ user }: { user: User }) {
 }
 
 function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
+  const enrichment = value.enrichment || {
+    pstn: {
+      enabled: true,
+      apiUrl: 'https://pstn.finenumbers.com/api/v1/lookup',
+      tokenSet: false,
+    },
+    geoip: {
+      enabled: true,
+      apiUrl: 'https://geoip.finenumbers.com/api/v1/lookup',
+      tokenSet: false,
+    },
+  }
   return {
     ...value,
-    enrichment: value.enrichment || {
-      pstn: {
-        enabled: true,
-        apiUrl: 'https://pstn.finenumbers.com/api/v1/lookup',
-        tokenSet: false,
-      },
-      geoip: {
-        enabled: true,
-        apiUrl: 'https://geoip.finenumbers.com/api/v1/lookup',
-        tokenSet: false,
-      },
+    enrichment: {
+      ...enrichment,
+      workers: enrichment.workers ?? 24,
+      catchUp: enrichment.catchUp || { enabled: true, pageSize: 1000, sleep: '2s' },
     },
     containers: value.containers || {
       apiCpus: '2', apiMemory: '2G', exportCpus: '2', exportMemory: '2G',
@@ -3071,8 +3111,8 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
 
     <article className="runtime-card">
       <h4>Обогащение CDR (PSTN / GeoIP)</h4>
-      <p className="runtime-note">Токены для FineNumbers PSTN и GeoIP. Seed из `.env` только при пустой БД;
-        дальше авторитетны эти параметры (hot-apply ~2 с).</p>
+      <p className="runtime-note">Токены FineNumbers, concurrency lookup и фоновый catch-up истории.
+        Seed из `.env` только при пустой БД; дальше авторитетны эти параметры (hot-apply ~2 с).</p>
       <label className="checkbox-row"><input type="checkbox" checked={enrichment.pstn.enabled}
         onChange={(e) => updateEnrichment('pstn', { enabled: e.target.checked })} /> PSTN включён</label>
       <div className="runtime-grid">
@@ -3090,6 +3130,52 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
         <label>GeoIP token<input type="password"
           placeholder={enrichment.geoip.tokenSet ? '•••••••• (не менять)' : 'токен'}
           value={geoipToken} onChange={(e) => setGeoipToken(e.target.value)} /></label>
+        <label>Lookup workers<input type="number" min={1} max={64}
+          value={enrichment.workers ?? 24}
+          onChange={(e) => setForm((current) => {
+            const next = normalizeRuntimeSettings(current)
+            return {
+              ...current,
+              enrichment: { ...next.enrichment!, workers: Number(e.target.value) },
+            }
+          })} /></label>
+      </div>
+      <label className="checkbox-row"><input type="checkbox"
+        checked={enrichment.catchUp?.enabled ?? true}
+        onChange={(e) => setForm((current) => {
+          const next = normalizeRuntimeSettings(current)
+          return {
+            ...current,
+            enrichment: {
+              ...next.enrichment!,
+              catchUp: { ...next.enrichment!.catchUp!, enabled: e.target.checked },
+            },
+          }
+        })} /> Фоновый catch-up истории</label>
+      <div className="runtime-grid">
+        <label>Catch-up page size<input type="number" min={100} max={5000}
+          value={enrichment.catchUp?.pageSize ?? 1000}
+          onChange={(e) => setForm((current) => {
+            const next = normalizeRuntimeSettings(current)
+            return {
+              ...current,
+              enrichment: {
+                ...next.enrichment!,
+                catchUp: { ...next.enrichment!.catchUp!, pageSize: Number(e.target.value) },
+              },
+            }
+          })} /></label>
+        <label>Catch-up sleep<input value={enrichment.catchUp?.sleep || '2s'}
+          onChange={(e) => setForm((current) => {
+            const next = normalizeRuntimeSettings(current)
+            return {
+              ...current,
+              enrichment: {
+                ...next.enrichment!,
+                catchUp: { ...next.enrichment!.catchUp!, sleep: e.target.value },
+              },
+            }
+          })} /></label>
       </div>
     </article>
 
@@ -3145,6 +3231,7 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
             password: password || undefined,
           },
           enrichment: {
+            ...enrichment,
             pstn: {
               ...enrichment.pstn,
               token: pstnToken || undefined,

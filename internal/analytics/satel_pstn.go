@@ -12,14 +12,28 @@ import (
 	"github.com/google/uuid"
 )
 
-// RecordNeedsPSTNEnrichment reports whether any eligible ANI/DNIS side still
-// lacks operator or garTerritory (historical gaps included).
+// RecordNeedsPSTNEnrichment reports whether any ANI/DNIS side with digits still
+// lacks operator or garTerritory (eligible gaps, ineligible «-», historical gaps).
 func RecordNeedsPSTNEnrichment(record SatelRTURecord) bool {
-	return pstnlookup.SideNeedsEnrichment(
-		record.BillANI, record.BillANIOperator, record.BillANIRegion,
-	) || pstnlookup.SideNeedsEnrichment(
-		record.BillDNIS, record.BillDNISOperator, record.BillDNISRegion,
-	)
+	return sideNeedsPSTNFields(record.BillANI, record.BillANIOperator, record.BillANIRegion) ||
+		sideNeedsPSTNFields(record.BillDNIS, record.BillDNISOperator, record.BillDNISRegion)
+}
+
+func sideNeedsPSTNFields(phone, operator, region string) bool {
+	return pstnlookup.DigitsOnly(phone) != "" && !pstnlookup.SideResolved(operator, region)
+}
+
+func applyPSTNIneligibleSides(record *SatelRTURecord, force bool) {
+	if op, reg, ok := pstnlookup.MarkIneligible(
+		record.BillANI, record.BillANIOperator, record.BillANIRegion, force,
+	); ok {
+		record.BillANIOperator, record.BillANIRegion = op, reg
+	}
+	if op, reg, ok := pstnlookup.MarkIneligible(
+		record.BillDNIS, record.BillDNISOperator, record.BillDNISRegion, force,
+	); ok {
+		record.BillDNISOperator, record.BillDNISRegion = op, reg
+	}
 }
 
 // EnrichSatelRecords fills PSTN operator/garTerritory and GeoIP fields in parallel.
@@ -54,6 +68,9 @@ func enrichSatelRecords(
 	}
 	if workers > 64 {
 		workers = 64
+	}
+	for index := range records {
+		applyPSTNIneligibleSides(&records[index], forcePSTN)
 	}
 	var wg sync.WaitGroup
 	if pstn != nil && pstn.Enabled() {
@@ -225,15 +242,12 @@ func satelPSTNDigitsExpr(column string) string {
 }
 
 // satelPSTNEligibleSideExpr is true for exactly 11 digits starting with
-// 73/74/78/79 (or trunk-8 equivalents 83/84/89 / 88x except 880…).
-// Bare 10-digit nationals are never eligible — they caused PSTN 404 storms.
+// 73/74/78/79 (or trunk-8 83/84/88/89, including 7800/8800). Bare 10-digit
+// nationals are never eligible.
 func satelPSTNEligibleSideExpr(column string) string {
 	digits := satelPSTNDigitsExpr(column)
 	return fmt.Sprintf(
-		`(length(%[1]s)=11 AND (`+
-			`match(%[1]s, '^(73|74|78|79|83|84|89)')`+
-			` OR (startsWith(%[1]s,'88') AND substring(%[1]s,3,1)!='0')`+
-			`))`,
+		`(length(%[1]s)=11 AND match(%[1]s, '^(73|74|78|79|83|84|88|89)'))`,
 		digits,
 	)
 }
@@ -242,13 +256,15 @@ func satelPSTNSideCompleteExpr(operatorCol, regionCol string) string {
 	return fmt.Sprintf("(%s!='' AND %s!='')", operatorCol, regionCol)
 }
 
+// Any side with digits and missing operator/region needs enrich (eligible lookup
+// or ineligible «-» sentinel).
 func satelPSTNNeedsEnrichmentExpr() string {
-	aniEligible := satelPSTNEligibleSideExpr("bill_ani")
-	dnisEligible := satelPSTNEligibleSideExpr("bill_dnis")
+	aniDigits := satelPSTNDigitsExpr("bill_ani")
+	dnisDigits := satelPSTNDigitsExpr("bill_dnis")
 	aniComplete := satelPSTNSideCompleteExpr("bill_ani_operator", "bill_ani_region")
 	dnisComplete := satelPSTNSideCompleteExpr("bill_dnis_operator", "bill_dnis_region")
-	return fmt.Sprintf(`((%s AND NOT %s) OR (%s AND NOT %s))`,
-		aniEligible, aniComplete, dnisEligible, dnisComplete)
+	return fmt.Sprintf(`((length(%s)>0 AND NOT %s) OR (length(%s)>0 AND NOT %s))`,
+		aniDigits, aniComplete, dnisDigits, dnisComplete)
 }
 
 func satelPSTNCallEligibleExpr() string {

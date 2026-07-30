@@ -87,7 +87,7 @@ func TestEnrichSatelRecordsAppliesLookup(t *testing.T) {
 	}
 }
 
-func TestEnrichSatelRecordsSkipsNonEligiblePhones(t *testing.T) {
+func TestEnrichSatelRecordsMarksNonEligiblePhones(t *testing.T) {
 	var pstnHits atomic.Int32
 	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pstnHits.Add(1)
@@ -104,12 +104,43 @@ func TestEnrichSatelRecordsSkipsNonEligiblePhones(t *testing.T) {
 	if pstnHits.Load() != 0 {
 		t.Fatalf("pstn hits=%d want 0 for non-eligible phones", pstnHits.Load())
 	}
-	if records[0].BillANIOperator != "" || records[0].BillANIRegion != "" {
-		t.Fatalf("expected empty PSTN fields, got %#v", records[0])
+	for i, record := range records {
+		if record.BillANIOperator != pstnlookup.ValueIneligible ||
+			record.BillANIRegion != pstnlookup.ValueIneligible ||
+			record.BillDNISOperator != pstnlookup.ValueIneligible ||
+			record.BillDNISRegion != pstnlookup.ValueIneligible {
+			t.Fatalf("record[%d] want ineligible sentinels, got %#v", i, record)
+		}
+	}
+	if RecordNeedsPSTNEnrichment(records[0]) {
+		t.Fatal("ineligible sentinels must resolve enrichment")
 	}
 }
 
-func TestEnrichSatelRecordsLeavesEmptyOnIncompleteLookup(t *testing.T) {
+func TestEnrichSatelRecordsNotFoundWritesSentinel(t *testing.T) {
+	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"found": false,
+			"phone": r.URL.Query().Get("phone"),
+		})
+	}))
+	defer pstnServer.Close()
+	pstn := pstnlookup.New(pstnServer.URL, "token", true)
+	pstn.HTTPClient = pstnServer.Client()
+	records := []SatelRTURecord{{BillANI: "79031234567", BillDNIS: "78007777373"}}
+	EnrichSatelRecords(context.Background(), pstn, nil, records, 2)
+	if records[0].BillANIOperator != pstnlookup.ValueNotFound ||
+		records[0].BillANIRegion != pstnlookup.ValueNotFound ||
+		records[0].BillDNISOperator != pstnlookup.ValueNotFound ||
+		records[0].BillDNISRegion != pstnlookup.ValueNotFound {
+		t.Fatalf("want not-found sentinels, got %#v", records[0])
+	}
+	if RecordNeedsPSTNEnrichment(records[0]) {
+		t.Fatal("not-found sentinel must resolve enrichment")
+	}
+}
+
+func TestEnrichSatelRecordsIncompleteLookupWritesNotFoundSentinel(t *testing.T) {
 	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"found": true,
@@ -124,8 +155,9 @@ func TestEnrichSatelRecordsLeavesEmptyOnIncompleteLookup(t *testing.T) {
 	pstn.HTTPClient = pstnServer.Client()
 	records := []SatelRTURecord{{BillANI: "79031234567"}}
 	EnrichSatelRecords(context.Background(), pstn, nil, records, 2)
-	if records[0].BillANIOperator != "" || records[0].BillANIRegion != "" {
-		t.Fatalf("incomplete lookup must leave fields empty, got %#v", records[0])
+	if records[0].BillANIOperator != pstnlookup.ValueNotFound ||
+		records[0].BillANIRegion != pstnlookup.ValueNotFound {
+		t.Fatalf("incomplete lookup must write not-found sentinel, got %#v", records[0])
 	}
 }
 
@@ -217,8 +249,11 @@ func TestSatelPSTNEligibilitySQLHelpers(t *testing.T) {
 	if strings.Contains(got, "^[3489]") {
 		t.Fatal("eligible expr must not use bare national 3/4/8/9 prefix")
 	}
-	if !strings.Contains(got, "880") && !strings.Contains(got, "!='0'") {
-		t.Fatalf("eligible expr must exclude 880 toll-free, got %q", got)
+	if !strings.Contains(got, "88|89") && !strings.Contains(got, "83|84|88|89") {
+		t.Fatalf("eligible expr must include trunk-8 88 (8800), got %q", got)
+	}
+	if strings.Contains(got, "!='0'") {
+		t.Fatalf("eligible expr must not exclude 880 toll-free, got %q", got)
 	}
 	if got := satelPSTNCallEnrichedExpr(); got == "" {
 		t.Fatal("empty enriched expr")

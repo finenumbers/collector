@@ -1894,6 +1894,24 @@ function satelCallOutcome(row: SatelCdrRow): 'success' | 'failure' | 'warning' {
   return 'warning'
 }
 
+const PSTN_NOT_FOUND = 'Не существует'
+const PSTN_INELIGIBLE = '-'
+
+function satelPstnRowTint(row: SatelCdrRow): 'pstn-absent' | 'pstn-ineligible' | null {
+  const fields = [
+    row.billAniOperator, row.billAniRegion, row.billDnisOperator, row.billDnisRegion,
+  ]
+  if (fields.some((value) => value === PSTN_NOT_FOUND)) return 'pstn-absent'
+  if (fields.some((value) => value === PSTN_INELIGIBLE)) return 'pstn-ineligible'
+  return null
+}
+
+function satelRowClassName(row: SatelCdrRow): string {
+  const tint = satelPstnRowTint(row)
+  if (tint) return `outcome-row ${tint}`
+  return `outcome-row outcome-${satelCallOutcome(row)}`
+}
+
 function formatSatelProtocols(row: SatelCdrRow) {
   const configured = Array.isArray(row.protocols) ? row.protocols.join(' / ') : row.protocols
   return configured || [row.inLegProto, row.outLegProto].filter(Boolean).join(' → ') || '—'
@@ -1959,8 +1977,7 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
     {columns.map((column) => <th key={column.key} title={column.header}
       className={columnClass(column.key)}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => {
-    const outcome = satelCallOutcome(row)
-    return <tr key={row.recordId} className={`outcome-row outcome-${outcome}`}
+    return <tr key={row.recordId} className={satelRowClassName(row)}
       onClick={() => onSelect(row)}>
       {columns.map((column) => <td key={column.key}
         className={[

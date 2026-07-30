@@ -91,6 +91,10 @@ describe('equipment templates', () => {
     expect(styles).toMatch(/\.col-flex-pair\s*\{[^}]*width:\s*50%/s)
     expect(styles).toMatch(/\.col-flex-pair\s*\{[^}]*max-width:\s*0/s)
     expect(styles).toMatch(/td\.col-flex\s*\{[^}]*max-width:\s*0/s)
+    expect(styles).toContain('.outcome-row.pstn-absent')
+    expect(styles).toContain('.outcome-row.pstn-ineligible')
+    expect(main).toContain('pstn-absent')
+    expect(main).toContain('Не существует')
     expect(main).toContain('title="Последний CDR"')
     expect(main.indexOf('title="Последний CDR"')).toBeLessThan(
       main.lastIndexOf('title="Последний приём Syslog"'),

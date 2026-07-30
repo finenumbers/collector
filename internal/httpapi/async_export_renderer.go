@@ -313,7 +313,9 @@ func (s *Server) renderSatelCallsCSVZip(
 ) (exportworker.RenderResult, error) {
 	return renderCSVArchive(job, output, []string{
 		"Установка", "Соединение", "Завершение", "Результат", "ANI вход", "DNIS вход",
-		"ANI выход", "DNIS выход", "Src маршрут", "Dst маршрут", "DP маршрут",
+		"ANI выход", "DNIS выход", "Bill ANI", "Bill DNIS",
+		"Оператор A", "Оператор B", "Регион A", "Регион B",
+		"Src маршрут", "Dst маршрут", "DP маршрут",
 		"Длительность, мс", "Протокол вход", "Протокол выход", "Разъединение", "Код", "Узел",
 	}, func(writer *csv.Writer) (int64, error) {
 		var cursor *analytics.CallCursor
@@ -341,8 +343,9 @@ func (s *Server) renderSatelCallsCSVZip(
 					formatTimeInLocation(row.SetupTime, location),
 					formatTimeInLocation(row.ConnectTime, location),
 					formatTimeInLocation(row.DisconnectTime, location), row.Outcome,
-					row.InANI, row.InDNIS, row.OutANI, row.OutDNIS, row.SrcName,
-					row.DstName, row.DPName, row.DurationMS, row.InLegProto,
+					row.InANI, row.InDNIS, row.OutANI, row.OutDNIS, row.BillANI, row.BillDNIS,
+					row.BillANIOperator, row.BillDNISOperator, row.BillANIRegion, row.BillDNISRegion,
+					row.SrcName, row.DstName, row.DPName, row.DurationMS, row.InLegProto,
 					row.OutLegProto, row.DisconnectText, row.DisconnectCode, row.SignalNodeName,
 				); err != nil {
 					return total, err

@@ -21,6 +21,7 @@ import (
 	ftpclient "collector/internal/ftp"
 	"collector/internal/httpapi"
 	"collector/internal/ingest"
+	"collector/internal/pstnlookup"
 	"collector/internal/reconciliation"
 	"collector/internal/retention"
 	"collector/internal/runtimesettings"
@@ -28,6 +29,7 @@ import (
 	"collector/internal/store"
 	"collector/internal/voipmonitor"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
 
@@ -45,6 +47,13 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "migration-preflight" {
 		if err := runMigrationPreflight(ctx, cfg); err != nil {
 			slog.Error("migration preflight failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "pstn-enrich-satel" {
+		if err := runPSTNEnrichSatel(ctx, cfg); err != nil {
+			slog.Error("pstn enrich satel failed", "error", err)
 			os.Exit(1)
 		}
 		return
@@ -246,6 +255,7 @@ func main() {
 		go func() {
 			watcher := ingest.CDRWatcher{
 				Root: "/data/cdr", Store: control, Analytics: warehouse, Archive: rawArchive,
+				PSTN: pstnlookup.New(cfg.PstnLookupURL, cfg.PstnLookupToken),
 				CoverageThresholdsFn: func() analytics.CoverageThresholds {
 					return coverageThresholds(runtime.Snapshot())
 				},
@@ -339,6 +349,58 @@ func runMigrationPreflight(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	return report.Validate()
+}
+
+func runPSTNEnrichSatel(ctx context.Context, cfg config.Config) error {
+	if cfg.PstnLookupToken == "" {
+		return fmt.Errorf("PSTN_LOOKUP_TOKEN is required for pstn-enrich-satel")
+	}
+	warehouse, err := openClickHouse(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	client := pstnlookup.New(cfg.PstnLookupURL, cfg.PstnLookupToken)
+	const pageSize = 500
+	after := uuid.Nil
+	var totalRows int
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		records, err := warehouse.ListSatelRTURecordsNeedingPSTNEnrichment(ctx, pageSize, after)
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			break
+		}
+		analytics.EnrichSatelRecords(ctx, client, records)
+		now := time.Now().UTC()
+		toInsert := make([]analytics.SatelRTURecord, 0, len(records))
+		for _, record := range records {
+			if record.BillANIOperator == "" && record.BillDNISOperator == "" &&
+				record.BillANIRegion == "" && record.BillDNISRegion == "" {
+				continue
+			}
+			record.IngestedAt = now
+			toInsert = append(toInsert, record)
+		}
+		if len(toInsert) > 0 {
+			if err := warehouse.InsertSatelRTUBatch(ctx, toInsert); err != nil {
+				return err
+			}
+		}
+		totalRows += len(toInsert)
+		after = records[len(records)-1].RecordID
+		slog.Info("pstn enrich satel progress",
+			"enriched", totalRows, "page", len(records), "written", len(toInsert),
+			"lastRecordId", after.String())
+		if len(records) < pageSize {
+			break
+		}
+	}
+	slog.Info("pstn enrich satel complete", "rows", totalRows)
+	return nil
 }
 
 func runIngress(ctx context.Context, cfg config.Config) error {

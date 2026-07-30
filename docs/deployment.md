@@ -87,6 +87,15 @@ Collector подключён к external network `${PROXY_NETWORK:-proxy}` по�
 AntiFraud для этого источника не настраиваются. MinIO/ledger failure оставляет
 локальный файл для автоматического retry.
 
+Bill ANI/DNIS обогащаются на ingest через FineNumbers PSTN lookup (`PSTN_LOOKUP_URL`,
+`PSTN_LOOKUP_TOKEN` в `.env` / compose; пустой token выключает enrichment). Колонки
+«Оператор A/B» и «Регион A/B» заполняются только для новых файлов. Историю после
+выкладки миграции 031 дозаполните явно:
+
+```bash
+docker compose -f deploy/compose.yml run --rm collector pstn-enrich-satel
+```
+
 ## Backup and restore
 
 ### Daily backup

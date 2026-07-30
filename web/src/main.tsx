@@ -119,6 +119,8 @@ type DashboardDevice = {
     calls: number
     failedCalls: number
     averageTalkMs: number
+    pstnEnrichedCalls?: number
+    geoipEnrichedCalls?: number
     antifraud: number
     antifraudRejected: number
     voipmonitorMatchedExact?: number
@@ -170,6 +172,8 @@ type DashboardCategoryTotals = {
   calls?: number
   failed?: number
   averageTalkMs?: number
+  pstnEnrichedCalls?: number
+  geoipEnrichedCalls?: number
   antifraud?: number
   rejects?: number
   files?: number
@@ -1012,10 +1016,12 @@ function DashboardPage({ devices, onSelectDevice }: {
       <DashboardKPI label="Неразобранное"
         value={formatCount(softswitchUnresolved(softswitchTotals))}
         tone={softswitchUnresolved(softswitchTotals) > 0 ? 'warn' : 'good'} />
-      <DashboardKPI label="ASR" value={formatPercent(softswitchTotals.calls, softswitchTotals.failed)}
-        detail="для типизированных CDR" />
-      <DashboardKPI label="Средний разговор"
-        value={formatDurationAverage(softswitchTotals.averageTalkMs)} />
+      <DashboardKPI label="Операторы"
+        value={formatCount(softswitchTotals.pstnEnrichedCalls)}
+        detail="PSTN enrichment" />
+      <DashboardKPI label="GeoIP"
+        value={formatCount(softswitchTotals.geoipEnrichedCalls)}
+        detail="GeoIP enrichment" />
       <DashboardKPI label="CDR-файлы" value={formatCount(softswitchTotals.files)}
         detail={formatBytes(softswitchTotals.bytes)} />
     </div>
@@ -1161,6 +1167,10 @@ function dashboardCategoryTotals(
   const fallback = rows.reduce((totals, row) => ({
     calls: totals.calls + (sourceCapabilities(row).typedCdr ? row.metrics.calls || 0 : 0),
     failed: totals.failed + (sourceCapabilities(row).typedCdr ? row.metrics.failedCalls || 0 : 0),
+    pstnEnrichedCalls: totals.pstnEnrichedCalls +
+      (sourceCapabilities(row).typedCdr ? row.metrics.pstnEnrichedCalls || 0 : 0),
+    geoipEnrichedCalls: totals.geoipEnrichedCalls +
+      (sourceCapabilities(row).typedCdr ? row.metrics.geoipEnrichedCalls || 0 : 0),
     antifraud: totals.antifraud + (row.antifraudEnabled ? row.metrics.antifraud || 0 : 0),
     rejects: totals.rejects + (row.antifraudEnabled ? row.metrics.antifraudRejected || 0 : 0),
     files: totals.files + (row.fileMetrics?.files || 0),
@@ -1171,7 +1181,8 @@ function dashboardCategoryTotals(
     voipmonitorUnmatched: totals.voipmonitorUnmatched + (row.metrics.voipmonitorUnmatched || 0),
     storageBytes: totals.storageBytes,
   }), {
-    calls: 0, failed: 0, antifraud: 0, rejects: 0, files: 0, bytes: 0, storageBytes: 0,
+    calls: 0, failed: 0, pstnEnrichedCalls: 0, geoipEnrichedCalls: 0,
+    antifraud: 0, rejects: 0, files: 0, bytes: 0, storageBytes: 0,
     voipmonitorMatchedExact: 0, voipmonitorMatchedFallback: 0,
     voipmonitorAmbiguous: 0, voipmonitorUnmatched: 0,
   })
@@ -1181,6 +1192,8 @@ function dashboardCategoryTotals(
     calls: apiTotals.calls ?? fallback.calls,
     failed: apiTotals.failed ?? fallback.failed,
     averageTalkMs: apiTotals.averageTalkMs ?? 0,
+    pstnEnrichedCalls: apiTotals.pstnEnrichedCalls ?? fallback.pstnEnrichedCalls,
+    geoipEnrichedCalls: apiTotals.geoipEnrichedCalls ?? fallback.geoipEnrichedCalls,
     antifraud: apiTotals.antifraud ?? fallback.antifraud,
     rejects: apiTotals.rejects ?? fallback.rejects,
     files: apiTotals.files ?? fallback.files,

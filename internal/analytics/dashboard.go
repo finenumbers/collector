@@ -16,6 +16,8 @@ type DashboardDevice struct {
 	Calls                      uint64     `json:"calls"`
 	FailedCalls                uint64     `json:"failedCalls"`
 	AverageTalkMS              float64    `json:"averageTalkMs"`
+	PstnEnrichedCalls          uint64     `json:"pstnEnrichedCalls"`
+	GeoipEnrichedCalls         uint64     `json:"geoipEnrichedCalls"`
 	Antifraud                  uint64     `json:"antifraud"`
 	AntifraudRejected          uint64     `json:"antifraudRejected"`
 	AntifraudIncomplete        uint64     `json:"antifraudIncomplete"`
@@ -83,7 +85,13 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 	}
 
 	rows, err = c.Conn.Query(ctx, `SELECT device_id,count(),countIf(outcome!='answered'),
-		ifNull(avgIf(duration_ms,outcome='answered'),0),max(ingested_at)
+		ifNull(avgIf(duration_ms,outcome='answered'),0),
+		countIf(bill_ani_operator!='' OR bill_dnis_operator!=''
+			OR bill_ani_region!='' OR bill_dnis_region!=''),
+		countIf(remote_src_geoip_iso!='' OR remote_dst_geoip_iso!=''
+			OR remote_src_geoip_city!='' OR remote_dst_geoip_city!=''
+			OR remote_src_asn_org!='' OR remote_dst_asn_org!=''),
+		max(ingested_at)
 		FROM collector.satel_rtu_cdr FINAL
 		WHERE ingested_at>=now()-toIntervalSecond(?)
 		GROUP BY device_id`, seconds)
@@ -95,13 +103,16 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 			var latest time.Time
 			item := DashboardDevice{}
 			if scanErr := rows.Scan(&id, &item.Calls, &item.FailedCalls,
-				&item.AverageTalkMS, &latest); scanErr != nil {
+				&item.AverageTalkMS, &item.PstnEnrichedCalls, &item.GeoipEnrichedCalls,
+				&latest); scanErr != nil {
 				result.Diagnostics = append(result.Diagnostics, "satel_rtu_cdr: "+scanErr.Error())
 				break
 			}
 			target := device(id)
 			target.Calls += item.Calls
 			target.FailedCalls += item.FailedCalls
+			target.PstnEnrichedCalls += item.PstnEnrichedCalls
+			target.GeoipEnrichedCalls += item.GeoipEnrichedCalls
 			if target.Calls == item.Calls {
 				target.AverageTalkMS = item.AverageTalkMS
 			}

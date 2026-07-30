@@ -372,6 +372,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	type categoryAccumulator struct {
 		totalSources, activeSources                    int
 		calls, failed                                  uint64
+		pstnEnriched, geoipEnriched                    uint64
 		antifraud, rejects, files, bytes, storageBytes uint64
 		vmExact, vmFallback, vmAmbiguous, vmUnmatched  uint64
 		weightedTalk                                   float64
@@ -420,6 +421,8 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 			weightedTalk += metrics.AverageTalkMS * float64(metrics.Calls)
 			category.calls += metrics.Calls
 			category.failed += metrics.FailedCalls
+			category.pstnEnriched += metrics.PstnEnrichedCalls
+			category.geoipEnriched += metrics.GeoipEnrichedCalls
 			if s.customProjectionEnabled() && configured.AntifraudEnabled {
 				category.antifraud += metrics.Antifraud
 				category.rejects += metrics.AntifraudRejected
@@ -457,6 +460,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		categoryResponse[name] = map[string]any{
 			"totalSources": category.totalSources, "activeSources": category.activeSources,
 			"calls": category.calls, "failed": category.failed, "averageTalkMs": average,
+			"pstnEnrichedCalls": category.pstnEnriched, "geoipEnrichedCalls": category.geoipEnriched,
 			"antifraud": category.antifraud, "rejects": category.rejects,
 			"files": category.files, "bytes": category.bytes, "storageBytes": category.storageBytes,
 			"voipmonitorMatchedExact":    category.vmExact,

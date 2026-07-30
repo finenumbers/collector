@@ -4,16 +4,33 @@ import {
   ELTEX_CDR_COLUMNS,
   ELTEX_SUMMARY_KEYS,
   SATEL_CDR_COLUMNS,
+  SATEL_GEOIP_KEYS,
+  SATEL_OPERATORS_KEYS,
   SATEL_SUMMARY_KEYS,
+  cdrPresetsForVendor,
   defaultCdrPresetId,
   resolvePresetColumns,
+  satelPresetFillWidth,
+  satelPresetFlexKey,
+  satelPresetFlexPairKeys,
 } from './cdrColumns'
 
 describe('CDR column presets', () => {
-  it('ships Summary as the default preset before «Все данные»', () => {
-    expect(CDR_PRESETS.map((preset) => preset.id)).toEqual(['summary', 'all'])
+  it('ships Summary before GeoIP, Операторы, and «Все данные»', () => {
+    expect(CDR_PRESETS.map((preset) => preset.id)).toEqual([
+      'summary', 'geoip', 'operators', 'all',
+    ])
     expect(CDR_PRESETS[0]).toMatchObject({ id: 'summary', label: 'Summary' })
     expect(defaultCdrPresetId()).toBe('summary')
+  })
+
+  it('exposes Satel-only presets only for satel vendor', () => {
+    expect(cdrPresetsForVendor('satel').map((preset) => preset.id)).toEqual([
+      'summary', 'geoip', 'operators', 'all',
+    ])
+    expect(cdrPresetsForVendor('eltex').map((preset) => preset.id)).toEqual([
+      'summary', 'all',
+    ])
   })
 
   it('resolves eltex Summary in the agreed order', () => {
@@ -46,6 +63,39 @@ describe('CDR column presets', () => {
       'durationMs',
       'disconnectText',
       'voipmonitorCardUrl',
+    ])
+  })
+
+  it('resolves satel GeoIP preset in the agreed order', () => {
+    expect(resolvePresetColumns('satel', 'geoip').map((column) => column.key))
+      .toEqual(SATEL_GEOIP_KEYS)
+  })
+
+  it('resolves satel Операторы preset in the agreed order', () => {
+    expect(resolvePresetColumns('satel', 'operators').map((column) => column.key))
+      .toEqual(SATEL_OPERATORS_KEYS)
+    expect(SATEL_OPERATORS_KEYS).not.toContain('voipmonitorCardUrl')
+  })
+
+  it('falls back eltex geoip/operators session values to Summary', () => {
+    expect(resolvePresetColumns('eltex', 'geoip').map((column) => column.key))
+      .toEqual(ELTEX_SUMMARY_KEYS)
+    expect(resolvePresetColumns('eltex', 'operators').map((column) => column.key))
+      .toEqual(ELTEX_SUMMARY_KEYS)
+  })
+
+  it('uses fill-width and flex-pair layout helpers for Satel presets', () => {
+    expect(satelPresetFillWidth('summary')).toBe(true)
+    expect(satelPresetFillWidth('geoip')).toBe(true)
+    expect(satelPresetFillWidth('operators')).toBe(true)
+    expect(satelPresetFillWidth('all')).toBe(false)
+    expect(satelPresetFlexKey('summary')).toBe('disconnectText')
+    expect(satelPresetFlexKey('geoip')).toBe('')
+    expect(satelPresetFlexPairKeys('geoip')).toEqual([
+      'remoteSrcAsnOrg', 'remoteDstAsnOrg',
+    ])
+    expect(satelPresetFlexPairKeys('operators')).toEqual([
+      'billAniRegion', 'billDnisRegion',
     ])
   })
 

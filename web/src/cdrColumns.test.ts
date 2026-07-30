@@ -69,6 +69,8 @@ describe('CDR column presets', () => {
     expect(keys.indexOf('billDnisOperator')).toBe(keys.indexOf('billAniOperator') + 1)
     expect(keys.indexOf('billAniRegion')).toBe(keys.indexOf('billDnisOperator') + 1)
     expect(keys.indexOf('billDnisRegion')).toBe(keys.indexOf('billAniRegion') + 1)
+    expect(keys.indexOf('remoteSrcGeoipIso')).toBe(keys.indexOf('remoteDstSigAddress') + 1)
+    expect(keys.indexOf('remoteDstAsnOrg')).toBe(keys.indexOf('remoteSrcGeoipIso') + 5)
   })
 
   it('falls back to Summary for unknown preset ids', () => {

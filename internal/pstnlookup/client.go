@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"collector/internal/lookuptelemetry"
 )
 
 const DefaultURL = "https://pstn.finenumbers.com/api/v1/lookup"
@@ -22,10 +24,12 @@ type Result struct {
 }
 
 type Client struct {
-	BaseURL    string
-	Token      string
-	HTTPClient *http.Client
-	CacheTTL   time.Duration
+	BaseURL     string
+	Token       string
+	EnabledFlag bool
+	HTTPClient  *http.Client
+	CacheTTL    time.Duration
+	Telemetry   *lookuptelemetry.Registry
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry
@@ -36,23 +40,25 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
-func New(baseURL, token string) *Client {
+func New(baseURL, token string, enabled bool) *Client {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = DefaultURL
 	}
 	return &Client{
-		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		Token:   strings.TrimSpace(token),
+		BaseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		Token:       strings.TrimSpace(token),
+		EnabledFlag: enabled,
 		HTTPClient: &http.Client{
 			Timeout: 3 * time.Second,
 		},
-		CacheTTL: DefaultCacheTTL,
-		cache:    make(map[string]cacheEntry),
+		CacheTTL:  DefaultCacheTTL,
+		Telemetry: lookuptelemetry.Default,
+		cache:     make(map[string]cacheEntry),
 	}
 }
 
 func (c *Client) Enabled() bool {
-	return c != nil && c.Token != ""
+	return c != nil && c.EnabledFlag && c.Token != ""
 }
 
 // NormalizePhone keeps digits only and strips a leading Russian country/trunk
@@ -81,13 +87,24 @@ func (c *Client) Lookup(ctx context.Context, rawPhone string) (Result, error) {
 		return Result{}, nil
 	}
 	if result, ok := c.getCached(phone); ok {
+		if c.Telemetry != nil {
+			c.Telemetry.RecordCacheHit("pstn")
+		}
 		return result, nil
 	}
+	start := time.Now()
 	result, err := c.fetch(ctx, phone)
+	latency := time.Since(start)
 	if err != nil {
+		if c.Telemetry != nil {
+			c.Telemetry.RecordError("pstn", latency, err.Error())
+		}
 		return Result{}, err
 	}
 	c.putCached(phone, result)
+	if c.Telemetry != nil {
+		c.Telemetry.RecordSuccess("pstn", latency)
+	}
 	return result, nil
 }
 
@@ -113,6 +130,9 @@ func (c *Client) LookupMany(ctx context.Context, phones []string, workers int) m
 		seen[phone] = struct{}{}
 		if result, ok := c.getCached(phone); ok {
 			out[phone] = result
+			if c.Telemetry != nil {
+				c.Telemetry.RecordCacheHit("pstn")
+			}
 			continue
 		}
 		unique = append(unique, phone)
@@ -135,11 +155,19 @@ func (c *Client) LookupMany(ctx context.Context, phones []string, workers int) m
 		go func() {
 			defer wg.Done()
 			for phone := range jobs {
+				start := time.Now()
 				result, err := c.fetch(ctx, phone)
+				latency := time.Since(start)
 				if err != nil {
 					result = Result{}
+					if c.Telemetry != nil {
+						c.Telemetry.RecordError("pstn", latency, err.Error())
+					}
 				} else {
 					c.putCached(phone, result)
+					if c.Telemetry != nil {
+						c.Telemetry.RecordSuccess("pstn", latency)
+					}
 				}
 				results <- item{phone: phone, result: result}
 			}

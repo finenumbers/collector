@@ -41,7 +41,7 @@ func TestLookupCachesForTTL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := New(server.URL, "test-token")
+	client := New(server.URL, "test-token", true)
 	client.HTTPClient = server.Client()
 	client.CacheTTL = time.Hour
 
@@ -76,7 +76,7 @@ func TestLookupCachesForTTL(t *testing.T) {
 }
 
 func TestLookupDisabledWithoutToken(t *testing.T) {
-	client := New(DefaultURL, "")
+	client := New(DefaultURL, "", true)
 	result, err := client.Lookup(context.Background(), "4996660000")
 	if err != nil || result != (Result{}) {
 		t.Fatalf("disabled lookup = %#v err=%v", result, err)

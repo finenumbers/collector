@@ -20,6 +20,7 @@ import (
 	"collector/internal/analytics"
 	"collector/internal/archive"
 	"collector/internal/equipment"
+	"collector/internal/geoiplookup"
 	"collector/internal/pstnlookup"
 	"collector/internal/store"
 
@@ -33,15 +34,31 @@ type CDRWatcher struct {
 	Analytics                 CDRAnalytics
 	Archive                   CDRArchive
 	PSTN                      *pstnlookup.Client
+	GeoIP                     *geoiplookup.Client
 	MinAge                    time.Duration
 	CoverageThresholds        analytics.CoverageThresholds
 	CoverageThresholdsFn      func() analytics.CoverageThresholds
 	CustomProjectionEnabled   bool
 	CustomProjectionEnabledFn func() bool
 
-	retryMu sync.Mutex
-	retries map[string]watcherRetry
-	now     func() time.Time
+	enrichMu sync.RWMutex
+	retryMu  sync.Mutex
+	retries  map[string]watcherRetry
+	now      func() time.Time
+}
+
+// SetEnrichmentClients hot-applies PSTN/GeoIP clients from runtime settings.
+func (w *CDRWatcher) SetEnrichmentClients(pstn *pstnlookup.Client, geoip *geoiplookup.Client) {
+	w.enrichMu.Lock()
+	defer w.enrichMu.Unlock()
+	w.PSTN = pstn
+	w.GeoIP = geoip
+}
+
+func (w *CDRWatcher) enrichmentClients() (*pstnlookup.Client, *geoiplookup.Client) {
+	w.enrichMu.RLock()
+	defer w.enrichMu.RUnlock()
+	return w.PSTN, w.GeoIP
 }
 
 type watcherRetry struct {
@@ -242,7 +259,8 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 			return fmt.Errorf("%w: Satel RTU CDR parse failed: %v", errTerminalIngest, parseErr)
 		}
 		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
-		analytics.EnrichSatelRecords(ctx, w.PSTN, result.Records)
+		pstn, geoip := w.enrichmentClients()
+		analytics.EnrichSatelRecords(ctx, pstn, geoip, result.Records)
 		err = insertSatelRTUForTemplate(ctx, template, w.Analytics, result.Records)
 		if err == nil {
 			err = w.enqueueVoipmonitorBuckets(ctx, device.ID, satelRecordBuckets(result.Records))
@@ -451,7 +469,8 @@ func (w *CDRWatcher) processIngestReplay(
 	if w.Analytics == nil {
 		return errors.New("CDR analytics is unavailable")
 	}
-	analytics.EnrichSatelRecords(ctx, w.PSTN, result.Records)
+	pstn, geoip := w.enrichmentClients()
+	analytics.EnrichSatelRecords(ctx, pstn, geoip, result.Records)
 	if err := w.Analytics.InsertSatelRTUBatch(ctx, result.Records); err != nil {
 		return err
 	}

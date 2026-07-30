@@ -43,6 +43,7 @@ func (s *Store) LoadRuntimeSettings(ctx context.Context) (RuntimeSettingsRow, er
 	if row.Settings.Containers.APICpus == "" {
 		row.Settings.Containers = runtimesettings.Defaults().Containers
 	}
+	runtimesettings.NormalizeEnrichment(&row.Settings)
 	row.Seeded = true
 	return row, nil
 }

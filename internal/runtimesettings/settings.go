@@ -3,6 +3,7 @@ package runtimesettings
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -11,8 +12,21 @@ type Document struct {
 	Projection  ProjectionSettings  `json:"projection"`
 	Coverage    CoverageSettings    `json:"coverage"`
 	Voipmonitor VoipmonitorSettings `json:"voipmonitor"`
+	Enrichment  EnrichmentSettings  `json:"enrichment"`
 	Platform    PlatformSettings    `json:"platform"`
 	Containers  ContainersSettings  `json:"containers"`
+}
+
+type EnrichmentSettings struct {
+	PSTN  LookupAPISettings `json:"pstn"`
+	GeoIP LookupAPISettings `json:"geoip"`
+}
+
+type LookupAPISettings struct {
+	Enabled  bool   `json:"enabled"`
+	APIURL   string `json:"apiUrl"`
+	Token    string `json:"token,omitempty"`
+	TokenSet bool   `json:"tokenSet,omitempty"`
 }
 
 type ProjectionSettings struct {
@@ -100,6 +114,16 @@ func Defaults() Document {
 			RateLimitPerSec:    5,
 			UseShareURL:        false,
 		},
+		Enrichment: EnrichmentSettings{
+			PSTN: LookupAPISettings{
+				Enabled: true,
+				APIURL:  "https://pstn.finenumbers.com/api/v1/lookup",
+			},
+			GeoIP: LookupAPISettings{
+				Enabled: true,
+				APIURL:  "https://geoip.finenumbers.com/api/v1/lookup",
+			},
+		},
 		Platform: PlatformSettings{
 			ClickHouseAdmissionCapacity: 8,
 			ExportPageSize:              1000,
@@ -119,6 +143,10 @@ func (d Document) PublicView() Document {
 	view := d.Clone()
 	view.Voipmonitor.PasswordSet = view.Voipmonitor.Password != ""
 	view.Voipmonitor.Password = ""
+	view.Enrichment.PSTN.TokenSet = view.Enrichment.PSTN.Token != ""
+	view.Enrichment.PSTN.Token = ""
+	view.Enrichment.GeoIP.TokenSet = view.Enrichment.GeoIP.Token != ""
+	view.Enrichment.GeoIP.Token = ""
 	return view
 }
 
@@ -185,6 +213,12 @@ func (d Document) Validate() error {
 	if d.Voipmonitor.Enabled && d.Voipmonitor.APIURL == "" {
 		return fmt.Errorf("voipmonitor.apiUrl is required when voipmonitor.enabled=true")
 	}
+	if d.Enrichment.PSTN.Enabled && strings.TrimSpace(d.Enrichment.PSTN.APIURL) == "" {
+		return fmt.Errorf("enrichment.pstn.apiUrl is required when enrichment.pstn.enabled=true")
+	}
+	if d.Enrichment.GeoIP.Enabled && strings.TrimSpace(d.Enrichment.GeoIP.APIURL) == "" {
+		return fmt.Errorf("enrichment.geoip.apiUrl is required when enrichment.geoip.enabled=true")
+	}
 	if d.Platform.ClickHouseAdmissionCapacity < 4 || d.Platform.ClickHouseAdmissionCapacity > 128 {
 		return fmt.Errorf("platform.clickhouseAdmissionCapacity must be between 4 and 128")
 	}
@@ -217,13 +251,15 @@ func MustDuration(raw string) time.Duration {
 }
 
 // MergePatch overlays non-zero / provided JSON fields from patch onto base.
-// Password: empty string in patch keeps base password; explicit clear unsupported.
+// Password/tokens: empty string in patch keeps base secret; explicit clear unsupported.
 func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 	out := base.Clone()
 	if len(patch) == 0 || string(patch) == "null" {
 		return out, nil
 	}
 	keptPassword := out.Voipmonitor.Password
+	keptPSTN := out.Enrichment.PSTN.Token
+	keptGeoIP := out.Enrichment.GeoIP.Token
 	if err := json.Unmarshal(patch, &out); err != nil {
 		return Document{}, fmt.Errorf("invalid settings payload: %w", err)
 	}
@@ -231,12 +267,32 @@ func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 		Voipmonitor struct {
 			Password *string `json:"password"`
 		} `json:"voipmonitor"`
+		Enrichment struct {
+			PSTN  struct{ Token *string `json:"token"` } `json:"pstn"`
+			GeoIP struct{ Token *string `json:"token"` } `json:"geoip"`
+		} `json:"enrichment"`
 	}
 	_ = json.Unmarshal(patch, &peek)
 	if peek.Voipmonitor.Password == nil || *peek.Voipmonitor.Password == "" {
 		out.Voipmonitor.Password = keptPassword
 	}
+	if peek.Enrichment.PSTN.Token == nil || *peek.Enrichment.PSTN.Token == "" {
+		out.Enrichment.PSTN.Token = keptPSTN
+	}
+	if peek.Enrichment.GeoIP.Token == nil || *peek.Enrichment.GeoIP.Token == "" {
+		out.Enrichment.GeoIP.Token = keptGeoIP
+	}
 	out.Voipmonitor.PasswordSet = false
+	out.Enrichment.PSTN.TokenSet = false
+	out.Enrichment.GeoIP.TokenSet = false
+	// Fill zero enrichment URLs from defaults when upgrading old documents.
+	defaults := Defaults().Enrichment
+	if out.Enrichment.PSTN.APIURL == "" {
+		out.Enrichment.PSTN.APIURL = defaults.PSTN.APIURL
+	}
+	if out.Enrichment.GeoIP.APIURL == "" {
+		out.Enrichment.GeoIP.APIURL = defaults.GeoIP.APIURL
+	}
 	return out, nil
 }
 

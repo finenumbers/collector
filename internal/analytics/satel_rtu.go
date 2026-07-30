@@ -59,6 +59,12 @@ type SatelRTURecord struct {
 	SrcGatekeeperAddress       string
 	RemoteSrcSigAddress        string
 	RemoteDstSigAddress        string
+	RemoteSrcGeoipISO          string
+	RemoteSrcGeoipCity         string
+	RemoteSrcASNOrg            string
+	RemoteDstGeoipISO          string
+	RemoteDstGeoipCity         string
+	RemoteDstASNOrg            string
 	RemoteSrcMediaAddress      string
 	RemoteDstMediaAddress      string
 	LocalSrcSigAddress         string
@@ -196,6 +202,12 @@ type SatelRTUCallRow struct {
 	SrcGatekeeperAddress    string            `json:"srcGatekeeperAddress"`
 	RemoteSrcSigAddress     string            `json:"remoteSrcSigAddress"`
 	RemoteDstSigAddress     string            `json:"remoteDstSigAddress"`
+	RemoteSrcGeoipISO       string            `json:"remoteSrcGeoipIso"`
+	RemoteSrcGeoipCity      string            `json:"remoteSrcGeoipCity"`
+	RemoteSrcASNOrg         string            `json:"remoteSrcAsnOrg"`
+	RemoteDstGeoipISO       string            `json:"remoteDstGeoipIso"`
+	RemoteDstGeoipCity      string            `json:"remoteDstGeoipCity"`
+	RemoteDstASNOrg         string            `json:"remoteDstAsnOrg"`
 	RemoteSrcMediaAddress   string            `json:"remoteSrcMediaAddress"`
 	RemoteDstMediaAddress   string            `json:"remoteDstMediaAddress"`
 	LocalSrcSigAddress      string            `json:"localSrcSigAddress"`
@@ -297,7 +309,10 @@ func (c *Client) InsertSatelRTUBatch(
 		in_ani_screening,in_ani_presentation,out_ani_screening,out_ani_presentation,
 		in_lrn,retrieved_lrn,lrn,ext_lrn,out_lrn,lnp_server,
 		signal_node_name,src_gatekeeper_address,
-		remote_src_sig_address,remote_dst_sig_address,remote_src_media_address,
+		remote_src_sig_address,remote_dst_sig_address,
+		remote_src_geoip_iso,remote_src_geoip_city,remote_src_asn_org,
+		remote_dst_geoip_iso,remote_dst_geoip_city,remote_dst_asn_org,
+		remote_src_media_address,
 		remote_dst_media_address,local_src_sig_address,local_dst_sig_address,
 		local_src_media_address,local_dst_media_address,in_leg_proto,out_leg_proto,
 		in_leg_transport_proto,out_leg_transport_proto,conf_id,in_leg_call_id,out_leg_call_id,
@@ -338,7 +353,10 @@ func (c *Client) InsertSatelRTUBatch(
 			record.OutANIPresentation, record.InLRN, record.RetrievedLRN, record.LRN,
 			record.ExtLRN, record.OutLRN, record.LNPServer,
 			record.SignalNodeName, record.SrcGatekeeperAddress, record.RemoteSrcSigAddress,
-			record.RemoteDstSigAddress, record.RemoteSrcMediaAddress,
+			record.RemoteDstSigAddress,
+			record.RemoteSrcGeoipISO, record.RemoteSrcGeoipCity, record.RemoteSrcASNOrg,
+			record.RemoteDstGeoipISO, record.RemoteDstGeoipCity, record.RemoteDstASNOrg,
+			record.RemoteSrcMediaAddress,
 			record.RemoteDstMediaAddress, record.LocalSrcSigAddress,
 			record.LocalDstSigAddress, record.LocalSrcMediaAddress,
 			record.LocalDstMediaAddress, record.InLegProto, record.OutLegProto,
@@ -493,6 +511,8 @@ func (c *Client) listSatelRTUCallsPage(
 			c.conf_id,c.in_leg_call_id,c.out_leg_call_id,c.src_in_leg_conf_id,
 			c.src_in_leg_call_id,c.src_out_leg_call_id,c.signal_node_name,
 			c.src_gatekeeper_address,c.remote_src_sig_address,c.remote_dst_sig_address,
+			c.remote_src_geoip_iso,c.remote_src_geoip_city,c.remote_src_asn_org,
+			c.remote_dst_geoip_iso,c.remote_dst_geoip_city,c.remote_dst_asn_org,
 			c.remote_src_media_address,c.remote_dst_media_address,c.local_src_sig_address,
 			c.local_dst_sig_address,c.local_src_media_address,c.local_dst_media_address,
 			c.in_leg_codecs,c.out_leg_codecs,c.disconnect_code,c.disconnect_text,
@@ -573,7 +593,10 @@ func (c *Client) listSatelRTUCallsPage(
 			&row.OutLegTransportProto, &row.ConfID, &row.InLegCallID, &row.OutLegCallID,
 			&row.SrcInLegConfID, &row.SrcInLegCallID, &row.SrcOutLegCallID,
 			&row.SignalNodeName, &row.SrcGatekeeperAddress, &row.RemoteSrcSigAddress,
-			&row.RemoteDstSigAddress, &row.RemoteSrcMediaAddress,
+			&row.RemoteDstSigAddress,
+			&row.RemoteSrcGeoipISO, &row.RemoteSrcGeoipCity, &row.RemoteSrcASNOrg,
+			&row.RemoteDstGeoipISO, &row.RemoteDstGeoipCity, &row.RemoteDstASNOrg,
+			&row.RemoteSrcMediaAddress,
 			&row.RemoteDstMediaAddress, &row.LocalSrcSigAddress, &row.LocalDstSigAddress,
 			&row.LocalSrcMediaAddress, &row.LocalDstMediaAddress, &row.InLegCodecs,
 			&row.OutLegCodecs, &row.DisconnectCode, &row.DisconnectText,

@@ -19,8 +19,10 @@ import (
 	"collector/internal/customprojection"
 	"collector/internal/exportworker"
 	ftpclient "collector/internal/ftp"
+	"collector/internal/geoiplookup"
 	"collector/internal/httpapi"
 	"collector/internal/ingest"
+	"collector/internal/lookuptelemetry"
 	"collector/internal/pstnlookup"
 	"collector/internal/reconciliation"
 	"collector/internal/retention"
@@ -51,9 +53,9 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] == "pstn-enrich-satel" {
-		if err := runPSTNEnrichSatel(ctx, cfg); err != nil {
-			slog.Error("pstn enrich satel failed", "error", err)
+	if len(os.Args) > 1 && (os.Args[1] == "satel-enrich" || os.Args[1] == "pstn-enrich-satel") {
+		if err := runSatelEnrich(ctx, cfg); err != nil {
+			slog.Error("satel enrich failed", "error", err)
 			os.Exit(1)
 		}
 		return
@@ -183,10 +185,21 @@ func main() {
 	if runExport {
 		apiExportHealth = exportHealth
 	}
+	var cdrWatcher *ingest.CDRWatcher
+	applyEnrichmentClients := func(doc runtimesettings.Document) {
+		pstn := pstnlookup.New(doc.Enrichment.PSTN.APIURL, doc.Enrichment.PSTN.Token, doc.Enrichment.PSTN.Enabled)
+		geoip := geoiplookup.New(doc.Enrichment.GeoIP.APIURL, doc.Enrichment.GeoIP.Token, doc.Enrichment.GeoIP.Enabled)
+		lookuptelemetry.Default.SetState("pstn", pstn.Enabled(), doc.Enrichment.PSTN.Token != "")
+		lookuptelemetry.Default.SetState("geoip", geoip.Enabled(), doc.Enrichment.GeoIP.Token != "")
+		if cdrWatcher != nil {
+			cdrWatcher.SetEnrichmentClients(pstn, geoip)
+		}
+	}
 	applyRuntimeDocument := func(doc runtimesettings.Document) {
 		runtime.Replace(doc)
 		applyProjectionGate(doc)
 		applyClickHouseAdmission(doc)
+		applyEnrichmentClients(doc)
 		if err := writeContainerLimitsEnv("/data/spool/container-limits.env", doc); err != nil {
 			slog.Error("container limits env write failed", "error", err)
 		}
@@ -194,9 +207,12 @@ func main() {
 			"projectionEnabled", doc.Projection.Enabled,
 			"projectionThreads", doc.Projection.Threads,
 			"voipmonitorEnabled", doc.Voipmonitor.Enabled,
+			"pstnEnrichmentEnabled", doc.Enrichment.PSTN.Enabled && doc.Enrichment.PSTN.Token != "",
+			"geoipEnrichmentEnabled", doc.Enrichment.GeoIP.Enabled && doc.Enrichment.GeoIP.Token != "",
 			"clickhouseAdmissionCapacity", doc.Platform.ClickHouseAdmissionCapacity,
 			"apiMemory", doc.Containers.APIMemory)
 	}
+	applyEnrichmentClients(runtime.Snapshot())
 
 	apiServer := &httpapi.Server{
 		Config: cfg, Store: control, Analytics: warehouse,
@@ -252,18 +268,18 @@ func main() {
 				},
 			)
 		}()
+		cdrWatcher = &ingest.CDRWatcher{
+			Root: "/data/cdr", Store: control, Analytics: warehouse, Archive: rawArchive,
+			CoverageThresholdsFn: func() analytics.CoverageThresholds {
+				return coverageThresholds(runtime.Snapshot())
+			},
+			CustomProjectionEnabledFn: func() bool {
+				return runtime.Snapshot().Projection.Enabled
+			},
+		}
+		applyEnrichmentClients(runtime.Snapshot())
 		go func() {
-			watcher := ingest.CDRWatcher{
-				Root: "/data/cdr", Store: control, Analytics: warehouse, Archive: rawArchive,
-				PSTN: pstnlookup.New(cfg.PstnLookupURL, cfg.PstnLookupToken),
-				CoverageThresholdsFn: func() analytics.CoverageThresholds {
-					return coverageThresholds(runtime.Snapshot())
-				},
-				CustomProjectionEnabledFn: func() bool {
-					return runtime.Snapshot().Projection.Enabled
-				},
-			}
-			errs <- watcher.Run(ctx)
+			errs <- cdrWatcher.Run(ctx)
 		}()
 	}
 	hostname, _ := os.Hostname()
@@ -351,15 +367,24 @@ func runMigrationPreflight(ctx context.Context, cfg config.Config) error {
 	return report.Validate()
 }
 
-func runPSTNEnrichSatel(ctx context.Context, cfg config.Config) error {
-	if cfg.PstnLookupToken == "" {
-		return fmt.Errorf("PSTN_LOOKUP_TOKEN is required for pstn-enrich-satel")
+func runSatelEnrich(ctx context.Context, cfg config.Config) error {
+	control, err := openPostgres(ctx, cfg.PostgresURL)
+	if err != nil {
+		return err
+	}
+	doc, err := control.EnsureRuntimeSettings(ctx, runtimesettings.FromEnv(cfg))
+	if err != nil {
+		return err
+	}
+	pstn := pstnlookup.New(doc.Enrichment.PSTN.APIURL, doc.Enrichment.PSTN.Token, doc.Enrichment.PSTN.Enabled)
+	geoip := geoiplookup.New(doc.Enrichment.GeoIP.APIURL, doc.Enrichment.GeoIP.Token, doc.Enrichment.GeoIP.Enabled)
+	if !pstn.Enabled() && !geoip.Enabled() {
+		return fmt.Errorf("enable PSTN and/or GeoIP enrichment with tokens in Настройки → Параметры")
 	}
 	warehouse, err := openClickHouse(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	client := pstnlookup.New(cfg.PstnLookupURL, cfg.PstnLookupToken)
 	const pageSize = 500
 	after := uuid.Nil
 	var totalRows int
@@ -367,19 +392,22 @@ func runPSTNEnrichSatel(ctx context.Context, cfg config.Config) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		records, err := warehouse.ListSatelRTURecordsNeedingPSTNEnrichment(ctx, pageSize, after)
+		records, err := warehouse.ListSatelRTURecordsNeedingEnrichment(ctx, pageSize, after)
 		if err != nil {
 			return err
 		}
 		if len(records) == 0 {
 			break
 		}
-		analytics.EnrichSatelRecords(ctx, client, records)
+		analytics.EnrichSatelRecords(ctx, pstn, geoip, records)
 		now := time.Now().UTC()
 		toInsert := make([]analytics.SatelRTURecord, 0, len(records))
 		for _, record := range records {
 			if record.BillANIOperator == "" && record.BillDNISOperator == "" &&
-				record.BillANIRegion == "" && record.BillDNISRegion == "" {
+				record.BillANIRegion == "" && record.BillDNISRegion == "" &&
+				record.RemoteSrcGeoipISO == "" && record.RemoteDstGeoipISO == "" &&
+				record.RemoteSrcGeoipCity == "" && record.RemoteDstGeoipCity == "" &&
+				record.RemoteSrcASNOrg == "" && record.RemoteDstASNOrg == "" {
 				continue
 			}
 			record.IngestedAt = now
@@ -392,14 +420,14 @@ func runPSTNEnrichSatel(ctx context.Context, cfg config.Config) error {
 		}
 		totalRows += len(toInsert)
 		after = records[len(records)-1].RecordID
-		slog.Info("pstn enrich satel progress",
+		slog.Info("satel enrich progress",
 			"enriched", totalRows, "page", len(records), "written", len(toInsert),
 			"lastRecordId", after.String())
 		if len(records) < pageSize {
 			break
 		}
 	}
-	slog.Info("pstn enrich satel complete", "rows", totalRows)
+	slog.Info("satel enrich complete", "rows", totalRows)
 	return nil
 }
 

@@ -87,6 +87,10 @@ type RuntimeSettings = {
     rateLimitPerSec: number
     useShareUrl: boolean
   }
+  enrichment?: {
+    pstn: { enabled: boolean; apiUrl: string; token?: string; tokenSet?: boolean }
+    geoip: { enabled: boolean; apiUrl: string; token?: string; tokenSet?: boolean }
+  }
   platform: {
     clickhouseAdmissionCapacity: number
     exportPageSize: number
@@ -297,6 +301,22 @@ type OperationalDiagnostics = {
     running: number
     oldestAge: number
   }
+  enrichmentApis?: {
+    pstn?: EnrichmentAPIDiagnostics
+    geoip?: EnrichmentAPIDiagnostics
+  }
+}
+type EnrichmentAPIDiagnostics = {
+  enabled: boolean
+  configured: boolean
+  lookups: number
+  cacheHits: number
+  errors: number
+  errorRate: number
+  p95LatencyMs: number
+  lastError?: string
+  lastSuccessAt?: string
+  healthy: boolean
 }
 type CallRow = {
   recordId: string
@@ -443,6 +463,12 @@ type SatelCdrRow = {
   srcGatekeeperAddress?: string
   remoteSrcSigAddress?: string
   remoteDstSigAddress?: string
+  remoteSrcGeoipIso?: string
+  remoteSrcGeoipCity?: string
+  remoteSrcAsnOrg?: string
+  remoteDstGeoipIso?: string
+  remoteDstGeoipCity?: string
+  remoteDstAsnOrg?: string
   remoteSrcMediaAddress?: string
   remoteDstMediaAddress?: string
   localSrcSigAddress?: string
@@ -1667,6 +1693,17 @@ function OperationalDiagnosticsPanel() {
         {formatCount(value.exports?.queued)} / {formatCount(value.exports?.running)} /
         {formatDurationNanos(value.exports?.oldestAge)}
       </strong></span>
+      {(['pstn', 'geoip'] as const).map((name) => {
+        const api = value.enrichmentApis?.[name]
+        const label = name === 'pstn' ? 'PSTN lookup' : 'GeoIP lookup'
+        return <span key={name}>{label}: <strong>
+          {api?.enabled ? (api.healthy ? 'ok' : 'breach') : 'off'}
+          {api?.configured ? '' : ' · no token'} ·
+          errors {formatCount(api?.errors)} ·
+          p95 {formatCount(api?.p95LatencyMs)} мс
+          {api?.lastError ? ` · ${api.lastError}` : ''}
+        </strong></span>
+      })}
       <span>Снимок: <strong>{formatTime(value.generatedAt, 'UTC')}</strong></span>
       {devices.length > 0 && <div className="diagnostic-device-list">
         <strong>Projection по устройствам</strong>
@@ -2755,6 +2792,18 @@ function SystemSettingsPage({ user }: { user: User }) {
 function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
   return {
     ...value,
+    enrichment: value.enrichment || {
+      pstn: {
+        enabled: true,
+        apiUrl: 'https://pstn.finenumbers.com/api/v1/lookup',
+        tokenSet: false,
+      },
+      geoip: {
+        enabled: true,
+        apiUrl: 'https://geoip.finenumbers.com/api/v1/lookup',
+        tokenSet: false,
+      },
+    },
     containers: value.containers || {
       apiCpus: '2', apiMemory: '2G', exportCpus: '2', exportMemory: '2G',
       maintenanceCpus: '2', maintenanceMemory: '2G', appCpus: '4', appMemory: '4G',
@@ -2877,20 +2926,34 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
 }) {
   const [form, setForm] = useState(() => normalizeRuntimeSettings(value))
   const [password, setPassword] = useState('')
+  const [pstnToken, setPstnToken] = useState('')
+  const [geoipToken, setGeoipToken] = useState('')
   const updateProjection = (patch: Partial<RuntimeSettings['projection']>) =>
     setForm((current) => ({ ...current, projection: { ...current.projection, ...patch } }))
   const updateCoverage = (patch: Partial<RuntimeSettings['coverage']>) =>
     setForm((current) => ({ ...current, coverage: { ...current.coverage, ...patch } }))
   const updateVoip = (patch: Partial<RuntimeSettings['voipmonitor']>) =>
     setForm((current) => ({ ...current, voipmonitor: { ...current.voipmonitor, ...patch } }))
+  const updateEnrichment = (key: 'pstn' | 'geoip', patch: Partial<NonNullable<RuntimeSettings['enrichment']>['pstn']>) =>
+    setForm((current) => {
+      const enrichment = normalizeRuntimeSettings(current).enrichment!
+      return {
+        ...current,
+        enrichment: {
+          ...enrichment,
+          [key]: { ...enrichment[key], ...patch },
+        },
+      }
+    })
   const updatePlatform = (patch: Partial<RuntimeSettings['platform']>) =>
     setForm((current) => ({ ...current, platform: { ...current.platform, ...patch } }))
   const updateContainers = (patch: Partial<RuntimeSettings['containers']>) =>
     setForm((current) => ({ ...current, containers: { ...current.containers, ...patch } }))
+  const enrichment = form.enrichment || normalizeRuntimeSettings(form).enrichment!
   return <section className="runtime-settings">
     <div className="page-heading"><div><h3>Операционные параметры</h3>
-      <p>AntiFraud projection, coverage, VoIPmonitor и export. Значения хранятся в БД и
-        применяются без правки .env (секреты/инфраструктура остаются в .env).</p></div></div>
+      <p>AntiFraud projection, coverage, VoIPmonitor, обогащение CDR и export. Значения хранятся в БД и
+        применяются без правки .env (инфраструктурные секреты остаются в .env).</p></div></div>
 
     <article className="runtime-card">
       <h4>Custom AntiFraud projection</h4>
@@ -2978,6 +3041,30 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
     </article>
 
     <article className="runtime-card">
+      <h4>Обогащение CDR (PSTN / GeoIP)</h4>
+      <p className="runtime-note">Токены для FineNumbers PSTN и GeoIP. Seed из `.env` только при пустой БД;
+        дальше авторитетны эти параметры (hot-apply ~2 с).</p>
+      <label className="checkbox-row"><input type="checkbox" checked={enrichment.pstn.enabled}
+        onChange={(e) => updateEnrichment('pstn', { enabled: e.target.checked })} /> PSTN включён</label>
+      <div className="runtime-grid">
+        <label>PSTN API URL<input value={enrichment.pstn.apiUrl}
+          onChange={(e) => updateEnrichment('pstn', { apiUrl: e.target.value })} /></label>
+        <label>PSTN token<input type="password"
+          placeholder={enrichment.pstn.tokenSet ? '•••••••• (не менять)' : 'токен'}
+          value={pstnToken} onChange={(e) => setPstnToken(e.target.value)} /></label>
+      </div>
+      <label className="checkbox-row"><input type="checkbox" checked={enrichment.geoip.enabled}
+        onChange={(e) => updateEnrichment('geoip', { enabled: e.target.checked })} /> GeoIP включён</label>
+      <div className="runtime-grid">
+        <label>GeoIP API URL<input value={enrichment.geoip.apiUrl}
+          onChange={(e) => updateEnrichment('geoip', { apiUrl: e.target.value })} /></label>
+        <label>GeoIP token<input type="password"
+          placeholder={enrichment.geoip.tokenSet ? '•••••••• (не менять)' : 'токен'}
+          value={geoipToken} onChange={(e) => setGeoipToken(e.target.value)} /></label>
+      </div>
+    </article>
+
+    <article className="runtime-card">
       <h4>Платформа</h4>
       <div className="runtime-grid">
         <label>ClickHouse admission capacity<input type="number" min={4} max={128}
@@ -3027,6 +3114,16 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
           voipmonitor: {
             ...form.voipmonitor,
             password: password || undefined,
+          },
+          enrichment: {
+            pstn: {
+              ...enrichment.pstn,
+              token: pstnToken || undefined,
+            },
+            geoip: {
+              ...enrichment.geoip,
+              token: geoipToken || undefined,
+            },
           },
         }
         void onSave(payload)

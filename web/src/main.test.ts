@@ -22,6 +22,8 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('RuntimeSettingsEditor')
     expect(main).toContain("'/system/runtime-settings'")
     expect(main).toContain('Параметры')
+    expect(main).toContain('Обогащение CDR (PSTN / GeoIP)')
+    expect(main).toContain('enrichmentApis')
     expect(main).toContain('Лимиты контейнеров Docker')
     expect(main).toContain('container-limits.env')
   })

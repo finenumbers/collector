@@ -132,8 +132,11 @@ func main() {
 	applyClickHouseAdmission := func(doc runtimesettings.Document) {
 		// Replaces the admission manager; in-flight queries keep their current
 		// lease/limits until they finish, while new queries use the new capacity.
+		// ProjectionMemoryBytes raises CustomReplay/CustomReconcile CH
+		// max_memory_usage above hardcoded floors (does not lower them).
 		warehouse.ConfigureWorkloads(analytics.WorkloadOptions{
-			Capacity: doc.Platform.ClickHouseAdmissionCapacity,
+			Capacity:              doc.Platform.ClickHouseAdmissionCapacity,
+			ProjectionMemoryBytes: doc.Projection.MaxMemoryBytes,
 		})
 	}
 	applyProjectionGate(runtimeDoc)
@@ -417,6 +420,16 @@ func runSatelEnrich(ctx context.Context, cfg config.Config) error {
 			return err
 		}
 		totalRows += written
+		// Never advance past unresolved Operator/GAR gaps for eligible phones.
+		if pstn.Enabled() && pageNeedsPSTNEnrichment(records) {
+			slog.Warn("satel enrich PSTN gaps unresolved, retrying page",
+				"page", len(records), "written", written,
+				"lastRecordId", records[len(records)-1].RecordID.String())
+			if !sleepContext(ctx, 2*time.Second) {
+				return ctx.Err()
+			}
+			continue
+		}
 		after = records[len(records)-1].RecordID
 		slog.Info("satel enrich progress",
 			"enriched", totalRows, "page", len(records), "written", written,
@@ -446,6 +459,15 @@ func (e *enrichmentRuntime) get() (*pstnlookup.Client, *geoiplookup.Client, int)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.pstn, e.geoip, e.workers
+}
+
+func pageNeedsPSTNEnrichment(records []analytics.SatelRTURecord) bool {
+	for _, record := range records {
+		if analytics.RecordNeedsPSTNEnrichment(record) {
+			return true
+		}
+	}
+	return false
 }
 
 func enrichAndWriteSatelPage(
@@ -531,6 +553,17 @@ func runEnrichmentCatchUp(
 				return
 			}
 			slog.Error("enrichment catch-up write failed", "error", err)
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+			continue
+		}
+		// Keep retrying the same cursor while eligible Operator/GAR gaps remain
+		// (rate limit / transient API errors) instead of skipping old calls.
+		if pstn != nil && pstn.Enabled() && pageNeedsPSTNEnrichment(records) {
+			slog.Warn("enrichment catch-up PSTN gaps unresolved, retrying page",
+				"page", len(records), "written", written,
+				"lastRecordId", records[len(records)-1].RecordID.String())
 			if !sleepContext(ctx, sleepFor) {
 				return
 			}

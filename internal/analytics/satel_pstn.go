@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"collector/internal/geoiplookup"
@@ -11,8 +12,20 @@ import (
 	"github.com/google/uuid"
 )
 
-// EnrichSatelRecords fills PSTN operator/region and GeoIP fields in parallel.
-// Missing clients/tokens or lookup failures leave fields empty; never fails ingest.
+// RecordNeedsPSTNEnrichment reports whether any eligible ANI/DNIS side still
+// lacks operator or garTerritory (historical gaps included).
+func RecordNeedsPSTNEnrichment(record SatelRTURecord) bool {
+	return pstnlookup.SideNeedsEnrichment(
+		record.BillANI, record.BillANIOperator, record.BillANIRegion,
+	) || pstnlookup.SideNeedsEnrichment(
+		record.BillDNIS, record.BillDNISOperator, record.BillDNISRegion,
+	)
+}
+
+// EnrichSatelRecords fills PSTN operator/garTerritory and GeoIP fields in parallel.
+// Only eligible phones (73/74/78/79) with missing operator or garTerritory are
+// looked up — including historical gaps for catch-up. Successful API results
+// overwrite that side; failures leave existing values untouched. Never fails ingest.
 func EnrichSatelRecords(
 	ctx context.Context, pstn *pstnlookup.Client, geoip *geoiplookup.Client, records []SatelRTURecord,
 	workers int,
@@ -33,10 +46,14 @@ func EnrichSatelRecords(
 			defer wg.Done()
 			phones := make([]string, 0, len(records)*2)
 			for _, record := range records {
-				if record.BillANI != "" {
+				if pstnlookup.SideNeedsEnrichment(
+					record.BillANI, record.BillANIOperator, record.BillANIRegion,
+				) {
 					phones = append(phones, record.BillANI)
 				}
-				if record.BillDNIS != "" {
+				if pstnlookup.SideNeedsEnrichment(
+					record.BillDNIS, record.BillDNISOperator, record.BillDNISRegion,
+				) {
 					phones = append(phones, record.BillDNIS)
 				}
 			}
@@ -45,13 +62,17 @@ func EnrichSatelRecords(
 			}
 			byPhone := pstn.LookupMany(ctx, phones, workers)
 			for index := range records {
-				aniOp, aniReg, dnisOp, dnisReg := pstnlookup.ApplyToPhones(
+				aniOp, aniReg, dnisOp, dnisReg, aniOK, dnisOK := pstnlookup.ApplyToPhones(
 					records[index].BillANI, records[index].BillDNIS, byPhone,
 				)
-				records[index].BillANIOperator = aniOp
-				records[index].BillANIRegion = aniReg
-				records[index].BillDNISOperator = dnisOp
-				records[index].BillDNISRegion = dnisReg
+				if aniOK {
+					records[index].BillANIOperator = aniOp
+					records[index].BillANIRegion = aniReg
+				}
+				if dnisOK {
+					records[index].BillDNISOperator = dnisOp
+					records[index].BillDNISRegion = dnisReg
+				}
 			}
 		}()
 	}
@@ -173,9 +194,67 @@ func scanSatelEnrichmentRecord(scanner interface {
 	return record, err
 }
 
+// satelNationalPhoneExpr strips non-digits and a leading RU 7/8 on 11-digit forms.
+func satelNationalPhoneExpr(column string) string {
+	digits := fmt.Sprintf("replaceRegexpAll(%s, '[^0-9]', '')", column)
+	return fmt.Sprintf(
+		"multiIf(length(%[1]s)=11 AND (startsWith(%[1]s,'7') OR startsWith(%[1]s,'8')), substring(%[1]s,2), %[1]s)",
+		digits,
+	)
+}
+
+// satelPSTNEligibleSideExpr is true for national 10-digit numbers starting with
+// 3/4/8/9 (country-prefixed 73/74/78/79).
+func satelPSTNEligibleSideExpr(column string) string {
+	national := satelNationalPhoneExpr(column)
+	return fmt.Sprintf("(length(%s)=10 AND match(%s, '^[3489]'))", national, national)
+}
+
+func satelPSTNSideCompleteExpr(operatorCol, regionCol string) string {
+	return fmt.Sprintf("(%s!='' AND %s!='')", operatorCol, regionCol)
+}
+
+func satelPSTNNeedsEnrichmentExpr() string {
+	aniEligible := satelPSTNEligibleSideExpr("bill_ani")
+	dnisEligible := satelPSTNEligibleSideExpr("bill_dnis")
+	aniComplete := satelPSTNSideCompleteExpr("bill_ani_operator", "bill_ani_region")
+	dnisComplete := satelPSTNSideCompleteExpr("bill_dnis_operator", "bill_dnis_region")
+	return fmt.Sprintf(`((%s AND NOT %s) OR (%s AND NOT %s))`,
+		aniEligible, aniComplete, dnisEligible, dnisComplete)
+}
+
+func satelPSTNCallEligibleExpr() string {
+	return fmt.Sprintf("(%s OR %s)",
+		satelPSTNEligibleSideExpr("bill_ani"), satelPSTNEligibleSideExpr("bill_dnis"))
+}
+
+// Call is PSTN-enriched when every eligible side has both operator and garTerritory.
+func satelPSTNCallEnrichedExpr() string {
+	aniEligible := satelPSTNEligibleSideExpr("bill_ani")
+	dnisEligible := satelPSTNEligibleSideExpr("bill_dnis")
+	aniComplete := satelPSTNSideCompleteExpr("bill_ani_operator", "bill_ani_region")
+	dnisComplete := satelPSTNSideCompleteExpr("bill_dnis_operator", "bill_dnis_region")
+	return fmt.Sprintf(`(%s AND (NOT %s OR %s) AND (NOT %s OR %s))`,
+		satelPSTNCallEligibleExpr(), aniEligible, aniComplete, dnisEligible, dnisComplete)
+}
+
+// satelPSTNAllColumnsFilledExpr is true when every PSTN API column on the row is set
+// (Оператор A/B + Регион A/B). Used by the softswitch Dashboard KPI.
+func satelPSTNAllColumnsFilledExpr() string {
+	return `(bill_ani_operator!='' AND bill_dnis_operator!=''
+		AND bill_ani_region!='' AND bill_dnis_region!='')`
+}
+
+// satelGeoipAllColumnsFilledExpr is true when every GeoIP API column on the row is set
+// (ISO/City/ASN for src and dst). Used by the softswitch Dashboard KPI.
+func satelGeoipAllColumnsFilledExpr() string {
+	return `(remote_src_geoip_iso!='' AND remote_dst_geoip_iso!=''
+		AND remote_src_geoip_city!='' AND remote_dst_geoip_city!=''
+		AND remote_src_asn_org!='' AND remote_dst_asn_org!='')`
+}
+
 func satelNeedsEnrichmentPredicate() string {
-	return `((bill_ani!='' OR bill_dnis!='') AND bill_ani_operator='' AND bill_dnis_operator=''
-					AND bill_ani_region='' AND bill_dnis_region='')
+	return `(` + satelPSTNNeedsEnrichmentExpr() + `)
 				OR ((remote_src_sig_address!='' OR remote_dst_sig_address!='')
 					AND remote_src_geoip_iso='' AND remote_dst_geoip_iso=''
 					AND remote_src_geoip_city='' AND remote_dst_geoip_city=''
@@ -250,9 +329,8 @@ func (c *Client) EnrichmentCoverage(ctx context.Context, windowSeconds uint64) (
 	err = c.Conn.QueryRow(ctx, `
 		SELECT
 			count(),
-			countIf(bill_ani!='' OR bill_dnis!=''),
-			countIf(bill_ani_operator!='' OR bill_dnis_operator!=''
-				OR bill_ani_region!='' OR bill_dnis_region!=''),
+			countIf(`+satelPSTNCallEligibleExpr()+`),
+			countIf(`+satelPSTNCallEnrichedExpr()+`),
 			countIf(remote_src_sig_address!='' OR remote_dst_sig_address!=''),
 			countIf(remote_src_geoip_iso!='' OR remote_dst_geoip_iso!=''
 				OR remote_src_geoip_city!='' OR remote_dst_geoip_city!=''

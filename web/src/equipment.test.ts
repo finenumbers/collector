@@ -74,6 +74,8 @@ describe('equipment templates', () => {
     expect(main).toContain('label="GeoIP"')
     expect(main).toContain('softswitchTotals.pstnEnrichedCalls')
     expect(main).toContain('softswitchTotals.geoipEnrichedCalls')
+    expect(main).toContain('все поля PSTN')
+    expect(main).toContain('все поля GeoIP')
     expect(main).toContain('label="Объем данных"')
     expect(main).toContain('formatStorageMB')
     expect(styles).toContain('flex-wrap: nowrap')

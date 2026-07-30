@@ -156,12 +156,14 @@ Health endpoints:
 
 Baseline host (до ~10 SMG / 100 CPS): 16 vCPU / 64 GiB / NVMe ≥2 TiB — см. выше.
 In-process query ceilings (`internal/analytics/workload.go`): Interactive 512 MiB /
-2 threads (UI list/cards), CustomReplay 1 GiB / 1 thread (projection write),
-CustomReconcile 256 MiB, Export 512 MiB. Dense AF hours that hit memory overflow
-are windowed in-process; keep headroom so Interactive card lookups and CustomReplay
-do not contend on a saturated CH host. Prefer leaving Postgres/ClickHouse without
-hard Docker memory caps below these ceilings unless the host is dedicated and
-measured.
+2 threads (UI list/cards), CustomReplay 1 GiB / 1 thread (projection load/write),
+CustomReconcile 1 GiB, Export 512 MiB. Runtime `projection.maxMemoryBytes` bounds
+the Go hour payload **and** may raise CustomReplay/CustomReconcile ClickHouse
+`max_memory_usage` above those floors (it does not lower them). Dense AF hours that
+hit memory overflow are windowed in-process; keep headroom so Interactive card
+lookups and CustomReplay do not contend on a saturated CH host. Prefer leaving
+Postgres/ClickHouse without hard Docker memory caps below these ceilings unless
+the host is dedicated and measured.
 
 Операционные параметры AntiFraud / coverage / VoIPmonitor / export / ClickHouse
 admission / **лимиты контейнеров** управляются в **Настройки → Параметры**

@@ -94,7 +94,7 @@ func Defaults() Document {
 			BatchSize:       128,
 			MaxEvents:       50_000,
 			Threads:         2,
-			MaxMemoryBytes:  256 << 20,
+			MaxMemoryBytes:  1024 << 20,
 			Sleep:           "1s",
 			Lease:           "2m",
 			ResponseTimeout: "5s",

@@ -47,7 +47,11 @@ interpretation is independent of removed Syslog parsing.
 header-driven Satel RTU model. The full vendor row remains in `raw_fields`.
 Satel and Eltex tables are intentionally separate. Migration 031 adds
 `bill_ani_operator`, `bill_dnis_operator`, `bill_ani_region`, and
-`bill_dnis_region` from the PSTN lookup API. Migration 032 adds
+`bill_dnis_region` from the PSTN lookup API (`operator` and `garTerritory`;
+UI «Регион A/B» stores territory). Only numbers matching prefixes 73/74/78/79
+are looked up; both operator and territory are required. Catch-up / `satel-enrich`
+must fill historical gaps for those prefixes and will not advance past unresolved
+eligible sides. Migration 032 adds
 `remote_src/dst_geoip_iso`, `remote_src/dst_geoip_city`, and
 `remote_src/dst_asn_org` from GeoIP lookup on Remote src/dst sig (host without
 port). Tokens live in runtime settings UI; seed from env on empty DB; backfill

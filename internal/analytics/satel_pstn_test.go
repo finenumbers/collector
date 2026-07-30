@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,8 +23,9 @@ func TestEnrichSatelRecordsAppliesLookup(t *testing.T) {
 			"found": true,
 			"phone": phone,
 			"data": map[string]any{
-				"operator": "Op-" + phone,
-				"region":   "Reg-" + phone,
+				"operator":     "Op-" + phone,
+				"region":       "Reg-" + phone,
+				"garTerritory": "Gar-" + phone,
 			},
 		})
 	}))
@@ -62,9 +64,9 @@ func TestEnrichSatelRecordsAppliesLookup(t *testing.T) {
 	EnrichSatelRecords(context.Background(), pstn, geoip, records, 8)
 	elapsed := time.Since(start)
 	if records[0].BillANIOperator != "Op-4996660000" ||
-		records[0].BillANIRegion != "Reg-4996660000" ||
+		records[0].BillANIRegion != "Gar-4996660000" ||
 		records[0].BillDNISOperator != "Op-4951234567" ||
-		records[0].BillDNISRegion != "Reg-4951234567" {
+		records[0].BillDNISRegion != "Gar-4951234567" {
 		t.Fatalf("unexpected pstn enrichment %#v", records[0])
 	}
 	if records[0].RemoteSrcGeoipISO != "RU" ||
@@ -85,6 +87,88 @@ func TestEnrichSatelRecordsAppliesLookup(t *testing.T) {
 	}
 }
 
+func TestEnrichSatelRecordsSkipsNonEligiblePhones(t *testing.T) {
+	var pstnHits atomic.Int32
+	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pstnHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer pstnServer.Close()
+	pstn := pstnlookup.New(pstnServer.URL, "token", true)
+	pstn.HTTPClient = pstnServer.Client()
+	records := []SatelRTURecord{
+		{BillANI: "71234567890", BillDNIS: "15551234567"},
+	}
+	EnrichSatelRecords(context.Background(), pstn, nil, records, 4)
+	if pstnHits.Load() != 0 {
+		t.Fatalf("pstn hits=%d want 0 for non-eligible phones", pstnHits.Load())
+	}
+	if records[0].BillANIOperator != "" || records[0].BillANIRegion != "" {
+		t.Fatalf("expected empty PSTN fields, got %#v", records[0])
+	}
+}
+
+func TestEnrichSatelRecordsLeavesEmptyOnIncompleteLookup(t *testing.T) {
+	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"found": true,
+			"data": map[string]any{
+				"operator":     "Op",
+				"garTerritory": "",
+			},
+		})
+	}))
+	defer pstnServer.Close()
+	pstn := pstnlookup.New(pstnServer.URL, "token", true)
+	pstn.HTTPClient = pstnServer.Client()
+	records := []SatelRTURecord{{BillANI: "9031234567"}}
+	EnrichSatelRecords(context.Background(), pstn, nil, records, 2)
+	if records[0].BillANIOperator != "" || records[0].BillANIRegion != "" {
+		t.Fatalf("incomplete lookup must leave fields empty, got %#v", records[0])
+	}
+}
+
+func TestEnrichSatelRecordsFillsHistoricalGapsWithoutWiping(t *testing.T) {
+	var hits atomic.Int32
+	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		phone := r.URL.Query().Get("phone")
+		if phone == "9031234567" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"found": true,
+			"data": map[string]any{
+				"operator":     "Op-" + phone,
+				"garTerritory": "Gar-" + phone,
+			},
+		})
+	}))
+	defer pstnServer.Close()
+	pstn := pstnlookup.New(pstnServer.URL, "token", true)
+	pstn.HTTPClient = pstnServer.Client()
+	records := []SatelRTURecord{{
+		// Historical ANI gap (operator present, garTerritory missing).
+		BillANI: "84996660000", BillANIOperator: "OldOp", BillANIRegion: "",
+		// Eligible DNIS gap; API fails — must stay empty (no wipe of siblings).
+		BillDNIS: "9031234567",
+	}}
+	EnrichSatelRecords(context.Background(), pstn, nil, records, 4)
+	if records[0].BillANIOperator != "Op-4996660000" || records[0].BillANIRegion != "Gar-4996660000" {
+		t.Fatalf("ANI gap not filled: %#v", records[0])
+	}
+	if records[0].BillDNISOperator != "" || records[0].BillDNISRegion != "" {
+		t.Fatalf("failed DNIS lookup must not invent values: %#v", records[0])
+	}
+	if hits.Load() < 2 {
+		t.Fatalf("expected lookups for both gap sides, hits=%d", hits.Load())
+	}
+	if !RecordNeedsPSTNEnrichment(records[0]) {
+		t.Fatal("DNIS gap must still need enrichment after failed lookup")
+	}
+}
+
 func TestEnrichSatelRecordsNoopWithoutClient(t *testing.T) {
 	records := []SatelRTURecord{{BillANI: "4996660000", RemoteSrcSigAddress: "1.2.3.4"}}
 	EnrichSatelRecords(context.Background(), nil, nil, records, 8)
@@ -97,5 +181,26 @@ func TestEnrichSatelRecordsNoopWithoutClient(t *testing.T) {
 	)
 	if records[0].BillANIOperator != "" || records[0].RemoteSrcGeoipISO != "" {
 		t.Fatalf("expected empty enrichment, got %#v", records[0])
+	}
+}
+
+func TestSatelPSTNEligibilitySQLHelpers(t *testing.T) {
+	if got := satelPSTNEligibleSideExpr("bill_ani"); got == "" {
+		t.Fatal("empty eligible expr")
+	}
+	if got := satelPSTNCallEnrichedExpr(); got == "" {
+		t.Fatal("empty enriched expr")
+	}
+	if got := satelPSTNAllColumnsFilledExpr(); !strings.Contains(got, "bill_ani_operator") ||
+		!strings.Contains(got, " AND ") {
+		t.Fatalf("all-columns PSTN expr = %q", got)
+	}
+	if got := satelGeoipAllColumnsFilledExpr(); !strings.Contains(got, "remote_src_asn_org") ||
+		strings.Contains(got, " OR ") {
+		t.Fatalf("all-columns GeoIP expr = %q", got)
+	}
+	needs := satelNeedsEnrichmentPredicate()
+	if needs == "" {
+		t.Fatal("empty needs predicate")
 	}
 }

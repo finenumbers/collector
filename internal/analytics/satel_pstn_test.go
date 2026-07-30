@@ -128,6 +128,30 @@ func TestEnrichSatelRecordsLeavesEmptyOnIncompleteLookup(t *testing.T) {
 	}
 }
 
+func TestEnrichSatelRecordsForcePSTNOverwritesOldRegion(t *testing.T) {
+	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		phone := r.URL.Query().Get("phone")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"found": true,
+			"data": map[string]any{
+				"operator":     "NewOp-" + phone,
+				"garTerritory": "NewGar-" + phone,
+			},
+		})
+	}))
+	defer pstnServer.Close()
+	pstn := pstnlookup.New(pstnServer.URL, "token", true)
+	pstn.HTTPClient = pstnServer.Client()
+	records := []SatelRTURecord{{
+		BillANI: "84996660000", BillANIOperator: "OldOp", BillANIRegion: "old-region-not-gar",
+	}}
+	EnrichSatelRecordsForcePSTN(context.Background(), pstn, nil, records, 2)
+	if records[0].BillANIOperator != "NewOp-4996660000" ||
+		records[0].BillANIRegion != "NewGar-4996660000" {
+		t.Fatalf("force-pstn must overwrite old region: %#v", records[0])
+	}
+}
+
 func TestEnrichSatelRecordsFillsHistoricalGapsWithoutWiping(t *testing.T) {
 	var hits atomic.Int32
 	pstnServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

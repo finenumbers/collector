@@ -69,6 +69,12 @@ describe('CDR column presets', () => {
   it('resolves satel GeoIP preset in the agreed order', () => {
     expect(resolvePresetColumns('satel', 'geoip').map((column) => column.key))
       .toEqual(SATEL_GEOIP_KEYS)
+    expect(SATEL_GEOIP_KEYS.indexOf('remoteSrcGeoipIso')).toBeLessThan(
+      SATEL_GEOIP_KEYS.indexOf('remoteDstGeoipIso'),
+    )
+    expect(SATEL_GEOIP_KEYS.indexOf('remoteDstGeoipIso')).toBeLessThan(
+      SATEL_GEOIP_KEYS.indexOf('remoteSrcGeoipCity'),
+    )
   })
 
   it('resolves satel Операторы preset in the agreed order', () => {

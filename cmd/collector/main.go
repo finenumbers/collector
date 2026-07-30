@@ -54,7 +54,13 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && (os.Args[1] == "satel-enrich" || os.Args[1] == "pstn-enrich-satel") {
-		if err := runSatelEnrich(ctx, cfg); err != nil {
+		forcePSTN := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--force-pstn" {
+				forcePSTN = true
+			}
+		}
+		if err := runSatelEnrich(ctx, cfg, forcePSTN); err != nil {
 			slog.Error("satel enrich failed", "error", err)
 			os.Exit(1)
 		}
@@ -379,7 +385,7 @@ func runMigrationPreflight(ctx context.Context, cfg config.Config) error {
 	return report.Validate()
 }
 
-func runSatelEnrich(ctx context.Context, cfg config.Config) error {
+func runSatelEnrich(ctx context.Context, cfg config.Config, forcePSTN bool) error {
 	control, err := openPostgres(ctx, cfg.PostgresURL)
 	if err != nil {
 		return err
@@ -390,7 +396,13 @@ func runSatelEnrich(ctx context.Context, cfg config.Config) error {
 	}
 	pstn := pstnlookup.New(doc.Enrichment.PSTN.APIURL, doc.Enrichment.PSTN.Token, doc.Enrichment.PSTN.Enabled)
 	geoip := geoiplookup.New(doc.Enrichment.GeoIP.APIURL, doc.Enrichment.GeoIP.Token, doc.Enrichment.GeoIP.Enabled)
-	if !pstn.Enabled() && !geoip.Enabled() {
+	if forcePSTN {
+		if !pstn.Enabled() {
+			return fmt.Errorf("--force-pstn requires PSTN enrichment enabled with a token")
+		}
+		// Rewrite Region A/B to garTerritory; skip GeoIP to keep the run focused.
+		geoip = geoiplookup.New("", "", false)
+	} else if !pstn.Enabled() && !geoip.Enabled() {
 		return fmt.Errorf("enable PSTN and/or GeoIP enrichment with tokens in Настройки → Параметры")
 	}
 	warehouse, err := openClickHouse(ctx, cfg)
@@ -408,22 +420,37 @@ func runSatelEnrich(ctx context.Context, cfg config.Config) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		records, err := warehouse.ListSatelRTURecordsNeedingEnrichment(ctx, pageSize, after)
+		var records []analytics.SatelRTURecord
+		if forcePSTN {
+			records, err = warehouse.ListSatelRTURecordsForPSTNRefresh(ctx, pageSize, after)
+		} else {
+			records, err = warehouse.ListSatelRTURecordsNeedingEnrichment(ctx, pageSize, after)
+		}
 		if err != nil {
 			return err
 		}
 		if len(records) == 0 {
 			break
 		}
-		written, err := enrichAndWriteSatelPage(ctx, warehouse, pstn, geoip, records, workers)
+		written, err := enrichAndWriteSatelPage(ctx, warehouse, pstn, geoip, records, workers, forcePSTN)
 		if err != nil {
 			return err
 		}
 		totalRows += written
-		// Never advance past unresolved Operator/GAR gaps for eligible phones.
-		if pstn.Enabled() && pageNeedsPSTNEnrichment(records) {
+		// Gap-fill mode: never advance past unresolved Operator/GAR gaps.
+		// Force rewrite: advance after a successful write; re-run CLI if API errors remain.
+		if !forcePSTN && pstn.Enabled() && pageNeedsPSTNEnrichment(records) {
 			slog.Warn("satel enrich PSTN gaps unresolved, retrying page",
 				"page", len(records), "written", written,
+				"lastRecordId", records[len(records)-1].RecordID.String())
+			if !sleepContext(ctx, 2*time.Second) {
+				return ctx.Err()
+			}
+			continue
+		}
+		if forcePSTN && written == 0 {
+			slog.Warn("satel enrich force-pstn wrote nothing, retrying page",
+				"page", len(records),
 				"lastRecordId", records[len(records)-1].RecordID.String())
 			if !sleepContext(ctx, 2*time.Second) {
 				return ctx.Err()
@@ -433,12 +460,12 @@ func runSatelEnrich(ctx context.Context, cfg config.Config) error {
 		after = records[len(records)-1].RecordID
 		slog.Info("satel enrich progress",
 			"enriched", totalRows, "page", len(records), "written", written,
-			"workers", workers, "lastRecordId", after.String())
+			"workers", workers, "forcePstn", forcePSTN, "lastRecordId", after.String())
 		if uint64(len(records)) < pageSize {
 			break
 		}
 	}
-	slog.Info("satel enrich complete", "rows", totalRows)
+	slog.Info("satel enrich complete", "rows", totalRows, "forcePstn", forcePSTN)
 	return nil
 }
 
@@ -473,9 +500,13 @@ func pageNeedsPSTNEnrichment(records []analytics.SatelRTURecord) bool {
 func enrichAndWriteSatelPage(
 	ctx context.Context, warehouse *analytics.Client,
 	pstn *pstnlookup.Client, geoip *geoiplookup.Client,
-	records []analytics.SatelRTURecord, workers int,
+	records []analytics.SatelRTURecord, workers int, forcePSTN bool,
 ) (int, error) {
-	analytics.EnrichSatelRecords(ctx, pstn, geoip, records, workers)
+	if forcePSTN {
+		analytics.EnrichSatelRecordsForcePSTN(ctx, pstn, geoip, records, workers)
+	} else {
+		analytics.EnrichSatelRecords(ctx, pstn, geoip, records, workers)
+	}
 	now := time.Now().UTC()
 	toInsert := make([]analytics.SatelRTURecord, 0, len(records))
 	for _, record := range records {
@@ -547,7 +578,7 @@ func runEnrichmentCatchUp(
 			}
 			continue
 		}
-		written, err := enrichAndWriteSatelPage(ctx, warehouse, pstn, geoip, records, workers)
+		written, err := enrichAndWriteSatelPage(ctx, warehouse, pstn, geoip, records, workers, false)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return

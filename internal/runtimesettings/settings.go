@@ -18,8 +18,10 @@ type Document struct {
 }
 
 type EnrichmentSettings struct {
-	PSTN  LookupAPISettings `json:"pstn"`
-	GeoIP LookupAPISettings `json:"geoip"`
+	PSTN    LookupAPISettings         `json:"pstn"`
+	GeoIP   LookupAPISettings         `json:"geoip"`
+	Workers int                       `json:"workers"`
+	CatchUp EnrichmentCatchUpSettings `json:"catchUp"`
 }
 
 type LookupAPISettings struct {
@@ -27,6 +29,12 @@ type LookupAPISettings struct {
 	APIURL   string `json:"apiUrl"`
 	Token    string `json:"token,omitempty"`
 	TokenSet bool   `json:"tokenSet,omitempty"`
+}
+
+type EnrichmentCatchUpSettings struct {
+	Enabled  bool   `json:"enabled"`
+	PageSize int    `json:"pageSize"`
+	Sleep    string `json:"sleep"`
 }
 
 type ProjectionSettings struct {
@@ -122,6 +130,12 @@ func Defaults() Document {
 			GeoIP: LookupAPISettings{
 				Enabled: true,
 				APIURL:  "https://geoip.finenumbers.com/api/v1/lookup",
+			},
+			Workers: 24,
+			CatchUp: EnrichmentCatchUpSettings{
+				Enabled:  true,
+				PageSize: 1000,
+				Sleep:    "2s",
 			},
 		},
 		Platform: PlatformSettings{
@@ -219,6 +233,15 @@ func (d Document) Validate() error {
 	if d.Enrichment.GeoIP.Enabled && strings.TrimSpace(d.Enrichment.GeoIP.APIURL) == "" {
 		return fmt.Errorf("enrichment.geoip.apiUrl is required when enrichment.geoip.enabled=true")
 	}
+	if d.Enrichment.Workers < 1 || d.Enrichment.Workers > 64 {
+		return fmt.Errorf("enrichment.workers must be between 1 and 64")
+	}
+	if d.Enrichment.CatchUp.PageSize < 100 || d.Enrichment.CatchUp.PageSize > 5000 {
+		return fmt.Errorf("enrichment.catchUp.pageSize must be between 100 and 5000")
+	}
+	if err := requireDuration("enrichment.catchUp.sleep", d.Enrichment.CatchUp.Sleep, time.Second, time.Hour); err != nil {
+		return err
+	}
 	if d.Platform.ClickHouseAdmissionCapacity < 4 || d.Platform.ClickHouseAdmissionCapacity > 128 {
 		return fmt.Errorf("platform.clickhouseAdmissionCapacity must be between 4 and 128")
 	}
@@ -285,13 +308,22 @@ func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 	out.Voipmonitor.PasswordSet = false
 	out.Enrichment.PSTN.TokenSet = false
 	out.Enrichment.GeoIP.TokenSet = false
-	// Fill zero enrichment URLs from defaults when upgrading old documents.
+	// Fill zero enrichment fields from defaults when upgrading old documents.
 	defaults := Defaults().Enrichment
 	if out.Enrichment.PSTN.APIURL == "" {
 		out.Enrichment.PSTN.APIURL = defaults.PSTN.APIURL
 	}
 	if out.Enrichment.GeoIP.APIURL == "" {
 		out.Enrichment.GeoIP.APIURL = defaults.GeoIP.APIURL
+	}
+	if out.Enrichment.Workers == 0 {
+		out.Enrichment.Workers = defaults.Workers
+	}
+	if out.Enrichment.CatchUp.PageSize == 0 {
+		out.Enrichment.CatchUp.PageSize = defaults.CatchUp.PageSize
+	}
+	if out.Enrichment.CatchUp.Sleep == "" {
+		out.Enrichment.CatchUp.Sleep = defaults.CatchUp.Sleep
 	}
 	return out, nil
 }

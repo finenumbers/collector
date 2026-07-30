@@ -87,17 +87,22 @@ Collector подключён к external network `${PROXY_NETWORK:-proxy}` по�
 AntiFraud для этого источника не настраиваются. MinIO/ledger failure оставляет
 локальный файл для автоматического retry.
 
-Satel CDR обогащается на ingest через FineNumbers PSTN и GeoIP. URL/токены
-настраиваются в **Настройки → Параметры** (группа «Обогащение CDR»). Переменные
+Satel CDR обогащается на ingest через FineNumbers PSTN и GeoIP (lookup workers
+параллельно для PSTN∥GeoIP). В **Настройки → Параметры** задаются URL/токены,
+`workers` (1–64, default 24) и фоновый **catch-up** (`enabled`, `pageSize`,
+`sleep`) — maintenance-роль сама догоняет историю без ручного CLI.
 `PSTN_LOOKUP_*` / `GEOIP_LOOKUP_*` в `.env` — только seed при пустой БД.
-Колонки «Оператор/Регион A/B» и «GeoIP ISO/City/ASN Org A/B» заполняются для
-новых файлов. Историю после миграций 031–032 дозаполните явно:
+
+Прогресс: Dashboard KPI «Операторы»/«GeoIP»; в Диагностике — coverage 24h,
+backlog, workers, lookups/cacheHits. Health `ok` ≠ полное покрытие истории.
+
+Ручной one-shot (не прерывайте до `satel enrich complete`):
 
 ```bash
 docker compose -f deploy/compose.yml run --rm collector satel-enrich
 ```
 
-(`pstn-enrich-satel` остаётся alias на тот же handler.)
+(`pstn-enrich-satel` — alias.)
 
 ## Backup and restore
 

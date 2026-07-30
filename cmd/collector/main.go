@@ -186,13 +186,19 @@ func main() {
 		apiExportHealth = exportHealth
 	}
 	var cdrWatcher *ingest.CDRWatcher
+	enrichRT := &enrichmentRuntime{}
 	applyEnrichmentClients := func(doc runtimesettings.Document) {
 		pstn := pstnlookup.New(doc.Enrichment.PSTN.APIURL, doc.Enrichment.PSTN.Token, doc.Enrichment.PSTN.Enabled)
 		geoip := geoiplookup.New(doc.Enrichment.GeoIP.APIURL, doc.Enrichment.GeoIP.Token, doc.Enrichment.GeoIP.Enabled)
+		workers := doc.Enrichment.Workers
+		if workers < 1 {
+			workers = 24
+		}
 		lookuptelemetry.Default.SetState("pstn", pstn.Enabled(), doc.Enrichment.PSTN.Token != "")
 		lookuptelemetry.Default.SetState("geoip", geoip.Enabled(), doc.Enrichment.GeoIP.Token != "")
+		enrichRT.set(pstn, geoip, workers)
 		if cdrWatcher != nil {
-			cdrWatcher.SetEnrichmentClients(pstn, geoip)
+			cdrWatcher.SetEnrichmentClients(pstn, geoip, workers)
 		}
 	}
 	applyRuntimeDocument := func(doc runtimesettings.Document) {
@@ -209,6 +215,8 @@ func main() {
 			"voipmonitorEnabled", doc.Voipmonitor.Enabled,
 			"pstnEnrichmentEnabled", doc.Enrichment.PSTN.Enabled && doc.Enrichment.PSTN.Token != "",
 			"geoipEnrichmentEnabled", doc.Enrichment.GeoIP.Enabled && doc.Enrichment.GeoIP.Token != "",
+			"enrichmentWorkers", doc.Enrichment.Workers,
+			"enrichmentCatchUp", doc.Enrichment.CatchUp.Enabled,
 			"clickhouseAdmissionCapacity", doc.Platform.ClickHouseAdmissionCapacity,
 			"apiMemory", doc.Containers.APIMemory)
 	}
@@ -287,6 +295,7 @@ func main() {
 		go runProjectionSupervisor(ctx, runtime, control, warehouse, hostname, errs)
 		go runReconciliationSupervisor(ctx, runtime, control, warehouse, hostname, errs)
 		go runVoipmonitorSupervisor(ctx, runtime, control, warehouse, hostname, errs)
+		go runEnrichmentCatchUp(ctx, runtime, warehouse, enrichRT)
 	}
 	if runExport {
 		exportWorker := &exportworker.Worker{
@@ -385,7 +394,11 @@ func runSatelEnrich(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	const pageSize = 500
+	pageSize := uint64(doc.Enrichment.CatchUp.PageSize)
+	if pageSize == 0 {
+		pageSize = 1000
+	}
+	workers := doc.Enrichment.Workers
 	after := uuid.Nil
 	var totalRows int
 	for {
@@ -399,36 +412,142 @@ func runSatelEnrich(ctx context.Context, cfg config.Config) error {
 		if len(records) == 0 {
 			break
 		}
-		analytics.EnrichSatelRecords(ctx, pstn, geoip, records)
-		now := time.Now().UTC()
-		toInsert := make([]analytics.SatelRTURecord, 0, len(records))
-		for _, record := range records {
-			if record.BillANIOperator == "" && record.BillDNISOperator == "" &&
-				record.BillANIRegion == "" && record.BillDNISRegion == "" &&
-				record.RemoteSrcGeoipISO == "" && record.RemoteDstGeoipISO == "" &&
-				record.RemoteSrcGeoipCity == "" && record.RemoteDstGeoipCity == "" &&
-				record.RemoteSrcASNOrg == "" && record.RemoteDstASNOrg == "" {
-				continue
-			}
-			record.IngestedAt = now
-			toInsert = append(toInsert, record)
+		written, err := enrichAndWriteSatelPage(ctx, warehouse, pstn, geoip, records, workers)
+		if err != nil {
+			return err
 		}
-		if len(toInsert) > 0 {
-			if err := warehouse.InsertSatelRTUBatch(ctx, toInsert); err != nil {
-				return err
-			}
-		}
-		totalRows += len(toInsert)
+		totalRows += written
 		after = records[len(records)-1].RecordID
 		slog.Info("satel enrich progress",
-			"enriched", totalRows, "page", len(records), "written", len(toInsert),
-			"lastRecordId", after.String())
-		if len(records) < pageSize {
+			"enriched", totalRows, "page", len(records), "written", written,
+			"workers", workers, "lastRecordId", after.String())
+		if uint64(len(records)) < pageSize {
 			break
 		}
 	}
 	slog.Info("satel enrich complete", "rows", totalRows)
 	return nil
+}
+
+type enrichmentRuntime struct {
+	mu      sync.RWMutex
+	pstn    *pstnlookup.Client
+	geoip   *geoiplookup.Client
+	workers int
+}
+
+func (e *enrichmentRuntime) set(pstn *pstnlookup.Client, geoip *geoiplookup.Client, workers int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pstn, e.geoip, e.workers = pstn, geoip, workers
+}
+
+func (e *enrichmentRuntime) get() (*pstnlookup.Client, *geoiplookup.Client, int) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.pstn, e.geoip, e.workers
+}
+
+func enrichAndWriteSatelPage(
+	ctx context.Context, warehouse *analytics.Client,
+	pstn *pstnlookup.Client, geoip *geoiplookup.Client,
+	records []analytics.SatelRTURecord, workers int,
+) (int, error) {
+	analytics.EnrichSatelRecords(ctx, pstn, geoip, records, workers)
+	now := time.Now().UTC()
+	toInsert := make([]analytics.SatelRTURecord, 0, len(records))
+	for _, record := range records {
+		if record.BillANIOperator == "" && record.BillDNISOperator == "" &&
+			record.BillANIRegion == "" && record.BillDNISRegion == "" &&
+			record.RemoteSrcGeoipISO == "" && record.RemoteDstGeoipISO == "" &&
+			record.RemoteSrcGeoipCity == "" && record.RemoteDstGeoipCity == "" &&
+			record.RemoteSrcASNOrg == "" && record.RemoteDstASNOrg == "" {
+			continue
+		}
+		record.IngestedAt = now
+		toInsert = append(toInsert, record)
+	}
+	if len(toInsert) == 0 {
+		return 0, nil
+	}
+	if err := warehouse.InsertSatelRTUBatch(ctx, toInsert); err != nil {
+		return 0, err
+	}
+	return len(toInsert), nil
+}
+
+func runEnrichmentCatchUp(
+	ctx context.Context,
+	runtime *runtimesettings.Manager,
+	warehouse *analytics.Client,
+	enrichRT *enrichmentRuntime,
+) {
+	after := uuid.Nil
+	for ctx.Err() == nil {
+		doc := runtime.Snapshot()
+		sleepFor := runtimesettings.MustDuration(doc.Enrichment.CatchUp.Sleep)
+		if sleepFor <= 0 {
+			sleepFor = 2 * time.Second
+		}
+		if !doc.Enrichment.CatchUp.Enabled {
+			after = uuid.Nil
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+			continue
+		}
+		pstn, geoip, workers := enrichRT.get()
+		if (pstn == nil || !pstn.Enabled()) && (geoip == nil || !geoip.Enabled()) {
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+			continue
+		}
+		pageSize := uint64(doc.Enrichment.CatchUp.PageSize)
+		if pageSize == 0 {
+			pageSize = 1000
+		}
+		records, err := warehouse.ListSatelRTURecordsNeedingEnrichment(ctx, pageSize, after)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			slog.Error("enrichment catch-up list failed", "error", err)
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+			continue
+		}
+		if len(records) == 0 {
+			after = uuid.Nil
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+			continue
+		}
+		written, err := enrichAndWriteSatelPage(ctx, warehouse, pstn, geoip, records, workers)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			slog.Error("enrichment catch-up write failed", "error", err)
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+			continue
+		}
+		after = records[len(records)-1].RecordID
+		slog.Info("enrichment catch-up progress",
+			"page", len(records), "written", written, "workers", workers,
+			"lastRecordId", after.String())
+		if uint64(len(records)) < pageSize {
+			after = uuid.Nil
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+		}
+		// Busy backlog: continue immediately to the next page.
+	}
 }
 
 func runIngress(ctx context.Context, cfg config.Config) error {

@@ -228,6 +228,11 @@ tbody tr { cursor: pointer; }
 .outcome-row.outcome-warning td { background: var(--warn-row); }
 .outcome-row.outcome-success:hover td { background: var(--good-row-hover); }
 .outcome-row.outcome-failure:hover td { background: var(--bad-row-hover); }
+/* PSTN enrichment sentinels override call-outcome tint. */
+.outcome-row.pstn-absent td { background: var(--warn-row); }
+.outcome-row.pstn-absent:hover td { background: #ffe9b8; }
+.outcome-row.pstn-ineligible td { background: #e8f1fb; }
+.outcome-row.pstn-ineligible:hover td { background: #d7e7f8; }
 .outcome-badge { display: inline-block; margin-right: 4px; padding: 2px 5px;
   border-radius: 2px; background: #eef2f7; color: var(--muted); font-size: 9px; }
 .outcome-badge.success { background: #dff3e7; color: #12633f; }

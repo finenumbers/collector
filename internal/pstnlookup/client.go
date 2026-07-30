@@ -18,6 +18,13 @@ import (
 const DefaultURL = "https://pstn.finenumbers.com/api/v1/lookup"
 const DefaultCacheTTL = 24 * time.Hour
 
+// Sentinels written into operator/region columns when enrichment is resolved
+// without a real PSTN payload.
+const (
+	ValueNotFound   = "Не существует"
+	ValueIneligible = "-"
+)
+
 type Result struct {
 	Operator string
 	Region   string // PSTN data.garTerritory (UI «Регион A/B»)
@@ -84,8 +91,8 @@ func NormalizePhone(raw string) string {
 
 // EligiblePhone reports whether a raw phone must be looked up via PSTN.
 // Only 11-digit numbers starting with 73/74/78/79 qualify (country code 7),
-// plus trunk-8 equivalents 83/84/89 and 88x except 880… (toll-free).
-// Bare 10-digit nationals (8800…, 4712…, 499…) are never eligible.
+// plus trunk-8 equivalents 83/84/88/89 (including 8800 / 7800 toll-free).
+// Bare 10-digit nationals (8800… as 10 digits, 4712…, 499…) are never eligible.
 func EligiblePhone(raw string) bool {
 	digits := DigitsOnly(raw)
 	if len(digits) != 11 {
@@ -98,23 +105,41 @@ func EligiblePhone(raw string) bool {
 		strings.HasPrefix(digits, "79"),
 		strings.HasPrefix(digits, "83"),
 		strings.HasPrefix(digits, "84"),
+		strings.HasPrefix(digits, "88"),
 		strings.HasPrefix(digits, "89"):
 		return true
-	case strings.HasPrefix(digits, "88"):
-		// 880… is 8-800 toll-free; other 88x are trunk forms of 78x.
-		return digits[2] != '0'
 	default:
 		return false
 	}
 }
 
+func SideResolved(operator, region string) bool {
+	return strings.TrimSpace(operator) != "" && strings.TrimSpace(region) != ""
+}
+
 // SideNeedsEnrichment is true when a raw phone is eligible and operator or
 // garTerritory (Region) is still missing — including historical catch-up gaps.
+// Sentinels («Не существует») count as resolved.
 func SideNeedsEnrichment(rawPhone, operator, region string) bool {
 	if !EligiblePhone(rawPhone) {
 		return false
 	}
-	return strings.TrimSpace(operator) == "" || strings.TrimSpace(region) == ""
+	return !SideResolved(operator, region)
+}
+
+// MarkIneligible returns "-" / "-" when the phone has digits but is not PSTN-eligible.
+func MarkIneligible(rawPhone, operator, region string, force bool) (op, reg string, ok bool) {
+	if DigitsOnly(rawPhone) == "" || EligiblePhone(rawPhone) {
+		return "", "", false
+	}
+	if !force && SideResolved(operator, region) {
+		return "", "", false
+	}
+	return ValueIneligible, ValueIneligible, true
+}
+
+func notFoundResult() Result {
+	return Result{Operator: ValueNotFound, Region: ValueNotFound}
 }
 
 func (c *Client) Lookup(ctx context.Context, rawPhone string) (Result, error) {
@@ -296,6 +321,10 @@ func (c *Client) fetch(ctx context.Context, phone string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// Missing number in the PSTN database is a resolved outcome, not an error.
+	if resp.StatusCode == http.StatusNotFound {
+		return notFoundResult(), nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		return Result{}, fmt.Errorf("pstn lookup status %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
@@ -304,14 +333,14 @@ func (c *Client) fetch(ctx context.Context, phone string) (Result, error) {
 		return Result{}, fmt.Errorf("pstn lookup decode: %w", err)
 	}
 	if !parsed.Found {
-		return Result{}, fmt.Errorf("pstn lookup not found for eligible phone %s", phone)
+		return notFoundResult(), nil
 	}
 	result := Result{
 		Operator: strings.TrimSpace(parsed.Data.Operator),
 		Region:   strings.TrimSpace(parsed.Data.GarTerritory),
 	}
 	if result.Operator == "" || result.Region == "" {
-		return Result{}, fmt.Errorf("pstn lookup incomplete for eligible phone %s (operator/garTerritory required)", phone)
+		return notFoundResult(), nil
 	}
 	return result, nil
 }

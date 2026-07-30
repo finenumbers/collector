@@ -65,6 +65,10 @@ describe('CDR column presets', () => {
     const keys = columns.map((column) => column.key)
     expect(keys).toEqual(SATEL_CDR_COLUMNS.map((column) => column.key))
     expect(keys).not.toContain('rawFields')
+    expect(keys.indexOf('billAniOperator')).toBe(keys.indexOf('billDnis') + 1)
+    expect(keys.indexOf('billDnisOperator')).toBe(keys.indexOf('billAniOperator') + 1)
+    expect(keys.indexOf('billAniRegion')).toBe(keys.indexOf('billDnisOperator') + 1)
+    expect(keys.indexOf('billDnisRegion')).toBe(keys.indexOf('billAniRegion') + 1)
   })
 
   it('falls back to Summary for unknown preset ids', () => {

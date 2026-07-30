@@ -367,6 +367,10 @@ type SatelCdrRow = {
   outDnis?: string
   billAni?: string
   billDnis?: string
+  billAniOperator?: string
+  billDnisOperator?: string
+  billAniRegion?: string
+  billDnisRegion?: string
   srcUser?: string
   dstUser?: string
   radiusUser?: string

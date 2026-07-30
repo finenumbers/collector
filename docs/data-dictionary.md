@@ -45,7 +45,10 @@ interpretation is independent of removed Syslog parsing.
 
 `collector.satel_rtu_cdr` and `collector.satel_rtu_cdr_time_facts` retain the
 header-driven Satel RTU model. The full vendor row remains in `raw_fields`.
-Satel and Eltex tables are intentionally separate.
+Satel and Eltex tables are intentionally separate. Migration 031 adds
+`bill_ani_operator`, `bill_dnis_operator`, `bill_ani_region`, and
+`bill_dnis_region` from the PSTN lookup API at ingest (env `PSTN_LOOKUP_*`;
+backfill via `collector pstn-enrich-satel`).
 
 Raw CDR files remain in MinIO and are referenced by `ingest_files`.
 

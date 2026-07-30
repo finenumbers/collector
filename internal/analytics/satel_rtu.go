@@ -29,6 +29,10 @@ type SatelRTURecord struct {
 	InANI, InDNIS              string
 	OutANI, OutDNIS            string
 	BillANI, BillDNIS          string
+	BillANIOperator            string
+	BillDNISOperator           string
+	BillANIRegion              string
+	BillDNISRegion             string
 	SrcUser, DstUser           string
 	RadiusUser                 string
 	SrcName, DstName, DPName   string
@@ -143,6 +147,10 @@ type SatelRTUCallRow struct {
 	OutDNIS                 string            `json:"outDnis"`
 	BillANI                 string            `json:"billAni"`
 	BillDNIS                string            `json:"billDnis"`
+	BillANIOperator         string            `json:"billAniOperator"`
+	BillDNISOperator        string            `json:"billDnisOperator"`
+	BillANIRegion           string            `json:"billAniRegion"`
+	BillDNISRegion          string            `json:"billDnisRegion"`
 	SrcUser                 string            `json:"srcUser"`
 	DstUser                 string            `json:"dstUser"`
 	RadiusUser              string            `json:"radiusUser"`
@@ -279,7 +287,9 @@ func (c *Client) InsertSatelRTUBatch(
 	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.satel_rtu_cdr
 		(record_id,device_id,file_id,row_number,ingested_at,parser_version,template_key,cdr_id,
 		cdr_date,setup_time,connect_time,disconnect_time,duration_ms,elapsed_time,outcome,
-		in_ani,in_dnis,out_ani,out_dnis,bill_ani,bill_dnis,src_user,dst_user,radius_user,
+		in_ani,in_dnis,out_ani,out_dnis,bill_ani,bill_dnis,
+		bill_ani_operator,bill_dnis_operator,bill_ani_region,bill_dnis_region,
+		src_user,dst_user,radius_user,
 		src_name,dst_name,dp_name,in_cpc,out_cpc,in_zone,out_zone,in_orig_dnis,out_orig_dnis,
 		in_ani_type_of_number,in_dnis_type_of_number,out_ani_type_of_number,
 		out_dnis_type_of_number,in_orig_dnis_type_of_number,out_orig_dnis_type_of_number,
@@ -313,7 +323,10 @@ func (c *Client) InsertSatelRTUBatch(
 			record.IngestedAt, record.ParserVersion, record.TemplateKey, record.CDRID,
 			record.CDRDate, record.SetupTime, record.ConnectTime, record.DisconnectTime,
 			record.DurationMS, record.ElapsedTime, record.Outcome, record.InANI, record.InDNIS, record.OutANI,
-			record.OutDNIS, record.BillANI, record.BillDNIS, record.SrcUser, record.DstUser,
+			record.OutDNIS, record.BillANI, record.BillDNIS,
+			record.BillANIOperator, record.BillDNISOperator,
+			record.BillANIRegion, record.BillDNISRegion,
+			record.SrcUser, record.DstUser,
 			record.RadiusUser, record.SrcName, record.DstName, record.DPName,
 			record.InCPC, record.OutCPC, record.InZone, record.OutZone,
 			record.InOrigDNIS, record.OutOrigDNIS, record.InANITypeOfNumber,
@@ -467,6 +480,7 @@ func (c *Client) listSatelRTUCallsPage(
 		)
 		SELECT c.record_id,c.cdr_id,t.cdr_date,t.setup_time,t.connect_time,t.disconnect_time,
 			c.duration_ms,c.elapsed_time,c.outcome,c.in_ani,c.in_dnis,c.out_ani,c.out_dnis,c.bill_ani,c.bill_dnis,
+			c.bill_ani_operator,c.bill_dnis_operator,c.bill_ani_region,c.bill_dnis_region,
 			c.src_user,c.dst_user,c.radius_user,c.src_name,c.dst_name,c.dp_name,
 			c.in_cpc,c.out_cpc,c.in_zone,c.out_zone,c.in_orig_dnis,c.out_orig_dnis,
 			c.in_ani_type_of_number,c.in_dnis_type_of_number,c.out_ani_type_of_number,
@@ -544,8 +558,9 @@ func (c *Client) listSatelRTUCallsPage(
 		if err := rows.Scan(
 			&row.RecordID, &row.CDRID, &row.CDRDate, &row.SetupTime, &row.ConnectTime,
 			&row.DisconnectTime, &row.DurationMS, &row.ElapsedTime, &row.Outcome, &row.InANI, &row.InDNIS,
-			&row.OutANI, &row.OutDNIS, &row.BillANI, &row.BillDNIS, &row.SrcUser,
-			&row.DstUser, &row.RadiusUser, &row.SrcName, &row.DstName, &row.DPName,
+			&row.OutANI, &row.OutDNIS, &row.BillANI, &row.BillDNIS,
+			&row.BillANIOperator, &row.BillDNISOperator, &row.BillANIRegion, &row.BillDNISRegion,
+			&row.SrcUser, &row.DstUser, &row.RadiusUser, &row.SrcName, &row.DstName, &row.DPName,
 			&row.InCPC, &row.OutCPC, &row.InZone, &row.OutZone,
 			&row.InOrigDNIS, &row.OutOrigDNIS, &row.InANITypeOfNumber,
 			&row.InDNISTypeOfNumber, &row.OutANITypeOfNumber, &row.OutDNISTypeOfNumber,

@@ -186,6 +186,8 @@ services:
       VOIPMONITOR_NUMBER_SUFFIX_LEN: ${VOIPMONITOR_NUMBER_SUFFIX_LEN:-10}
       VOIPMONITOR_RATE_LIMIT_PER_SEC: ${VOIPMONITOR_RATE_LIMIT_PER_SEC:-5}
       VOIPMONITOR_USE_SHARE_URL: ${VOIPMONITOR_USE_SHARE_URL:-false}
+      PSTN_LOOKUP_URL: ${PSTN_LOOKUP_URL:-https://pstn.finenumbers.com/api/v1/lookup}
+      PSTN_LOOKUP_TOKEN: ${PSTN_LOOKUP_TOKEN:-}
       TZ: ${TZ:-UTC}
     volumes:
       - cdr_data:/data/cdr

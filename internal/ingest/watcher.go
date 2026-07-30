@@ -20,6 +20,7 @@ import (
 	"collector/internal/analytics"
 	"collector/internal/archive"
 	"collector/internal/equipment"
+	"collector/internal/pstnlookup"
 	"collector/internal/store"
 
 	"github.com/google/uuid"
@@ -31,6 +32,7 @@ type CDRWatcher struct {
 	Store                     *store.Store
 	Analytics                 CDRAnalytics
 	Archive                   CDRArchive
+	PSTN                      *pstnlookup.Client
 	MinAge                    time.Duration
 	CoverageThresholds        analytics.CoverageThresholds
 	CoverageThresholdsFn      func() analytics.CoverageThresholds
@@ -240,6 +242,7 @@ func (w *CDRWatcher) process(ctx context.Context, device store.Device, path stri
 			return fmt.Errorf("%w: Satel RTU CDR parse failed: %v", errTerminalIngest, parseErr)
 		}
 		rows, valid, parseErrors = result.Rows, uint64(len(result.Records)), result.Errors
+		analytics.EnrichSatelRecords(ctx, w.PSTN, result.Records)
 		err = insertSatelRTUForTemplate(ctx, template, w.Analytics, result.Records)
 		if err == nil {
 			err = w.enqueueVoipmonitorBuckets(ctx, device.ID, satelRecordBuckets(result.Records))
@@ -448,6 +451,7 @@ func (w *CDRWatcher) processIngestReplay(
 	if w.Analytics == nil {
 		return errors.New("CDR analytics is unavailable")
 	}
+	analytics.EnrichSatelRecords(ctx, w.PSTN, result.Records)
 	if err := w.Analytics.InsertSatelRTUBatch(ctx, result.Records); err != nil {
 		return err
 	}

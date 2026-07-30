@@ -71,6 +71,8 @@ type Config struct {
 	VoipmonitorUseShareURL         bool
 	ClickHouseAdmissionCapacity    int
 	ExportPageSize                 int
+	PstnLookupURL                  string
+	PstnLookupToken                string
 }
 
 func Load() (Config, error) {
@@ -137,6 +139,8 @@ func Load() (Config, error) {
 		VoipmonitorUseShareURL:         envBool("VOIPMONITOR_USE_SHARE_URL", false),
 		ClickHouseAdmissionCapacity:    envInt("CLICKHOUSE_ADMISSION_CAPACITY", 8),
 		ExportPageSize:                 envInt("EXPORT_PAGE_SIZE", 1000),
+		PstnLookupURL:                  env("PSTN_LOOKUP_URL", "https://pstn.finenumbers.com/api/v1/lookup"),
+		PstnLookupToken:                env("PSTN_LOOKUP_TOKEN", ""),
 	}
 	switch cfg.Role {
 	case "app", "ingress", "api-ingest", "export", "maintenance":

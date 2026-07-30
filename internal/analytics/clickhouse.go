@@ -24,6 +24,9 @@ type Client struct {
 	Conn        clickhouse.Conn
 	Admission   *workload.Manager
 	admissionMu sync.Mutex
+	// projectionMemoryBytes raises CustomReplay/CustomReconcile CH max_memory_usage
+	// when set above the hardcoded workload floors (see workload.go).
+	projectionMemoryBytes int64
 }
 
 type DeviceStats struct {

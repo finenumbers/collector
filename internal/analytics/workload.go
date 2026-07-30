@@ -13,6 +13,10 @@ import (
 type WorkloadOptions struct {
 	Capacity int
 	Weights  map[workload.Class]int
+	// ProjectionMemoryBytes mirrors runtime projection.maxMemoryBytes. When above
+	// the workload floor it raises ClickHouse max_memory_usage for CustomReplay
+	// and CustomReconcile. It does not lower floors (defaults stay ≥512MiB/1GiB).
+	ProjectionMemoryBytes int64
 }
 
 func (c *Client) ConfigureWorkloads(options WorkloadOptions) {
@@ -22,6 +26,7 @@ func (c *Client) ConfigureWorkloads(options WorkloadOptions) {
 		Capacity: options.Capacity,
 		Weights:  options.Weights,
 	})
+	c.projectionMemoryBytes = options.ProjectionMemoryBytes
 }
 
 func (c *Client) WorkloadSnapshot() map[workload.Class]workload.Stats {
@@ -51,7 +56,7 @@ func (c *Client) queryContext(
 	if err != nil {
 		return ctx, nil, err
 	}
-	timeout, threads, memory, resultRows, resultBytes := workloadQueryLimits(class)
+	timeout, threads, memory, resultRows, resultBytes := c.workloadQueryLimits(class)
 	queryCtx, cancel := context.WithTimeout(admitted, timeout)
 	queryCtx = clickhouse.Context(queryCtx,
 		clickhouse.WithQueryID("collector-"+string(class)+"-"+uuid.NewString()),
@@ -87,6 +92,26 @@ func (c *Client) admittedAs(ctx context.Context, class workload.Class) bool {
 	return ok && current == class
 }
 
+func (c *Client) workloadQueryLimits(class workload.Class) (time.Duration, uint64, uint64, uint64, uint64) {
+	timeout, threads, memory, resultRows, resultBytes := workloadQueryLimits(class)
+	if c == nil {
+		return timeout, threads, memory, resultRows, resultBytes
+	}
+	c.admissionMu.Lock()
+	projMem := c.projectionMemoryBytes
+	c.admissionMu.Unlock()
+	if projMem <= 0 {
+		return timeout, threads, memory, resultRows, resultBytes
+	}
+	switch class {
+	case workload.CustomReplay, workload.CustomReconcile:
+		if uint64(projMem) > memory {
+			memory = uint64(projMem)
+		}
+	}
+	return timeout, threads, memory, resultRows, resultBytes
+}
+
 func workloadQueryLimits(class workload.Class) (time.Duration, uint64, uint64, uint64, uint64) {
 	switch class {
 	case workload.Export:
@@ -94,9 +119,13 @@ func workloadQueryLimits(class workload.Class) (time.Duration, uint64, uint64, u
 	case workload.CustomReplay:
 		// Dense SMG hour loads need headroom; single thread lowers peak memory on
 		// payload scans. Two-phase session fetch keeps per-query working set small.
+		// Runtime projection.maxMemoryBytes may raise this further.
 		return 90 * time.Second, 1, 1024 << 20, 100_000, 128 << 20
 	case workload.CustomReconcile:
-		return 30 * time.Second, 2, 256 << 20, 50_000, 64 << 20
+		// Reconciliation evidence + discover share this lane. The old 256 MiB floor
+		// produced diagnostics "maximum: 256.00 MiB" despite UI maxMemoryBytes=1GiB
+		// (that setting previously only bounded in-process Go payloads).
+		return 30 * time.Second, 2, 1024 << 20, 50_000, 64 << 20
 	case workload.Ingest:
 		return 20 * time.Second, 2, 256 << 20, 10_000, 16 << 20
 	case workload.Diagnostics:

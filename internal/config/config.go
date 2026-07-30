@@ -109,7 +109,7 @@ func Load() (Config, error) {
 		CustomProjectionBatchSize:      envInt("CUSTOM_PROJECTION_BATCH_SIZE", 128),
 		CustomProjectionMaxEvents:      envInt("CUSTOM_PROJECTION_MAX_EVENTS", 50_000),
 		CustomProjectionThreads:        envInt("CUSTOM_PROJECTION_THREADS", 2),
-		CustomProjectionMaxMemoryBytes: envInt64("CUSTOM_PROJECTION_MAX_MEMORY_BYTES", 256<<20),
+		CustomProjectionMaxMemoryBytes: envInt64("CUSTOM_PROJECTION_MAX_MEMORY_BYTES", 1024<<20),
 		CustomProjectionSleep:          envDuration("CUSTOM_PROJECTION_SLEEP", time.Second),
 		CustomProjectionLease:          envDuration("CUSTOM_PROJECTION_LEASE", 2*time.Minute),
 		CustomProjectionLookback:       envDuration("CUSTOM_PROJECTION_LOOKBACK", 24*time.Hour),

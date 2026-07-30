@@ -376,6 +376,7 @@ tbody tr { cursor: pointer; }
 .runtime-card h4 { margin: 0; font-size: 13px; }
 .runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
 .runtime-grid label { margin: 0; display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted); }
+.runtime-grid .field-hint { font-size: 9px; font-weight: 400; opacity: 0.85; line-height: 1.25; }
 .runtime-grid input { min-height: var(--control-height); }
 .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .runtime-note { margin: 0; color: var(--muted); font-size: 10px; }

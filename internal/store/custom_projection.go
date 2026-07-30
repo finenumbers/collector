@@ -604,7 +604,7 @@ func (s *Store) CustomProjectionDeviceStats(
 		GREATEST(0,COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at),0))::bigint,
 		COALESCE((
 			SELECT j.last_error FROM custom_projection_jobs j
-			WHERE j.device_id=device.id AND j.status IN ('failed','pending','running')
+			WHERE j.device_id=device.id AND j.status='failed'
 			  AND j.last_error IS NOT NULL AND j.last_error<>''
 			ORDER BY j.updated_at DESC LIMIT 1
 		),'')

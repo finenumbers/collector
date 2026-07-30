@@ -20,7 +20,7 @@ const DefaultCacheTTL = 24 * time.Hour
 
 type Result struct {
 	Operator string
-	Region   string
+	Region   string // PSTN data.garTerritory (UI «Регион A/B»)
 }
 
 type Client struct {
@@ -78,12 +78,36 @@ func NormalizePhone(raw string) string {
 	return digits
 }
 
+// EligiblePhone reports whether a normalized national number must be looked up
+// via PSTN. Matches country-prefixed 73/74/78/79 (national 10 digits starting
+// with 3, 4, 8, or 9).
+func EligiblePhone(normalized string) bool {
+	if len(normalized) != 10 {
+		return false
+	}
+	switch normalized[0] {
+	case '3', '4', '8', '9':
+		return true
+	default:
+		return false
+	}
+}
+
+// SideNeedsEnrichment is true when a raw phone is eligible and operator or
+// garTerritory (Region) is still missing — including historical catch-up gaps.
+func SideNeedsEnrichment(rawPhone, operator, region string) bool {
+	if !EligiblePhone(NormalizePhone(rawPhone)) {
+		return false
+	}
+	return strings.TrimSpace(operator) == "" || strings.TrimSpace(region) == ""
+}
+
 func (c *Client) Lookup(ctx context.Context, rawPhone string) (Result, error) {
 	if !c.Enabled() {
 		return Result{}, nil
 	}
 	phone := NormalizePhone(rawPhone)
-	if phone == "" {
+	if phone == "" || !EligiblePhone(phone) {
 		return Result{}, nil
 	}
 	if result, ok := c.getCached(phone); ok {
@@ -108,7 +132,7 @@ func (c *Client) Lookup(ctx context.Context, rawPhone string) (Result, error) {
 	return result, nil
 }
 
-// LookupMany resolves unique phones with bounded parallelism.
+// LookupMany resolves unique eligible phones with bounded parallelism.
 func (c *Client) LookupMany(ctx context.Context, phones []string, workers int) map[string]Result {
 	out := make(map[string]Result)
 	if !c.Enabled() || len(phones) == 0 {
@@ -121,7 +145,7 @@ func (c *Client) LookupMany(ctx context.Context, phones []string, workers int) m
 	seen := make(map[string]struct{}, len(phones))
 	for _, raw := range phones {
 		phone := NormalizePhone(raw)
-		if phone == "" {
+		if phone == "" || !EligiblePhone(phone) {
 			continue
 		}
 		if _, ok := seen[phone]; ok {
@@ -189,6 +213,9 @@ func (c *Client) LookupMany(ctx context.Context, phones []string, workers int) m
 		close(results)
 	}()
 	for item := range results {
+		if item.result.Operator == "" && item.result.Region == "" {
+			continue
+		}
 		out[item.phone] = item.result
 	}
 	return out
@@ -220,8 +247,8 @@ func (c *Client) putCached(phone string, result Result) {
 type apiResponse struct {
 	Found bool `json:"found"`
 	Data  struct {
-		Operator string `json:"operator"`
-		Region   string `json:"region"`
+		Operator     string `json:"operator"`
+		GarTerritory string `json:"garTerritory"`
 	} `json:"data"`
 }
 
@@ -256,12 +283,16 @@ func (c *Client) fetch(ctx context.Context, phone string) (Result, error) {
 		return Result{}, fmt.Errorf("pstn lookup decode: %w", err)
 	}
 	if !parsed.Found {
-		return Result{}, nil
+		return Result{}, fmt.Errorf("pstn lookup not found for eligible phone %s", phone)
 	}
-	return Result{
+	result := Result{
 		Operator: strings.TrimSpace(parsed.Data.Operator),
-		Region:   strings.TrimSpace(parsed.Data.Region),
-	}, nil
+		Region:   strings.TrimSpace(parsed.Data.GarTerritory),
+	}
+	if result.Operator == "" || result.Region == "" {
+		return Result{}, fmt.Errorf("pstn lookup incomplete for eligible phone %s (operator/garTerritory required)", phone)
+	}
+	return result, nil
 }
 
 func truncate(s string, n int) string {
@@ -272,13 +303,14 @@ func truncate(s string, n int) string {
 }
 
 // ApplyToPhones fills operator/region for ANI/DNIS using a precomputed map keyed
-// by normalized phone.
-func ApplyToPhones(ani, dnis string, byPhone map[string]Result) (aniOp, aniReg, dnisOp, dnisReg string) {
+// by normalized phone. Region is PSTN garTerritory. Sides absent from byPhone
+// are left unchanged (ok=false) so catch-up never wipes existing values on API errors.
+func ApplyToPhones(ani, dnis string, byPhone map[string]Result) (aniOp, aniReg, dnisOp, dnisReg string, aniOK, dnisOK bool) {
 	if result, ok := byPhone[NormalizePhone(ani)]; ok {
-		aniOp, aniReg = result.Operator, result.Region
+		aniOp, aniReg, aniOK = result.Operator, result.Region, true
 	}
 	if result, ok := byPhone[NormalizePhone(dnis)]; ok {
-		dnisOp, dnisReg = result.Operator, result.Region
+		dnisOp, dnisReg, dnisOK = result.Operator, result.Region, true
 	}
-	return aniOp, aniReg, dnisOp, dnisReg
+	return aniOp, aniReg, dnisOp, dnisReg, aniOK, dnisOK
 }

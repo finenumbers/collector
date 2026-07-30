@@ -1034,10 +1034,10 @@ function DashboardPage({ devices, onSelectDevice }: {
         tone={softswitchUnresolved(softswitchTotals) > 0 ? 'warn' : 'good'} />
       <DashboardKPI label="Операторы"
         value={formatCount(softswitchTotals.pstnEnrichedCalls)}
-        detail="PSTN enrichment" />
+        detail="все поля PSTN" />
       <DashboardKPI label="GeoIP"
         value={formatCount(softswitchTotals.geoipEnrichedCalls)}
-        detail="GeoIP enrichment" />
+        detail="все поля GeoIP" />
       <DashboardKPI label="CDR-файлы" value={formatCount(softswitchTotals.files)}
         detail={formatBytes(softswitchTotals.bytes)} />
     </div>
@@ -3037,7 +3037,9 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
           onChange={(e) => updateProjection({ maxEvents: Number(e.target.value) })} /></label>
         <label>Threads<input type="number" min={1} max={16} value={form.projection.threads}
           onChange={(e) => updateProjection({ threads: Number(e.target.value) })} /></label>
-        <label>Max memory (bytes)<input type="number" value={form.projection.maxMemoryBytes}
+        <label>Max memory (bytes)
+          <span className="field-hint">Go payload/hour + ClickHouse CustomReplay/Reconcile</span>
+          <input type="number" value={form.projection.maxMemoryBytes}
           onChange={(e) => updateProjection({ maxMemoryBytes: Number(e.target.value) })} /></label>
         <label>Sleep<input value={form.projection.sleep}
           onChange={(e) => updateProjection({ sleep: e.target.value })} /></label>

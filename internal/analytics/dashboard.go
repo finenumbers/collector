@@ -86,11 +86,8 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 
 	rows, err = c.Conn.Query(ctx, `SELECT device_id,count(),countIf(outcome!='answered'),
 		ifNull(avgIf(duration_ms,outcome='answered'),0),
-		countIf(bill_ani_operator!='' OR bill_dnis_operator!=''
-			OR bill_ani_region!='' OR bill_dnis_region!=''),
-		countIf(remote_src_geoip_iso!='' OR remote_dst_geoip_iso!=''
-			OR remote_src_geoip_city!='' OR remote_dst_geoip_city!=''
-			OR remote_src_asn_org!='' OR remote_dst_asn_org!=''),
+		countIf(`+satelPSTNAllColumnsFilledExpr()+`),
+		countIf(`+satelGeoipAllColumnsFilledExpr()+`),
 		max(ingested_at)
 		FROM collector.satel_rtu_cdr FINAL
 		WHERE ingested_at>=now()-toIntervalSecond(?)

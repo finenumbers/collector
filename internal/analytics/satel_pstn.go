@@ -63,10 +63,10 @@ func enrichSatelRecords(
 			phones := make([]string, 0, len(records)*2)
 			for _, record := range records {
 				if forcePSTN {
-					if pstnlookup.EligiblePhone(pstnlookup.NormalizePhone(record.BillANI)) {
+					if pstnlookup.EligiblePhone(record.BillANI) {
 						phones = append(phones, record.BillANI)
 					}
-					if pstnlookup.EligiblePhone(pstnlookup.NormalizePhone(record.BillDNIS)) {
+					if pstnlookup.EligiblePhone(record.BillDNIS) {
 						phones = append(phones, record.BillDNIS)
 					}
 					continue
@@ -219,20 +219,23 @@ func scanSatelEnrichmentRecord(scanner interface {
 	return record, err
 }
 
-// satelNationalPhoneExpr strips non-digits and a leading RU 7/8 on 11-digit forms.
-func satelNationalPhoneExpr(column string) string {
-	digits := fmt.Sprintf("replaceRegexpAll(%s, '[^0-9]', '')", column)
-	return fmt.Sprintf(
-		"multiIf(length(%[1]s)=11 AND (startsWith(%[1]s,'7') OR startsWith(%[1]s,'8')), substring(%[1]s,2), %[1]s)",
-		digits,
-	)
+// satelPSTNDigitsExpr keeps digits only from a phone column.
+func satelPSTNDigitsExpr(column string) string {
+	return fmt.Sprintf("replaceRegexpAll(%s, '[^0-9]', '')", column)
 }
 
-// satelPSTNEligibleSideExpr is true for national 10-digit numbers starting with
-// 3/4/8/9 (country-prefixed 73/74/78/79).
+// satelPSTNEligibleSideExpr is true for exactly 11 digits starting with
+// 73/74/78/79 (or trunk-8 equivalents 83/84/89 / 88x except 880…).
+// Bare 10-digit nationals are never eligible — they caused PSTN 404 storms.
 func satelPSTNEligibleSideExpr(column string) string {
-	national := satelNationalPhoneExpr(column)
-	return fmt.Sprintf("(length(%s)=10 AND match(%s, '^[3489]'))", national, national)
+	digits := satelPSTNDigitsExpr(column)
+	return fmt.Sprintf(
+		`(length(%[1]s)=11 AND (`+
+			`match(%[1]s, '^(73|74|78|79|83|84|89)')`+
+			` OR (startsWith(%[1]s,'88') AND substring(%[1]s,3,1)!='0')`+
+			`))`,
+		digits,
+	)
 }
 
 func satelPSTNSideCompleteExpr(operatorCol, regionCol string) string {

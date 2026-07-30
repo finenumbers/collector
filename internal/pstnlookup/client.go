@@ -61,9 +61,7 @@ func (c *Client) Enabled() bool {
 	return c != nil && c.EnabledFlag && c.Token != ""
 }
 
-// NormalizePhone keeps digits only and strips a leading Russian country/trunk
-// digit when the number is 11 digits (7… / 8…).
-func NormalizePhone(raw string) string {
+func DigitsOnly(raw string) string {
 	var b strings.Builder
 	b.Grow(len(raw))
 	for _, r := range raw {
@@ -71,23 +69,40 @@ func NormalizePhone(raw string) string {
 			b.WriteRune(r)
 		}
 	}
-	digits := b.String()
+	return b.String()
+}
+
+// NormalizePhone keeps digits only and strips a leading Russian country/trunk
+// digit when the number is 11 digits (7… / 8…).
+func NormalizePhone(raw string) string {
+	digits := DigitsOnly(raw)
 	if len(digits) == 11 && (digits[0] == '7' || digits[0] == '8') {
 		return digits[1:]
 	}
 	return digits
 }
 
-// EligiblePhone reports whether a normalized national number must be looked up
-// via PSTN. Matches country-prefixed 73/74/78/79 (national 10 digits starting
-// with 3, 4, 8, or 9).
-func EligiblePhone(normalized string) bool {
-	if len(normalized) != 10 {
+// EligiblePhone reports whether a raw phone must be looked up via PSTN.
+// Only 11-digit numbers starting with 73/74/78/79 qualify (country code 7),
+// plus trunk-8 equivalents 83/84/89 and 88x except 880… (toll-free).
+// Bare 10-digit nationals (8800…, 4712…, 499…) are never eligible.
+func EligiblePhone(raw string) bool {
+	digits := DigitsOnly(raw)
+	if len(digits) != 11 {
 		return false
 	}
-	switch normalized[0] {
-	case '3', '4', '8', '9':
+	switch {
+	case strings.HasPrefix(digits, "73"),
+		strings.HasPrefix(digits, "74"),
+		strings.HasPrefix(digits, "78"),
+		strings.HasPrefix(digits, "79"),
+		strings.HasPrefix(digits, "83"),
+		strings.HasPrefix(digits, "84"),
+		strings.HasPrefix(digits, "89"):
 		return true
+	case strings.HasPrefix(digits, "88"):
+		// 880… is 8-800 toll-free; other 88x are trunk forms of 78x.
+		return digits[2] != '0'
 	default:
 		return false
 	}
@@ -96,7 +111,7 @@ func EligiblePhone(normalized string) bool {
 // SideNeedsEnrichment is true when a raw phone is eligible and operator or
 // garTerritory (Region) is still missing — including historical catch-up gaps.
 func SideNeedsEnrichment(rawPhone, operator, region string) bool {
-	if !EligiblePhone(NormalizePhone(rawPhone)) {
+	if !EligiblePhone(rawPhone) {
 		return false
 	}
 	return strings.TrimSpace(operator) == "" || strings.TrimSpace(region) == ""
@@ -106,8 +121,11 @@ func (c *Client) Lookup(ctx context.Context, rawPhone string) (Result, error) {
 	if !c.Enabled() {
 		return Result{}, nil
 	}
+	if !EligiblePhone(rawPhone) {
+		return Result{}, nil
+	}
 	phone := NormalizePhone(rawPhone)
-	if phone == "" || !EligiblePhone(phone) {
+	if phone == "" {
 		return Result{}, nil
 	}
 	if result, ok := c.getCached(phone); ok {
@@ -144,8 +162,11 @@ func (c *Client) LookupMany(ctx context.Context, phones []string, workers int) m
 	unique := make([]string, 0, len(phones))
 	seen := make(map[string]struct{}, len(phones))
 	for _, raw := range phones {
+		if !EligiblePhone(raw) {
+			continue
+		}
 		phone := NormalizePhone(raw)
-		if phone == "" || !EligiblePhone(phone) {
+		if phone == "" {
 			continue
 		}
 		if _, ok := seen[phone]; ok {

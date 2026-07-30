@@ -27,27 +27,50 @@ func TestNormalizePhone(t *testing.T) {
 	}
 }
 
-func TestEligiblePhone(t *testing.T) {
+func TestEligiblePhoneRequires11Digit73_74_78_79(t *testing.T) {
 	cases := map[string]bool{
-		"4996660000": true,  // 74…
-		"3832888803": true,  // 73…
-		"8125551212": true,  // 78…
-		"9031234567": true,  // 79…
-		"1234567890": false, // 71… after strip
-		"5123456789": false, // 75…
-		"499666000":  false, // wrong length
-		"":           false,
+		"74996660000":  true,  // 74…
+		"84996660000":  true,  // trunk 8 → 74…
+		"73832888803":  true,  // 73…
+		"78125551212":  true,  // 78…
+		"79031234567":  true,  // 79…
+		"+7 903 123-45-67": true,
+		"4996660000":   false, // bare 10-digit national — never
+		"8800205055":   false, // 10-digit 8800… from diagnostics
+		"4712780077":   false, // 10-digit 47… from diagnostics
+		"8432700050":   false, // 10-digit
+		"71234567890":  false, // 11-digit 71…
+		"75031234567":  false, // 11-digit 75…
+		"88002050555":  false, // 11-digit 8-800 toll-free
+		"88125551212":  true,  // trunk 8 of 7812…
+
+		"":             false,
 	}
 	for phone, want := range cases {
 		if got := EligiblePhone(phone); got != want {
 			t.Fatalf("EligiblePhone(%q)=%v want %v", phone, got, want)
 		}
 	}
-	if !EligiblePhone(NormalizePhone("74996660000")) {
-		t.Fatal("7499… should be eligible after normalize")
+}
+
+func TestLookupSkipsBare10DigitNationals(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"found":false,"phone":"8800205055"}`))
+	}))
+	defer server.Close()
+	client := New(server.URL, "token", true)
+	client.HTTPClient = server.Client()
+	for _, phone := range []string{"8800205055", "4712780077", "8432700050", "4996660000"} {
+		result, err := client.Lookup(context.Background(), phone)
+		if err != nil || result != (Result{}) {
+			t.Fatalf("non-eligible %q = %#v err=%v", phone, result, err)
+		}
 	}
-	if EligiblePhone(NormalizePhone("71234567890")) {
-		t.Fatal("7123… should not be eligible")
+	if hits.Load() != 0 {
+		t.Fatalf("API hits=%d want 0 for bare 10-digit numbers", hits.Load())
 	}
 }
 
@@ -78,7 +101,7 @@ func TestLookupCachesForTTL(t *testing.T) {
 	if first.Operator == "" || first.Region != "город Москва" {
 		t.Fatalf("unexpected result %#v", first)
 	}
-	second, err := client.Lookup(context.Background(), "4996660000")
+	second, err := client.Lookup(context.Background(), "74996660000")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +115,7 @@ func TestLookupCachesForTTL(t *testing.T) {
 	client.mu.Lock()
 	client.cache["4996660000"] = cacheEntry{result: first, expiresAt: time.Now().Add(-time.Second)}
 	client.mu.Unlock()
-	_, err = client.Lookup(context.Background(), "4996660000")
+	_, err = client.Lookup(context.Background(), "74996660000")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +156,7 @@ func TestLookupRequiresOperatorAndGarTerritory(t *testing.T) {
 	defer server.Close()
 	client := New(server.URL, "token", true)
 	client.HTTPClient = server.Client()
-	_, err := client.Lookup(context.Background(), "4996660000")
+	_, err := client.Lookup(context.Background(), "74996660000")
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("want incomplete error, got %v", err)
 	}
@@ -152,7 +175,7 @@ func TestLookupNotFoundIsErrorForEligible(t *testing.T) {
 	defer server.Close()
 	client := New(server.URL, "token", true)
 	client.HTTPClient = server.Client()
-	_, err := client.Lookup(context.Background(), "9031234567")
+	_, err := client.Lookup(context.Background(), "79031234567")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("want not found error, got %v", err)
 	}
@@ -160,7 +183,7 @@ func TestLookupNotFoundIsErrorForEligible(t *testing.T) {
 
 func TestLookupDisabledWithoutToken(t *testing.T) {
 	client := New(DefaultURL, "", true)
-	result, err := client.Lookup(context.Background(), "4996660000")
+	result, err := client.Lookup(context.Background(), "74996660000")
 	if err != nil || result != (Result{}) {
 		t.Fatalf("disabled lookup = %#v err=%v", result, err)
 	}
@@ -178,5 +201,8 @@ func TestSideNeedsEnrichment(t *testing.T) {
 	}
 	if SideNeedsEnrichment("71234567890", "", "") {
 		t.Fatal("non-eligible must not need enrichment")
+	}
+	if SideNeedsEnrichment("8800205055", "", "") {
+		t.Fatal("bare 10-digit must not need enrichment")
 	}
 }

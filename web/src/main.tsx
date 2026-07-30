@@ -25,7 +25,8 @@ import {
 } from './export'
 import { formatAntifraudTranscript } from './antifraudTranscript'
 import {
-  CDR_PRESETS, CdrColumnDef, cdrPresetStorageKey, defaultCdrPresetId, resolvePresetColumns,
+  CdrColumnDef, cdrPresetStorageKey, cdrPresetsForVendor, defaultCdrPresetId,
+  resolvePresetColumns, satelPresetFillWidth, satelPresetFlexKey, satelPresetFlexPairKeys,
 } from './cdrColumns'
 import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
@@ -1433,9 +1434,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const loadingRef = useRef(false)
   const generationRef = useRef(0)
   const isSatel = device.templateKey === 'satel-rtu-cdr-v1'
+  const cdrVendor = isSatel ? 'satel' as const : 'eltex' as const
   const presetStorageKey = cdrPresetStorageKey(device.id)
   const [columnPresetId, setColumnPresetId] = useState(() =>
     window.sessionStorage.getItem(presetStorageKey) || defaultCdrPresetId())
+  const vendorPresets = cdrPresetsForVendor(cdrVendor)
+  const activePresetId = vendorPresets.some((preset) => preset.id === columnPresetId)
+    ? columnPresetId
+    : defaultCdrPresetId()
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     const base = dataset === 'calls'
@@ -1548,12 +1554,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
         {dataset === 'calls' && <label className="cdr-preset">
-          <select value={columnPresetId} onChange={(event) => {
+          <select value={activePresetId} onChange={(event) => {
             const next = event.target.value || defaultCdrPresetId()
             window.sessionStorage.setItem(presetStorageKey, next)
             setColumnPresetId(next)
           }} aria-label="Пресет колонок">
-            {CDR_PRESETS.map((preset) =>
+            {vendorPresets.map((preset) =>
               <option key={preset.id} value={preset.id}>{preset.label}</option>)}
           </select>
         </label>}
@@ -1570,12 +1576,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           Повторить</button></div>}
       {dataset === 'calls' ? (isSatel
         ? <SatelCallsTable rows={rows as SatelCdrRow[]}
-          columns={resolvePresetColumns('satel', columnPresetId)}
-          fillWidth={columnPresetId === 'summary'}
+          columns={resolvePresetColumns('satel', activePresetId)}
+          fillWidth={satelPresetFillWidth(activePresetId)}
+          flexKey={satelPresetFlexKey(activePresetId)}
+          flexPairKeys={satelPresetFlexPairKeys(activePresetId)}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedSatelCall} />
         : <CallsTable rows={rows as CallRow[]}
-          columns={resolvePresetColumns('eltex', columnPresetId)}
-          fillWidth={columnPresetId === 'summary'}
+          columns={resolvePresetColumns('eltex', activePresetId)}
+          fillWidth={activePresetId === 'summary'}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedCall} />) :
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
@@ -1895,18 +1903,26 @@ function satelCallCell(row: SatelCdrRow, column: CdrColumnDef, timezone: string)
   }
 }
 
-function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
+function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey = '', flexPairKeys = [] }: {
   rows: SatelCdrRow[]
   columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: SatelCdrRow) => void
   fillWidth?: boolean
+  flexKey?: string
+  flexPairKeys?: string[]
 }) {
-  const flexKey = fillWidth ? 'disconnectText' : ''
+  const pairKeys = new Set(fillWidth ? flexPairKeys : [])
+  const growKey = fillWidth ? flexKey : ''
+  const columnClass = (key: string) => {
+    if (pairKeys.has(key)) return 'col-flex-pair'
+    if (key === growKey) return 'col-flex'
+    return undefined
+  }
   return <table className={['satel-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
     {columns.map((column) => <th key={column.key} title={column.header}
-      className={column.key === flexKey ? 'col-flex' : undefined}>{column.header}</th>)}
+      className={columnClass(column.key)}>{column.header}</th>)}
   </tr></thead><tbody>{rows.map((row) => {
     const outcome = satelCallOutcome(row)
     return <tr key={row.recordId} className={`outcome-row outcome-${outcome}`}
@@ -1915,7 +1931,7 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
         className={[
           column.mono ? 'mono' : '',
           column.align === 'right' ? 'right' : '',
-          column.key === flexKey ? 'col-flex' : '',
+          columnClass(column.key) || '',
         ].filter(Boolean).join(' ') || undefined}>
         {satelCallCell(row, column, timezone)}
       </td>)}

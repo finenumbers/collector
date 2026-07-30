@@ -226,15 +226,51 @@ export const SATEL_SUMMARY_KEYS = [
   'voipmonitorCardUrl',
 ]
 
+export const SATEL_GEOIP_KEYS = [
+  'setupTime',
+  'billAni',
+  'billDnis',
+  'remoteSrcGeoipIso',
+  'remoteSrcGeoipCity',
+  'remoteSrcAsnOrg',
+  'remoteDstGeoipIso',
+  'remoteDstGeoipCity',
+  'remoteDstAsnOrg',
+  'durationMs',
+  'disconnectText',
+  'voipmonitorCardUrl',
+]
+
+export const SATEL_OPERATORS_KEYS = [
+  'setupTime',
+  'billAni',
+  'billDnis',
+  'billAniOperator',
+  'billAniRegion',
+  'billDnisOperator',
+  'billDnisRegion',
+  'durationMs',
+  'disconnectText',
+]
+
 export const CDR_PRESETS: CdrPreset[] = [
   { id: 'summary', label: 'Summary', columns: ELTEX_SUMMARY_KEYS },
+  { id: 'geoip', label: 'GeoIP', columns: SATEL_GEOIP_KEYS },
+  { id: 'operators', label: 'Операторы', columns: SATEL_OPERATORS_KEYS },
   { id: 'all', label: 'Все данные', columns: 'all' },
 ]
+
+const SATEL_ONLY_PRESET_IDS = new Set(['geoip', 'operators'])
 
 const PRESET_STORAGE_PREFIX = 'collector:cdr-preset:'
 
 export function cdrPresetStorageKey(deviceId: string): string {
   return `${PRESET_STORAGE_PREFIX}${deviceId}`
+}
+
+export function cdrPresetsForVendor(vendor: CdrVendor): CdrPreset[] {
+  if (vendor === 'satel') return CDR_PRESETS
+  return CDR_PRESETS.filter((preset) => !SATEL_ONLY_PRESET_IDS.has(preset.id))
 }
 
 function columnsByKeys(all: CdrColumnDef[], keys: string[]): CdrColumnDef[] {
@@ -247,15 +283,39 @@ function columnsByKeys(all: CdrColumnDef[], keys: string[]): CdrColumnDef[] {
 
 export function resolvePresetColumns(vendor: CdrVendor, presetId: string): CdrColumnDef[] {
   const all = vendor === 'eltex' ? ELTEX_CDR_COLUMNS : SATEL_CDR_COLUMNS
-  const known = CDR_PRESETS.some((preset) => preset.id === presetId)
+  const available = cdrPresetsForVendor(vendor)
+  const known = available.some((preset) => preset.id === presetId)
   const id = known ? presetId : 'summary'
   if (id === 'all') return all
   if (id === 'summary') {
     return columnsByKeys(all, vendor === 'eltex' ? ELTEX_SUMMARY_KEYS : SATEL_SUMMARY_KEYS)
+  }
+  if (vendor === 'satel' && id === 'geoip') {
+    return columnsByKeys(all, SATEL_GEOIP_KEYS)
+  }
+  if (vendor === 'satel' && id === 'operators') {
+    return columnsByKeys(all, SATEL_OPERATORS_KEYS)
   }
   return columnsByKeys(all, vendor === 'eltex' ? ELTEX_SUMMARY_KEYS : SATEL_SUMMARY_KEYS)
 }
 
 export function defaultCdrPresetId(): string {
   return CDR_PRESETS[0]?.id || 'summary'
+}
+
+/** Full-width Satel presets that use table-fit layout. */
+export function satelPresetFillWidth(presetId: string): boolean {
+  return presetId === 'summary' || presetId === 'geoip' || presetId === 'operators'
+}
+
+/** Keys that share remaining width equally (col-flex-pair). */
+export function satelPresetFlexPairKeys(presetId: string): string[] {
+  if (presetId === 'geoip') return ['remoteSrcAsnOrg', 'remoteDstAsnOrg']
+  if (presetId === 'operators') return ['billAniRegion', 'billDnisRegion']
+  return []
+}
+
+/** Single column that absorbs leftover width (col-flex). */
+export function satelPresetFlexKey(presetId: string): string {
+  return presetId === 'summary' ? 'disconnectText' : ''
 }

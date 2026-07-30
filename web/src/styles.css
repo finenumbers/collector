@@ -252,7 +252,7 @@ tbody tr { cursor: pointer; }
   width: 100%;
   min-width: 100%;
   max-width: 100%;
-  table-layout: auto;
+  table-layout: fixed;
 }
 .table-fit > thead > tr > th:not(.col-flex):not(.col-flex-pair),
 .table-fit > tbody > tr > td:not(.col-flex):not(.col-flex-pair),
@@ -268,13 +268,14 @@ tbody tr { cursor: pointer; }
 .table-fit > tbody > tr > td.col-flex,
 .syslog-table > thead > tr > th.col-flex,
 .syslog-table > tbody > tr > td.col-flex {
-  width: 100%;
+  width: auto;
   min-width: 8rem;
   max-width: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Equal dynamic share of leftover width (e.g. Регион A / Регион B). */
 .table-fit > thead > tr > th.col-flex-pair,
 .table-fit > tbody > tr > td.col-flex-pair {
   width: 50%;

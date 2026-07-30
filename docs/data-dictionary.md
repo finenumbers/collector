@@ -51,8 +51,9 @@ Satel and Eltex tables are intentionally separate. Migration 031 adds
 UI «Регион A/B» stores territory). Only numbers matching prefixes 73/74/78/79
 are looked up; both operator and territory are required. Catch-up / `satel-enrich`
 must fill historical gaps for those prefixes and will not advance past unresolved
-eligible sides. Migration 032 adds
-`remote_src/dst_geoip_iso`, `remote_src/dst_geoip_city`, and
+eligible sides. To rewrite rows that still hold the old PSTN `region` text into
+`garTerritory`, run a one-shot `collector satel-enrich --force-pstn`. Migration 032
+adds `remote_src/dst_geoip_iso`, `remote_src/dst_geoip_city`, and
 `remote_src/dst_asn_org` from GeoIP lookup on Remote src/dst sig (host without
 port). Tokens live in runtime settings UI; seed from env on empty DB; backfill
 via `collector satel-enrich`.

@@ -30,6 +30,22 @@ func EnrichSatelRecords(
 	ctx context.Context, pstn *pstnlookup.Client, geoip *geoiplookup.Client, records []SatelRTURecord,
 	workers int,
 ) {
+	enrichSatelRecords(ctx, pstn, geoip, records, workers, false)
+}
+
+// EnrichSatelRecordsForcePSTN re-looks up every eligible phone (73/74/78/79) and
+// overwrites operator + garTerritory even when fields already hold old region text.
+func EnrichSatelRecordsForcePSTN(
+	ctx context.Context, pstn *pstnlookup.Client, geoip *geoiplookup.Client, records []SatelRTURecord,
+	workers int,
+) {
+	enrichSatelRecords(ctx, pstn, geoip, records, workers, true)
+}
+
+func enrichSatelRecords(
+	ctx context.Context, pstn *pstnlookup.Client, geoip *geoiplookup.Client, records []SatelRTURecord,
+	workers int, forcePSTN bool,
+) {
 	if len(records) == 0 {
 		return
 	}
@@ -46,6 +62,15 @@ func EnrichSatelRecords(
 			defer wg.Done()
 			phones := make([]string, 0, len(records)*2)
 			for _, record := range records {
+				if forcePSTN {
+					if pstnlookup.EligiblePhone(pstnlookup.NormalizePhone(record.BillANI)) {
+						phones = append(phones, record.BillANI)
+					}
+					if pstnlookup.EligiblePhone(pstnlookup.NormalizePhone(record.BillDNIS)) {
+						phones = append(phones, record.BillDNIS)
+					}
+					continue
+				}
 				if pstnlookup.SideNeedsEnrichment(
 					record.BillANI, record.BillANIOperator, record.BillANIRegion,
 				) {
@@ -301,6 +326,41 @@ func (c *Client) ListSatelRTURecordsNeedingPSTNEnrichment(
 	ctx context.Context, limit uint64, afterRecordID uuid.UUID,
 ) ([]SatelRTURecord, error) {
 	return c.ListSatelRTURecordsNeedingEnrichment(ctx, limit, afterRecordID)
+}
+
+// ListSatelRTURecordsForPSTNRefresh pages FINAL rows with at least one eligible
+// PSTN phone (73/74/78/79), for one-shot garTerritory rewrite of old region values.
+func (c *Client) ListSatelRTURecordsForPSTNRefresh(
+	ctx context.Context, limit uint64, afterRecordID uuid.UUID,
+) ([]SatelRTURecord, error) {
+	if limit == 0 || limit > 5000 {
+		limit = 500
+	}
+	ctx, release, err := c.queryContext(ctx, workload.CustomReplay)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	query := `SELECT ` + satelEnrichmentSelectColumns() + `
+		FROM collector.satel_rtu_cdr FINAL
+		WHERE record_id>?
+			AND ` + satelPSTNCallEligibleExpr() + `
+		ORDER BY record_id ASC
+		LIMIT ?`
+	rows, err := c.Conn.Query(ctx, query, afterRecordID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]SatelRTURecord, 0, limit)
+	for rows.Next() {
+		record, scanErr := scanSatelEnrichmentRecord(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, record)
+	}
+	return out, rows.Err()
 }
 
 // EnrichmentCoverageSnapshot is Satel PSTN/GeoIP fill progress for diagnostics.

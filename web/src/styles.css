@@ -252,7 +252,8 @@ tbody tr { cursor: pointer; }
   width: 100%;
   min-width: 100%;
   max-width: 100%;
-  table-layout: fixed;
+  /* auto: compact cols size to content; fixed+width:1% crushes headers (v0.1.97). */
+  table-layout: auto;
 }
 .table-fit > thead > tr > th:not(.col-flex):not(.col-flex-pair),
 .table-fit > tbody > tr > td:not(.col-flex):not(.col-flex-pair),
@@ -268,7 +269,7 @@ tbody tr { cursor: pointer; }
 .table-fit > tbody > tr > td.col-flex,
 .syslog-table > thead > tr > th.col-flex,
 .syslog-table > tbody > tr > td.col-flex {
-  width: auto;
+  width: 100%;
   min-width: 8rem;
   max-width: none;
   white-space: nowrap;

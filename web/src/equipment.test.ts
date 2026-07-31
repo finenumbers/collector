@@ -97,7 +97,11 @@ describe('equipment templates', () => {
     expect(main).toContain('Не существует')
     expect(main).toContain('BillAniHeaderFilter')
     expect(main).toContain('bill-ani-values')
+    expect(main).toContain('createPortal')
+    expect(main).toContain('Нет номеров за день')
     expect(styles).toContain('th.bill-ani-filter')
+    expect(styles).toContain('position: fixed')
+    expect(styles).toContain('.bill-ani-suggest')
     expect(main).toContain('title="Последний CDR"')
     expect(main.indexOf('title="Последний CDR"')).toBeLessThan(
       main.lastIndexOf('title="Последний приём Syslog"'),

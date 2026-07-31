@@ -1,4 +1,5 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
   CirclePlus, FileClock,
@@ -1969,31 +1970,67 @@ type BillAniFilterProps = {
 function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterProps) {
   const [draft, setDraft] = useState(query)
   const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
   const [suggestions, setSuggestions] = useState<string[]>([])
-  const rootRef = useRef<HTMLTableCellElement>(null)
+  const [menuBox, setMenuBox] = useState({ top: 0, left: 0, width: 0 })
+  const thRef = useRef<HTMLTableCellElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const menuRef = useRef<HTMLUListElement>(null)
   const seqRef = useRef(0)
+
+  const updateMenuBox = useCallback(() => {
+    const el = inputRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    setMenuBox({
+      top: rect.bottom + 2,
+      left: rect.left,
+      width: Math.max(rect.width, 140),
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    updateMenuBox()
+  }, [open, draft, updateMenuBox])
 
   useEffect(() => {
     if (!open) return
     const onDoc = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+      const target = event.target as Node
+      if (thRef.current?.contains(target) || menuRef.current?.contains(target)) return
+      setOpen(false)
     }
+    const onScrollOrResize = () => setOpen(false)
     document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
+    window.addEventListener('resize', onScrollOrResize)
+    // table-shell and page scroll would misplace a fixed menu — close instead.
+    document.addEventListener('scroll', onScrollOrResize, true)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      window.removeEventListener('resize', onScrollOrResize)
+      document.removeEventListener('scroll', onScrollOrResize, true)
+    }
   }, [open])
 
   useEffect(() => {
     if (!open || !date) return
     const seq = ++seqRef.current
     const timer = window.setTimeout(() => {
+      setLoading(true)
+      setError('')
       const path = `/devices/${deviceId}/calls/bill-ani-values?date=${encodeURIComponent(date)}` +
         `&q=${encodeURIComponent(draft.trim())}&limit=50`
       api<{ items: string[] }>(path).then((response) => {
         if (seq !== seqRef.current) return
         setSuggestions(Array.isArray(response.items) ? response.items : [])
-      }).catch(() => {
+        setLoading(false)
+      }).catch((err: unknown) => {
         if (seq !== seqRef.current) return
         setSuggestions([])
+        setError(err instanceof Error ? err.message : 'Не удалось загрузить номера')
+        setLoading(false)
       })
     }, 200)
     return () => window.clearTimeout(timer)
@@ -2006,10 +2043,26 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
     setOpen(false)
   }
 
-  return <th ref={rootRef} className="bill-ani-filter" title="Bill ANI"
+  const menu = open ? createPortal(
+    <ul ref={menuRef} className="bill-ani-suggest" role="listbox"
+      style={{ top: menuBox.top, left: menuBox.left, width: menuBox.width }}>
+      {loading && <li className="bill-ani-suggest-status">Загрузка…</li>}
+      {!loading && error && <li className="bill-ani-suggest-status">{error}</li>}
+      {!loading && !error && suggestions.length === 0 &&
+        <li className="bill-ani-suggest-status">Нет номеров за день</li>}
+      {!loading && !error && suggestions.map((value) => <li key={value} role="option"
+        onMouseDown={(event) => {
+          event.preventDefault()
+          commit(value)
+        }}>{value}</li>)}
+    </ul>,
+    document.body,
+  ) : null
+
+  return <th ref={thRef} className="bill-ani-filter" title="Bill ANI"
     onClick={(event) => event.stopPropagation()}>
-    <input className="mono" placeholder="Bill ANI" value={draft}
-      aria-label="Поиск Bill ANI" autoComplete="off"
+    <input ref={inputRef} className="mono" placeholder="Bill ANI" value={draft}
+      aria-label="Поиск Bill ANI" autoComplete="off" aria-expanded={open}
       onFocus={() => setOpen(true)}
       onChange={(event) => {
         setDraft(event.target.value)
@@ -2023,13 +2076,7 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
           setOpen(false)
         }
       }} />
-    {open && suggestions.length > 0 && <ul className="bill-ani-suggest" role="listbox">
-      {suggestions.map((value) => <li key={value} role="option"
-        onMouseDown={(event) => {
-          event.preventDefault()
-          commit(value)
-        }}>{value}</li>)}
-    </ul>}
+    {menu}
   </th>
 }
 

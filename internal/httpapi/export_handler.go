@@ -70,7 +70,14 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 				request, deviceID, export.Search, location, columnFilters,
 			)
 		} else {
-			workbook, err = s.exportEltexCalls(request, deviceID, export.Search, location)
+			columnFilters, filterErr := parseEltexColumnFilters(request)
+			if filterErr != nil {
+				writeError(writer, http.StatusBadRequest, filterErr.Error())
+				return
+			}
+			workbook, err = s.exportEltexCalls(
+				request, deviceID, export.Search, location, columnFilters,
+			)
 		}
 	case "syslog":
 		workbook, err = s.exportEvents(
@@ -121,6 +128,7 @@ func validateExportCapability(writer http.ResponseWriter, dataset string, device
 
 func (s *Server) exportEltexCalls(
 	request *http.Request, deviceID uuid.UUID, search string, location *time.Location,
+	filters analytics.EltexColumnFilters,
 ) (*exportWorkbook, error) {
 	workbook, err := newExportWorkbook(eltexCallExportHeaderAnys(), excelMaximumRows)
 	if err != nil {
@@ -141,11 +149,11 @@ func (s *Server) exportEltexCalls(
 		if asynchronous {
 			page, err = s.Analytics.ListExportCallsPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, s.exportPageSize(), cursor, exportJobTimeRange(asyncJob),
+				search, s.exportPageSize(), cursor, exportJobTimeRange(asyncJob), filters,
 			)
 		} else {
 			page, err = s.Analytics.ListCallsPage(
-				request.Context(), deviceID, search, s.exportPageSize(), cursor,
+				request.Context(), deviceID, search, s.exportPageSize(), cursor, filters,
 			)
 		}
 		if err != nil {

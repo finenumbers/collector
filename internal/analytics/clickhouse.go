@@ -427,20 +427,23 @@ func (c *Client) ReinterpretCDRTimes(
 		timezone, timezone, timezone, timezone, timezone, deviceID, timezone)
 }
 
-func (c *Client) ListCallsPage(ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor) (CallPage, error) {
-	return c.ListCallsPageRange(ctx, deviceID, search, limit, cursor, nil)
+func (c *Client) ListCallsPage(
+	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
+	filters EltexColumnFilters,
+) (CallPage, error) {
+	return c.ListCallsPageRange(ctx, deviceID, search, limit, cursor, nil, filters)
 }
 
 func (c *Client) ListCallsPageRange(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64,
-	cursor *CallCursor, timeRange *TimeRange,
+	cursor *CallCursor, timeRange *TimeRange, filters EltexColumnFilters,
 ) (CallPage, error) {
 	ctx, release, err := c.queryContext(ctx, workload.Interactive)
 	if err != nil {
 		return CallPage{}, err
 	}
 	defer release()
-	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
+	if (search != "" || len(filters) > 0) && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
 		return CallPage{}, ErrSearchRequiresRange
 	}
 	if limit == 0 || limit > 1000 {
@@ -481,6 +484,7 @@ func (c *Client) ListCallsPageRange(
 			args = append(args, search)
 		}
 	}
+	query, args = appendEltexColumnFilters(query, args, filters)
 	if cursor != nil {
 		query += ` AND (coalesce(t.setup_time,c.setup_time,c.ingested_at) < ?
 			OR (coalesce(t.setup_time,c.setup_time,c.ingested_at) = ? AND c.record_id < ?))`

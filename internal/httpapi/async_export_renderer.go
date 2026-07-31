@@ -85,7 +85,9 @@ func (s *Server) AsyncExportRenderer() exportworker.RenderFunc {
 					request, job.DeviceID, job.Search, location, job.ColumnFilters,
 				)
 			} else {
-				workbook, err = s.exportEltexCalls(request, job.DeviceID, job.Search, location)
+				workbook, err = s.exportEltexCalls(
+					request, job.DeviceID, job.Search, location, job.ColumnFilters,
+				)
 			}
 		case "syslog":
 			workbook, err = s.exportEvents(request, job.DeviceID, job.Category, job.Search, location)
@@ -218,7 +220,7 @@ func (s *Server) renderCallsCSVZip(
 		for {
 			page, err := s.Analytics.ListExportCallsPage(
 				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
-				s.exportPageSize(), cursor, exportJobTimeRange(job),
+				s.exportPageSize(), cursor, exportJobTimeRange(job), job.ColumnFilters,
 			)
 			if err != nil {
 				return total, err
@@ -264,6 +266,7 @@ func (s *Server) renderAntifraudCSVZip(
 		for {
 			page, err := s.Analytics.ListAntifraudCallsPage(
 				ctx, job.DeviceID, job.Search, s.exportPageSize(), cursor, exportJobTimeRange(job),
+				job.ColumnFilters,
 			)
 			if err != nil {
 				return total, err

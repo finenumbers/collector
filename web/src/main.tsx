@@ -1436,6 +1436,8 @@ function ExportButton({ deviceID, dataset, query, date, filters }: {
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
   const [columnFilters, setColumnFilters] = useState<SummaryColumnFilters>({})
+  const [eltexColumnFilters, setEltexColumnFilters] = useState<EltexColumnFilters>({})
+  const [antifraudColumnFilters, setAntifraudColumnFilters] = useState<AntifraudColumnFilters>({})
   const timezone = activeDeviceTimezone(device)
   const dateStorageKey = `collector:date:${device.id}`
   const [date, setDate] = useState(() =>
@@ -1469,10 +1471,23 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     ? columnPresetId
     : defaultCdrPresetId()
   const satelColumnFiltersActive = isSatel && dataset === 'calls'
-  const hasActiveColumnFilters = Object.values(columnFilters).some((value) => value.trim() !== '')
+  const eltexColumnFiltersActive = !isSatel && dataset === 'calls'
+  const antifraudFiltersActive = !isSatel && dataset === 'antifraud'
+  const columnFiltersActive = satelColumnFiltersActive || eltexColumnFiltersActive || antifraudFiltersActive
+  const hasActiveColumnFilters = satelColumnFiltersActive
+    ? Object.values(columnFilters).some((value) => value.trim() !== '')
+    : eltexColumnFiltersActive
+      ? Object.values(eltexColumnFilters).some((value) => Boolean(value?.trim()))
+      : antifraudFiltersActive
+        ? Object.values(antifraudColumnFilters).some((value) => Boolean(value?.trim()))
+        : false
   const exportColumnFilters = satelColumnFiltersActive
     ? satelFiltersToQuery(columnFilters)
-    : undefined
+    : eltexColumnFiltersActive
+      ? eltexFiltersToQuery(eltexColumnFilters)
+      : antifraudFiltersActive
+        ? antifraudFiltersToQuery(antifraudColumnFilters)
+        : undefined
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     if (dataset === 'calls') {
@@ -1483,21 +1498,33 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         for (const [key, value] of Object.entries(satelFiltersToQuery(columnFilters))) {
           params.set(`f.${key}`, value)
         }
-      } else if (query) {
-        params.set('q', query)
+      } else {
+        for (const [key, value] of Object.entries(eltexFiltersToQuery(eltexColumnFilters))) {
+          params.set(`f.${key}`, value)
+        }
       }
       const base = `/devices/${device.id}/calls?${params.toString()}`
       return pageCursor
         ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
         : base
     }
-    const base = dataset === 'antifraud'
-      ? `/devices/${device.id}/antifraud-calls?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
-      : `/devices/${device.id}/syslog-messages?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
+    if (dataset === 'antifraud') {
+      const params = new URLSearchParams()
+      params.set('date', date)
+      params.set('limit', String(PAGE_SIZE))
+      for (const [key, value] of Object.entries(antifraudFiltersToQuery(antifraudColumnFilters))) {
+        params.set(`f.${key}`, value)
+      }
+      const base = `/devices/${device.id}/antifraud-calls?${params.toString()}`
+      return pageCursor
+        ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
+        : base
+    }
+    const base = `/devices/${device.id}/syslog-messages?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [columnFilters, dataset, date, device.id, isSatel, query])
+  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel, query])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1583,6 +1610,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           if (event.target.value) {
             window.sessionStorage.setItem(dateStorageKey, event.target.value)
             setColumnFilters({})
+            setEltexColumnFilters({})
+            setAntifraudColumnFilters({})
             setDate(event.target.value)
           }
         }} /></label>
@@ -1599,26 +1628,31 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     <div className="toolbar">
       <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
-        {satelColumnFiltersActive && <button type="button" className="secondary"
+        {columnFiltersActive && <button type="button" className="secondary"
           disabled={!hasActiveColumnFilters}
-          onClick={() => setColumnFilters({})}>Сбросить фильтры</button>}
+          onClick={() => {
+            if (satelColumnFiltersActive) setColumnFilters({})
+            else if (eltexColumnFiltersActive) setEltexColumnFilters({})
+            else setAntifraudColumnFilters({})
+          }}>Сбросить фильтры</button>}
         {dataset === 'calls' && <label className="cdr-preset">
           <select value={activePresetId} onChange={(event) => {
             const next = event.target.value || defaultCdrPresetId()
             window.sessionStorage.setItem(presetStorageKey, next)
             setColumnFilters({})
+            setEltexColumnFilters({})
             setColumnPresetId(next)
           }} aria-label="Пресет колонок">
             {vendorPresets.map((preset) =>
               <option key={preset.id} value={preset.id}>{preset.label}</option>)}
           </select>
         </label>}
-        {!satelColumnFiltersActive && <div className="search"><Search size={14} />
+        {!columnFiltersActive && <div className="search"><Search size={14} />
           <input placeholder="Поиск по данным…" value={query}
             onChange={(event) => setQuery(event.target.value)} /></div>}
         <ExportButton key={`${dataset}:${date}:${query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
-          query={satelColumnFiltersActive ? '' : query} date={date}
+          query={columnFiltersActive ? '' : query} date={date}
           filters={exportColumnFilters} />
       </div>
     </div>
@@ -1649,9 +1683,31 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         : <CallsTable rows={rows as CallRow[]}
           columns={resolvePresetColumns('eltex', activePresetId)}
           fillWidth={activePresetId === 'summary'}
+          columnFilter={eltexColumnFiltersActive ? {
+            deviceId: device.id,
+            date,
+            filters: eltexColumnFilters,
+            onChange: (key, value) => setEltexColumnFilters((current) => {
+              const next = { ...current }
+              if (!value.trim()) delete next[key]
+              else next[key] = value.trim()
+              return next
+            }),
+          } : undefined}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedCall} />) :
         dataset === 'antifraud'
           ? <AntifraudTable rows={rows as AntifraudRow[]} timezone={activeDeviceTimezone(device)}
+            columnFilter={antifraudFiltersActive ? {
+              deviceId: device.id,
+              date,
+              filters: antifraudColumnFilters,
+              onChange: (key, value) => setAntifraudColumnFilters((current) => {
+                const next = { ...current }
+                if (!value.trim()) delete next[key]
+                else next[key] = value.trim()
+                return next
+              }),
+            } : undefined}
             onSelect={setSelectedAntifraud} />
           : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
             onSelect={setSelectedEvent} />}
@@ -1838,14 +1894,42 @@ function AntifraudEmptyState() {
   </div>
 }
 
-function AntifraudTable({ rows, timezone, onSelect }: {
+function AntifraudTable({ rows, timezone, onSelect, columnFilter }: {
   rows: AntifraudRow[]
   timezone: string
   onSelect: (row: AntifraudRow) => void
+  columnFilter?: {
+    deviceId: string
+    date: string
+    filters: AntifraudColumnFilters
+    onChange: (key: AntifraudFilterKey, value: string) => void
+  }
 }) {
+  const peerQuery = columnFilter ? antifraudFiltersToQuery(columnFilter.filters) : {}
+  const headerFilter = (key: AntifraudFilterKey) => {
+    if (!columnFilter) return null
+    const filterDef = ANTIFRAUD_FILTER_BY_KEY[key]
+    return <SummaryColumnHeaderFilter
+      key={`${filterDef.key}:${columnFilter.date}:${columnFilter.filters[filterDef.key] || ''}`}
+      deviceId={columnFilter.deviceId}
+      date={columnFilter.date}
+      column={filterDef.column}
+      label={filterDef.header}
+      value={columnFilter.filters[filterDef.key] || ''}
+      peerFilters={peerQuery}
+      valuesPath="antifraud-calls/column-values"
+      formatOptionLabel={(value) => antifraudFilterDisplayLabel(filterDef.column, value)}
+      onChange={(value) => columnFilter.onChange(filterDef.key, value)} />
+  }
   return <table className="antifraud-table table-fit"><thead><tr>
-    <th>Начало</th><th>Номер A</th><th>Номер B</th><th>Фазы</th><th>Цепочка</th><th>Статус</th>
-    <th>Пакеты</th><th>Покрытие CDR</th>
+    <th>Начало</th>
+    {columnFilter ? headerFilter('calling') : <th>Номер A</th>}
+    {columnFilter ? headerFilter('called') : <th>Номер B</th>}
+    {columnFilter ? headerFilter('phases') : <th>Фазы</th>}
+    {columnFilter ? headerFilter('chain') : <th>Цепочка</th>}
+    {columnFilter ? headerFilter('radius_outcome') : <th>Статус</th>}
+    <th>Пакеты</th>
+    {columnFilter ? headerFilter('coverage') : <th>Покрытие CDR</th>}
     <th className="col-flex-pair">Acct-Session-Id</th>
     <th className="col-flex-pair">H323 Conf ID</th>
   </tr></thead><tbody>{rows.map((row) => <tr key={row.callId}
@@ -1905,18 +1989,42 @@ function eltexCallCell(row: CallRow, column: CdrColumnDef, timezone: string): Re
   }
 }
 
-function CallsTable({ rows, columns, timezone, onSelect, fillWidth }: {
+function CallsTable({ rows, columns, timezone, onSelect, fillWidth, columnFilter }: {
   rows: CallRow[]
   columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: CallRow) => void
   fillWidth?: boolean
+  columnFilter?: {
+    deviceId: string
+    date: string
+    filters: EltexColumnFilters
+    onChange: (key: EltexFilterKey, value: string) => void
+  }
 }) {
   const flexKey = fillWidth ? 'releaseInfo' : ''
+  const peerQuery = columnFilter ? eltexFiltersToQuery(columnFilter.filters) : {}
   return <table className={['eltex-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
-    {columns.map((column) => <th key={column.key} title={column.header}
-      className={column.key === flexKey ? 'col-flex' : undefined}>{column.header}</th>)}
+    {columns.map((column) => {
+      const filterKey = column.key as EltexFilterKey
+      const filterDef = columnFilter && ELTEX_FILTER_KEY_SET.has(filterKey)
+        ? ELTEX_FILTER_BY_KEY[filterKey]
+        : undefined
+      if (columnFilter && filterDef) {
+        return <SummaryColumnHeaderFilter
+          key={`${filterDef.key}:${columnFilter.date}:${columnFilter.filters[filterDef.key] || ''}`}
+          deviceId={columnFilter.deviceId}
+          date={columnFilter.date}
+          column={filterDef.column}
+          label={filterDef.header}
+          value={columnFilter.filters[filterDef.key] || ''}
+          peerFilters={peerQuery}
+          onChange={(value) => columnFilter.onChange(filterDef.key, value)} />
+      }
+      return <th key={column.key} title={column.header}
+        className={column.key === flexKey ? 'col-flex' : undefined}>{column.header}</th>
+    })}
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId}
     className={`outcome-row outcome-${cdrOutcome(row.releaseCause)}`}
     onClick={() => onSelect(row)}>
@@ -2062,6 +2170,83 @@ function satelFiltersToQuery(filters: SummaryColumnFilters): Record<string, stri
   return out
 }
 
+const ELTEX_FILTER_COLUMNS = [
+  { key: 'outgoingCgpn', column: 'outgoing_cgpn', header: 'Номер A: выход' },
+  { key: 'outgoingCdpn', column: 'outgoing_cdpn', header: 'Номер B: выход' },
+  { key: 'outgoingRedirectingNumber', column: 'outgoing_redirecting_number', header: 'Redirecting выход' },
+  { key: 'incomingDescription', column: 'incoming_description', header: 'Входящий маршрут' },
+  { key: 'outgoingDescription', column: 'outgoing_description', header: 'Исходящий маршрут' },
+  { key: 'releaseInfo', column: 'release_info', header: 'Результат' },
+] as const
+
+type EltexFilterKey = typeof ELTEX_FILTER_COLUMNS[number]['key']
+type EltexColumnFilters = Partial<Record<EltexFilterKey, string>>
+
+const ELTEX_FILTER_BY_KEY = Object.fromEntries(
+  ELTEX_FILTER_COLUMNS.map((item) => [item.key, item]),
+) as Record<EltexFilterKey, typeof ELTEX_FILTER_COLUMNS[number]>
+
+const ELTEX_FILTER_KEY_SET = new Set<EltexFilterKey>(ELTEX_FILTER_COLUMNS.map((item) => item.key))
+
+function eltexFiltersToQuery(filters: EltexColumnFilters): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const item of ELTEX_FILTER_COLUMNS) {
+    const value = filters[item.key]?.trim()
+    if (value) out[item.column] = value
+  }
+  return out
+}
+
+const ANTIFRAUD_FILTER_COLUMNS = [
+  { key: 'calling', column: 'calling', header: 'Номер A' },
+  { key: 'called', column: 'called', header: 'Номер B' },
+  { key: 'phases', column: 'phases', header: 'Фазы' },
+  { key: 'chain', column: 'chain', header: 'Цепочка' },
+  { key: 'radius_outcome', column: 'radius_outcome', header: 'Статус' },
+  { key: 'coverage', column: 'coverage', header: 'Покрытие CDR' },
+] as const
+
+type AntifraudFilterKey = typeof ANTIFRAUD_FILTER_COLUMNS[number]['key']
+type AntifraudColumnFilters = Partial<Record<AntifraudFilterKey, string>>
+
+const ANTIFRAUD_FILTER_BY_KEY = Object.fromEntries(
+  ANTIFRAUD_FILTER_COLUMNS.map((item) => [item.key, item]),
+) as Record<AntifraudFilterKey, typeof ANTIFRAUD_FILTER_COLUMNS[number]>
+
+const ANTIFRAUD_FILTER_VALUE_LABELS: Record<string, Record<string, string>> = {
+  chain: {
+    complete: 'Полная',
+    partial: 'Частичная',
+    minimal: 'Минимальная',
+  },
+  radius_outcome: {
+    accept: 'Accept',
+    reject: 'Reject',
+    no_response: 'Нет ответа',
+  },
+  coverage: {
+    matched: 'Совпал',
+    ambiguous: 'Неоднозначно',
+    awaiting_cdr: 'Ожидание CDR',
+    expected: 'Ожидается',
+    late: 'Поздний',
+    missing: 'Нет CDR',
+  },
+}
+
+function antifraudFiltersToQuery(filters: AntifraudColumnFilters): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const item of ANTIFRAUD_FILTER_COLUMNS) {
+    const value = filters[item.key]?.trim()
+    if (value) out[item.column] = value
+  }
+  return out
+}
+
+function antifraudFilterDisplayLabel(column: string, value: string): string {
+  return ANTIFRAUD_FILTER_VALUE_LABELS[column]?.[value] || value
+}
+
 function filtersKeyFrom(filters?: Record<string, string>): string {
   if (!filters || Object.keys(filters).length === 0) return ''
   return Object.keys(filters).sort().map((key) => `${key}=${filters[key]}`).join('&')
@@ -2075,12 +2260,16 @@ type SummaryColumnFilterProps = {
   value: string
   peerFilters: Record<string, string>
   onChange: (value: string) => void
+  valuesPath?: string
+  formatOptionLabel?: (value: string) => string
 }
 
 type ColumnValueItem = { value: string; count: number }
 
 function SummaryColumnHeaderFilter({
   deviceId, date, column, label, value, peerFilters, onChange,
+  valuesPath = 'calls/column-values',
+  formatOptionLabel,
 }: SummaryColumnFilterProps) {
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
@@ -2157,7 +2346,7 @@ function SummaryColumnHeaderFilter({
         if (key === column || !filterValue) continue
         params.set(`f.${key}`, filterValue)
       }
-      const path = `/devices/${deviceId}/calls/column-values?${params.toString()}`
+      const path = `/devices/${deviceId}/${valuesPath}?${params.toString()}`
       api<{ items: ColumnValueItem[] }>(path).then((response) => {
         if (seq !== seqRef.current) return
         const items = Array.isArray(response.items) ? response.items : []
@@ -2171,7 +2360,7 @@ function SummaryColumnHeaderFilter({
       })
     }, 200)
     return () => window.clearTimeout(timer)
-  }, [open, deviceId, date, search, column, peerKey, peerFilters])
+  }, [open, deviceId, date, search, column, peerKey, peerFilters, valuesPath])
 
   const clear = () => {
     onChange('')
@@ -2214,7 +2403,10 @@ function SummaryColumnHeaderFilter({
               pick(item.value)
             }}>
             <span className="col-filter-check">{isSelected ? <Check size={11} /> : null}</span>
-            <span className="col-filter-value mono" title={item.value}>{item.value}</span>
+            <span className="col-filter-value mono"
+              title={formatOptionLabel ? formatOptionLabel(item.value) : item.value}>
+              {formatOptionLabel ? formatOptionLabel(item.value) : item.value}
+            </span>
             <span className="col-filter-count">
               ({Number(item.count || 0).toLocaleString('ru-RU')})
             </span>

@@ -95,11 +95,6 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	columnFilters, err := parseSatelColumnFiltersMap(input.Filters)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
-		return
-	}
 	if input.Format == "" {
 		input.Format = "auto"
 	}
@@ -130,9 +125,29 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 	if !ok {
 		return
 	}
-	if len(columnFilters) > 0 && device.TemplateKey != equipment.TemplateSatelRTUCDRV1 {
-		writeError(writer, http.StatusBadRequest, "column filters are only available for Satel RTU")
-		return
+	var columnFilters map[string]string
+	switch {
+	case validated.Dataset == "antifraud":
+		parsed, filterErr := parseAntifraudColumnFiltersMap(input.Filters)
+		if filterErr != nil {
+			writeError(writer, http.StatusBadRequest, filterErr.Error())
+			return
+		}
+		columnFilters = parsed
+	case device.TemplateKey == equipment.TemplateSatelRTUCDRV1:
+		parsed, filterErr := parseSatelColumnFiltersMap(input.Filters)
+		if filterErr != nil {
+			writeError(writer, http.StatusBadRequest, filterErr.Error())
+			return
+		}
+		columnFilters = parsed
+	default:
+		parsed, filterErr := parseEltexColumnFiltersMap(input.Filters)
+		if filterErr != nil {
+			writeError(writer, http.StatusBadRequest, filterErr.Error())
+			return
+		}
+		columnFilters = parsed
 	}
 	if validated.Dataset == "antifraud" {
 		ready, readyErr := s.Store.CustomAntifraudReady(request.Context(), deviceID)

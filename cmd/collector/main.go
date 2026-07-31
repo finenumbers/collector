@@ -497,6 +497,15 @@ func pageNeedsPSTNEnrichment(records []analytics.SatelRTURecord) bool {
 	return false
 }
 
+func pageNeedsGeoIPEnrichment(records []analytics.SatelRTURecord) bool {
+	for _, record := range records {
+		if analytics.RecordNeedsGeoIPEnrichment(record) {
+			return true
+		}
+	}
+	return false
+}
+
 func enrichAndWriteSatelPage(
 	ctx context.Context, warehouse *analytics.Client,
 	pstn *pstnlookup.Client, geoip *geoiplookup.Client,
@@ -589,10 +598,19 @@ func runEnrichmentCatchUp(
 			}
 			continue
 		}
-		// Keep retrying the same cursor while eligible Operator/GAR gaps remain
+		// Keep retrying the same cursor while PSTN or GeoIP gaps remain
 		// (rate limit / transient API errors) instead of skipping old calls.
 		if pstn != nil && pstn.Enabled() && pageNeedsPSTNEnrichment(records) {
 			slog.Warn("enrichment catch-up PSTN gaps unresolved, retrying page",
+				"page", len(records), "written", written,
+				"lastRecordId", records[len(records)-1].RecordID.String())
+			if !sleepContext(ctx, sleepFor) {
+				return
+			}
+			continue
+		}
+		if geoip != nil && geoip.Enabled() && pageNeedsGeoIPEnrichment(records) {
+			slog.Warn("enrichment catch-up GeoIP gaps unresolved, retrying page",
 				"page", len(records), "written", written,
 				"lastRecordId", records[len(records)-1].RecordID.String())
 			if !sleepContext(ctx, sleepFor) {

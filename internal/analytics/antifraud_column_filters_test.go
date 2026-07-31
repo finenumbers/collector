@@ -31,6 +31,7 @@ func TestAntifraudFilterExpressionsPresent(t *testing.T) {
 		"'complete'", "'partial'", "'minimal'",
 		"'reject'", "'accept'", "'no_response'",
 		"'matched'", "'awaiting_cdr'", "'missing'",
+		"call.coverage_state",
 	} {
 		blob := afPhasesExpr + afChainExpr + afRadiusOutcomeExpr + afCoverageExpr
 		if !strings.Contains(blob, needle) {

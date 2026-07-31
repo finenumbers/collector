@@ -91,6 +91,16 @@ func TestOrderedFamiliesAndCompleteness(t *testing.T) {
 	if deriveAFCoverageState(false, false, time.Now().UTC().Add(-40*time.Minute), time.Now().UTC()) != "missing" {
 		t.Fatal("missing coverage")
 	}
+	now := time.Now().UTC()
+	if got := resolveAFCoverageState("expected", false, false, now.Add(-40*time.Minute), now); got != "expected" {
+		t.Fatalf("stored coverage wins over age fallback: %q", got)
+	}
+	if got := resolveAFCoverageState("", false, false, now.Add(-7*time.Minute), now); got != "expected" {
+		t.Fatalf("empty stored uses age fallback expected: %q", got)
+	}
+	if got := resolveAFCoverageState("late", true, false, now, now); got != "matched" {
+		t.Fatalf("linked CDR wins over stored: %q", got)
+	}
 }
 
 func TestRadiusOutcomeFromSummary(t *testing.T) {

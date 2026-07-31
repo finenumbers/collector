@@ -104,7 +104,7 @@ func Defaults() Document {
 		},
 		Coverage: CoverageSettings{
 			ExpectedGrace:   "5m",
-			LateThreshold:   "5m",
+			LateThreshold:   "10m",
 			MissingTerminal: "30m",
 			RetryHorizon:    "168h",
 			WorkerSleep:     "5s",

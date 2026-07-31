@@ -324,8 +324,8 @@ func (c *Client) ListAntifraudCallsPage(
 		item.Phases = orderedFamilies(families)
 		item.RadiusOutcome = radiusOutcomeFromSummary(rejects > 0, accepts > 0)
 		item.ChainCompleteness = chainCompletenessFromSummary(item.Phases, unpaired, fallback, item.Status)
-		item.Coverage.State = deriveAFCoverageState(len(item.Coverage.LinkedCDRIDs) > 0,
-			item.Coverage.Ambiguous, item.FirstSeenAt, now)
+		item.Coverage.State = resolveAFCoverageState(item.storedCoverageState,
+			len(item.Coverage.LinkedCDRIDs) > 0, item.Coverage.Ambiguous, item.FirstSeenAt, now)
 		item.Coverage.Evidence = safeJSONObject(evidence)
 		items = append(items, item)
 	}
@@ -393,8 +393,9 @@ func (c *Client) AntifraudCallDetail(
 		detail.Warnings = append(detail.Warnings,
 			"coverage unavailable: "+redact.Text(err.Error()))
 	} else {
-		detail.Coverage.State = deriveAFCoverageState(len(detail.Coverage.LinkedCDRIDs) > 0,
-			detail.Coverage.Ambiguous, detail.FirstSeenAt, time.Now().UTC())
+		detail.Coverage.State = resolveAFCoverageState(detail.storedCoverageState,
+			len(detail.Coverage.LinkedCDRIDs) > 0, detail.Coverage.Ambiguous,
+			detail.FirstSeenAt, time.Now().UTC())
 		if len(detail.Coverage.LinkedCDRIDs) > 0 {
 			detail.LinkedCDRs, err = c.loadCDRFacts(ctx, deviceID, detail.Coverage.LinkedCDRIDs)
 			if err != nil {
@@ -837,6 +838,25 @@ func orderedFamilies(families []string) []string {
 	return result
 }
 
+func resolveAFCoverageState(
+	stored string, matched, ambiguous bool, firstSeen, now time.Time,
+) string {
+	if matched {
+		return "matched"
+	}
+	if ambiguous {
+		return "ambiguous"
+	}
+	switch stored {
+	case "awaiting_cdr", "expected", "late", "missing", "matched", "ambiguous":
+		return stored
+	default:
+		return deriveAFCoverageState(false, false, firstSeen, now)
+	}
+}
+
+// deriveAFCoverageState is the age fallback when call.coverage_state is empty.
+// Windows match default ExpectedGrace=5m / LateThreshold=10m / MissingTerminal=30m.
 func deriveAFCoverageState(matched, ambiguous bool, firstSeen, now time.Time) string {
 	if matched {
 		return "matched"

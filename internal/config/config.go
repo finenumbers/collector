@@ -118,7 +118,7 @@ func Load() (Config, error) {
 		CustomRetryHorizon:             envDuration("CUSTOM_RETRY_HORIZON", 7*24*time.Hour),
 		CustomAssemblyIdle:             envDuration("CUSTOM_ASSEMBLY_IDLE", 2*time.Second),
 		CoverageExpectedGrace:          envDuration("CDR_COVERAGE_EXPECTED_GRACE", 5*time.Minute),
-		CoverageLateThreshold:          envDuration("CDR_COVERAGE_LATE_THRESHOLD", 5*time.Minute),
+		CoverageLateThreshold:          envDuration("CDR_COVERAGE_LATE_THRESHOLD", 10*time.Minute),
 		CoverageMissingTerminal:        envDuration("CDR_COVERAGE_MISSING_TERMINAL", 30*time.Minute),
 		CoverageRetryHorizon:           envDuration("CDR_COVERAGE_RETRY_HORIZON", 7*24*time.Hour),
 		CoverageWorkerSleep:            envDuration("CDR_COVERAGE_WORKER_SLEEP", 5*time.Second),

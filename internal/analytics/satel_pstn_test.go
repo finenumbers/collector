@@ -270,4 +270,26 @@ func TestSatelPSTNEligibilitySQLHelpers(t *testing.T) {
 	if needs == "" {
 		t.Fatal("empty needs predicate")
 	}
+	geo := satelGeoIPNeedsEnrichmentExpr()
+	if !strings.Contains(geo, "remote_src_geoip_iso=''") ||
+		!strings.Contains(geo, "remote_dst_asn_org=''") ||
+		!strings.Contains(geo, " OR ") {
+		t.Fatalf("geo needs expr = %q", geo)
+	}
+	partial := SatelRTURecord{
+		RemoteSrcSigAddress: "1.2.3.4",
+		RemoteSrcGeoipISO:   "RU",
+	}
+	if !RecordNeedsGeoIPEnrichment(partial) {
+		t.Fatal("partial GeoIP src must still need enrichment")
+	}
+	complete := SatelRTURecord{
+		RemoteSrcSigAddress: "1.2.3.4",
+		RemoteSrcGeoipISO:   "RU",
+		RemoteSrcGeoipCity:  "Moscow",
+		RemoteSrcASNOrg:     "AS",
+	}
+	if RecordNeedsGeoIPEnrichment(complete) {
+		t.Fatal("complete GeoIP src must not need enrichment")
+	}
 }

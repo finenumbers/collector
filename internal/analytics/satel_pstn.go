@@ -299,10 +299,24 @@ func satelGeoipAllColumnsFilledExpr() string {
 
 func satelNeedsEnrichmentPredicate() string {
 	return `(` + satelPSTNNeedsEnrichmentExpr() + `)
-				OR ((remote_src_sig_address!='' OR remote_dst_sig_address!='')
-					AND remote_src_geoip_iso='' AND remote_dst_geoip_iso=''
-					AND remote_src_geoip_city='' AND remote_dst_geoip_city=''
-					AND remote_src_asn_org='' AND remote_dst_asn_org='')`
+				OR (` + satelGeoIPNeedsEnrichmentExpr() + `)`
+}
+
+// satelGeoIPNeedsEnrichmentExpr is true when a signaling IP is present but any of
+// that side's GeoIP fields is still empty (partial fills must retry).
+func satelGeoIPNeedsEnrichmentExpr() string {
+	return `((remote_src_sig_address!='' AND (remote_src_geoip_iso='' OR remote_src_geoip_city='' OR remote_src_asn_org=''))
+					OR (remote_dst_sig_address!='' AND (remote_dst_geoip_iso='' OR remote_dst_geoip_city='' OR remote_dst_asn_org='')))`
+}
+
+// RecordNeedsGeoIPEnrichment reports whether any signaling side still lacks
+// ISO/City/ASN after a partial or failed GeoIP lookup.
+func RecordNeedsGeoIPEnrichment(record SatelRTURecord) bool {
+	srcNeeds := record.RemoteSrcSigAddress != "" &&
+		(record.RemoteSrcGeoipISO == "" || record.RemoteSrcGeoipCity == "" || record.RemoteSrcASNOrg == "")
+	dstNeeds := record.RemoteDstSigAddress != "" &&
+		(record.RemoteDstGeoipISO == "" || record.RemoteDstGeoipCity == "" || record.RemoteDstASNOrg == "")
+	return srcNeeds || dstNeeds
 }
 
 // ListSatelRTURecordsNeedingEnrichment pages FINAL rows missing PSTN and/or GeoIP

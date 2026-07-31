@@ -76,6 +76,15 @@ func (c *Client) DiscoverSyslogBuckets(
 	return discovery, nil
 }
 
+// clampCustomProjectionLoadLimit keeps valid runtime maxEvents (1..200_000).
+// Invalid values fall back to 20_000 (same as historical default load size).
+func clampCustomProjectionLoadLimit(limit int) int {
+	if limit <= 0 || limit > 200_000 {
+		return 20_000
+	}
+	return limit
+}
+
 func (c *Client) LoadCustomRadiusEvents(
 	ctx context.Context, deviceID uuid.UUID, from, to time.Time, limit int,
 ) ([]customradius.RawEvent, error) {
@@ -84,9 +93,7 @@ func (c *Client) LoadCustomRadiusEvents(
 		return nil, err
 	}
 	defer release()
-	if limit <= 0 || limit > 100_000 {
-		limit = 20_000
-	}
+	limit = clampCustomProjectionLoadLimit(limit)
 	// Include RADIUS headers and Custom attribute-dump lines. Eltex often logs
 	// Acct-Session-Id / Eltex-AVPair on a separate line without the word RADIUS;
 	// excluding those dumps leaves packets without session keys.
@@ -129,9 +136,7 @@ func (c *Client) LoadCustomRadiusSessionEvents(
 	if len(identities) == 0 {
 		return nil, nil
 	}
-	if limit <= 0 || limit > 100_000 {
-		limit = 20_000
-	}
+	limit = clampCustomProjectionLoadLimit(limit)
 	ctx, release, err := c.queryContext(ctx, workload.CustomReplay)
 	if err != nil {
 		return nil, err

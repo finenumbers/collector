@@ -51,9 +51,13 @@ const (
 		ifNull(packet_summary.accepts,0)>0,'accept',
 		'no_response')`
 
+	// Prefer assignment match/ambiguous, then persisted call.coverage_state from
+	// reconciliation (runtime thresholds). Age-based fallback matches defaults
+	// ExpectedGrace=5m / LateThreshold=10m / MissingTerminal=30m.
 	afCoverageExpr = `multiIf(
 		length(ifNull(assignment.cdr_ids,[]))>0,'matched',
 		ifNull(assignment.ambiguous,0)=1,'ambiguous',
+		call.coverage_state IN ('awaiting_cdr','expected','late','missing','matched','ambiguous'),call.coverage_state,
 		dateDiff('second',call.first_seen_at,now())<300,'awaiting_cdr',
 		dateDiff('second',call.first_seen_at,now())<600,'expected',
 		dateDiff('second',call.first_seen_at,now())<1800,'late',

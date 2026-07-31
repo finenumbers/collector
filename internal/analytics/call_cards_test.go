@@ -85,21 +85,31 @@ func TestOrderedFamiliesAndCompleteness(t *testing.T) {
 	if partial.State != "partial" && partial.State != "minimal" {
 		t.Fatalf("partial=%+v", partial)
 	}
-	if deriveAFCoverageState(true, false, time.Now().UTC(), time.Now().UTC()) != "matched" {
+	defaults := CoverageThresholds{}.normalized()
+	if deriveAFCoverageState(true, false, time.Now().UTC(), time.Now().UTC(), defaults) != "matched" {
 		t.Fatal("matched coverage")
 	}
-	if deriveAFCoverageState(false, false, time.Now().UTC().Add(-40*time.Minute), time.Now().UTC()) != "missing" {
+	if deriveAFCoverageState(false, false, time.Now().UTC().Add(-40*time.Minute), time.Now().UTC(), defaults) != "missing" {
 		t.Fatal("missing coverage")
 	}
 	now := time.Now().UTC()
-	if got := resolveAFCoverageState("expected", false, false, now.Add(-40*time.Minute), now); got != "expected" {
+	if got := resolveAFCoverageState("expected", false, false, now.Add(-40*time.Minute), now, defaults); got != "expected" {
 		t.Fatalf("stored coverage wins over age fallback: %q", got)
 	}
-	if got := resolveAFCoverageState("", false, false, now.Add(-7*time.Minute), now); got != "expected" {
+	if got := resolveAFCoverageState("", false, false, now.Add(-7*time.Minute), now, defaults); got != "expected" {
 		t.Fatalf("empty stored uses age fallback expected: %q", got)
 	}
-	if got := resolveAFCoverageState("late", true, false, now, now); got != "matched" {
+	if got := resolveAFCoverageState("late", true, false, now, now, defaults); got != "matched" {
 		t.Fatalf("linked CDR wins over stored: %q", got)
+	}
+	custom := CoverageThresholds{
+		ExpectedGrace: 2 * time.Minute, LateThreshold: 4 * time.Minute, MissingTerminal: 8 * time.Minute,
+	}
+	if got := deriveAFCoverageState(false, false, now.Add(-3*time.Minute), now, custom); got != "expected" {
+		t.Fatalf("custom late threshold age fallback: %q", got)
+	}
+	if got := deriveAFCoverageState(false, false, now.Add(-5*time.Minute), now, custom); got != "late" {
+		t.Fatalf("custom missing terminal age fallback: %q", got)
 	}
 }
 

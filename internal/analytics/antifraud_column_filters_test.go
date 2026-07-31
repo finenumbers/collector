@@ -3,6 +3,7 @@ package analytics
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeAntifraudColumnFilters(t *testing.T) {
@@ -20,22 +21,33 @@ func TestNormalizeAntifraudColumnFilters(t *testing.T) {
 }
 
 func TestAntifraudFilterExpressionsPresent(t *testing.T) {
+	defaults := CoverageThresholds{}.normalized()
 	for _, col := range []string{"calling", "called", "phases", "chain", "radius_outcome", "coverage"} {
-		expr, ok := antifraudFilterExpr(col)
+		expr, ok := antifraudFilterExpr(col, defaults)
 		if !ok || expr == "" {
 			t.Fatalf("missing expr for %s", col)
 		}
 	}
+	coverageSQL := afCoverageExprSQL(defaults)
 	for _, needle := range []string{
 		"indication", "verification", "accounting",
 		"'complete'", "'partial'", "'minimal'",
 		"'reject'", "'accept'", "'no_response'",
 		"'matched'", "'awaiting_cdr'", "'missing'",
 		"call.coverage_state",
+		"<300", "<600", "<1800",
 	} {
-		blob := afPhasesExpr + afChainExpr + afRadiusOutcomeExpr + afCoverageExpr
+		blob := afPhasesExpr + afChainExpr + afRadiusOutcomeExpr + coverageSQL
 		if !strings.Contains(blob, needle) {
 			t.Fatalf("derived SQL missing %q", needle)
+		}
+	}
+	custom := afCoverageExprSQL(CoverageThresholds{
+		ExpectedGrace: 2 * time.Minute, LateThreshold: 4 * time.Minute, MissingTerminal: 8 * time.Minute,
+	})
+	for _, needle := range []string{"<120", "<240", "<480"} {
+		if !strings.Contains(custom, needle) {
+			t.Fatalf("custom coverage SQL missing %q in %s", needle, custom)
 		}
 	}
 }
@@ -44,7 +56,7 @@ func TestAppendAntifraudColumnFilters(t *testing.T) {
 	query, args := appendAntifraudColumnFilters("WHERE 1=1", nil, AntifraudColumnFilters{
 		"calling": "a",
 		"chain":   "complete",
-	})
+	}, CoverageThresholds{}.normalized())
 	if !strings.Contains(query, "call.calling") || !strings.Contains(query, "'complete'") {
 		t.Fatalf("query=%q", query)
 	}

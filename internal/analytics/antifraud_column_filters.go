@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"collector/internal/workload"
 
@@ -50,21 +51,27 @@ const (
 		ifNull(packet_summary.rejects,0)>0,'reject',
 		ifNull(packet_summary.accepts,0)>0,'accept',
 		'no_response')`
+)
 
-	// Prefer assignment match/ambiguous, then persisted call.coverage_state from
-	// reconciliation (runtime thresholds). Age-based fallback matches defaults
-	// ExpectedGrace=5m / LateThreshold=10m / MissingTerminal=30m.
-	afCoverageExpr = `multiIf(
+// afCoverageExprSQL prefers assignment match/ambiguous, then persisted
+// call.coverage_state from reconciliation, then age fallback using the same
+// runtime coverage windows as the reconcile worker (Настройки → Параметры).
+func afCoverageExprSQL(thresholds CoverageThresholds) string {
+	thresholds = thresholds.normalized()
+	grace := int64(thresholds.ExpectedGrace / time.Second)
+	late := int64(thresholds.LateThreshold / time.Second)
+	missing := int64(thresholds.MissingTerminal / time.Second)
+	return fmt.Sprintf(`multiIf(
 		length(ifNull(assignment.cdr_ids,[]))>0,'matched',
 		ifNull(assignment.ambiguous,0)=1,'ambiguous',
 		call.coverage_state IN ('awaiting_cdr','expected','late','missing','matched','ambiguous'),call.coverage_state,
-		dateDiff('second',call.first_seen_at,now())<300,'awaiting_cdr',
-		dateDiff('second',call.first_seen_at,now())<600,'expected',
-		dateDiff('second',call.first_seen_at,now())<1800,'late',
-		'missing')`
-)
+		dateDiff('second',call.first_seen_at,now())<%d,'awaiting_cdr',
+		dateDiff('second',call.first_seen_at,now())<%d,'expected',
+		dateDiff('second',call.first_seen_at,now())<%d,'late',
+		'missing')`, grace, late, missing)
+}
 
-func antifraudFilterExpr(column string) (string, bool) {
+func antifraudFilterExpr(column string, thresholds CoverageThresholds) (string, bool) {
 	switch column {
 	case "calling":
 		return "call.calling", true
@@ -77,7 +84,7 @@ func antifraudFilterExpr(column string) (string, bool) {
 	case "radius_outcome":
 		return afRadiusOutcomeExpr, true
 	case "coverage":
-		return afCoverageExpr, true
+		return afCoverageExprSQL(thresholds), true
 	default:
 		return "", false
 	}
@@ -114,7 +121,9 @@ func AntifraudColumnFilterAllowed(column string) bool {
 	return ok
 }
 
-func appendAntifraudColumnFilters(query string, args []any, filters AntifraudColumnFilters) (string, []any) {
+func appendAntifraudColumnFilters(
+	query string, args []any, filters AntifraudColumnFilters, thresholds CoverageThresholds,
+) (string, []any) {
 	if len(filters) == 0 {
 		return query, args
 	}
@@ -124,7 +133,7 @@ func appendAntifraudColumnFilters(query string, args []any, filters AntifraudCol
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		expr, ok := antifraudFilterExpr(key)
+		expr, ok := antifraudFilterExpr(key, thresholds)
 		if !ok {
 			continue
 		}
@@ -167,7 +176,8 @@ func (c *Client) ListAntifraudColumnValues(
 	timeRange TimeRange, filters AntifraudColumnFilters,
 ) ([]SatelColumnValue, error) {
 	column = strings.TrimSpace(column)
-	expr, ok := antifraudFilterExpr(column)
+	thresholds := c.coverageWindows()
+	expr, ok := antifraudFilterExpr(column, thresholds)
 	if !ok {
 		return nil, fmt.Errorf("unsupported suggest column %q", column)
 	}
@@ -188,7 +198,7 @@ func (c *Client) ListAntifraudColumnValues(
 	query := `SELECT (` + expr + `) AS value,count() AS cnt` + antifraudListJoinsSQL + `
 		AND call.first_seen_at>=? AND call.first_seen_at<?`
 	args := []any{deviceID, deviceID, deviceID, timeRange.From, timeRange.To}
-	query, args = appendAntifraudColumnFilters(query, args, peer)
+	query, args = appendAntifraudColumnFilters(query, args, peer, thresholds)
 	if column == "calling" || column == "called" || column == "phases" {
 		query += ` AND (` + expr + `)!=''`
 	}

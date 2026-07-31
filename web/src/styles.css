@@ -219,6 +219,25 @@ table {
 th { position: sticky; top: 0; z-index: 3; height: 28px; padding: 0 8px; color: #596579; background: #eef2f7;
   text-align: left; font-size: 9px; letter-spacing: .025em; text-transform: uppercase;
   border-bottom: 1px solid var(--line); white-space: nowrap; width: max-content; max-width: none; }
+/* Satel Summary: Bill ANI header search — keep th height/font, fill column width. */
+th.bill-ani-filter { position: relative; overflow: visible; text-transform: none; }
+th.bill-ani-filter input {
+  display: block; width: 100%; min-width: 0; height: 22px; margin: 0; padding: 0 2px;
+  border: 0; background: transparent; color: inherit; outline: none;
+  font: inherit; font-size: 9px; letter-spacing: .025em; text-transform: none;
+}
+th.bill-ani-filter input::placeholder { color: #596579; text-transform: uppercase; letter-spacing: .025em; }
+th.bill-ani-filter .bill-ani-suggest {
+  position: absolute; left: 0; top: 100%; z-index: 20; min-width: 100%; max-width: 18rem;
+  max-height: 14rem; overflow: auto; margin: 0; padding: 2px 0; list-style: none;
+  background: #fff; border: 1px solid var(--line); box-shadow: 0 6px 16px rgb(31 41 55 / 12%);
+  text-transform: none; font-size: 9.5px; letter-spacing: 0;
+}
+th.bill-ani-filter .bill-ani-suggest li {
+  padding: 4px 8px; cursor: pointer; white-space: nowrap; color: #344054;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+th.bill-ani-filter .bill-ani-suggest li:hover { background: #f1f6ff; }
 td { height: 27px; padding: 3px 8px; border-bottom: 1px solid #e8ecf2; white-space: nowrap;
   width: max-content; max-width: none; overflow: visible; text-overflow: clip; color: #344054; }
 tbody tr:hover td { background: #f1f6ff; color: #172033; }

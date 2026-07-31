@@ -1600,6 +1600,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           fillWidth={satelPresetFillWidth(activePresetId)}
           flexKey={satelPresetFlexKey(activePresetId)}
           flexPairKeys={satelPresetFlexPairKeys(activePresetId)}
+          aniFilter={isSatel && activePresetId === 'summary' ? {
+            deviceId: device.id, date, query, onQuery: setQuery,
+          } : undefined}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedSatelCall} />
         : <CallsTable rows={rows as CallRow[]}
           columns={resolvePresetColumns('eltex', activePresetId)}
@@ -1956,7 +1959,84 @@ function satelCallCell(row: SatelCdrRow, column: CdrColumnDef, timezone: string)
   }
 }
 
-function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey = '', flexPairKeys = [] }: {
+type BillAniFilterProps = {
+  deviceId: string
+  date: string
+  query: string
+  onQuery: (value: string) => void
+}
+
+function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterProps) {
+  const [draft, setDraft] = useState(query)
+  const [open, setOpen] = useState(false)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const rootRef = useRef<HTMLTableCellElement>(null)
+  const seqRef = useRef(0)
+
+  useEffect(() => { setDraft(query) }, [query])
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+
+  useEffect(() => {
+    if (!open || !date) return
+    const seq = ++seqRef.current
+    const timer = window.setTimeout(() => {
+      const path = `/devices/${deviceId}/calls/bill-ani-values?date=${encodeURIComponent(date)}` +
+        `&q=${encodeURIComponent(draft.trim())}&limit=50`
+      api<{ items: string[] }>(path).then((response) => {
+        if (seq !== seqRef.current) return
+        setSuggestions(Array.isArray(response.items) ? response.items : [])
+      }).catch(() => {
+        if (seq !== seqRef.current) return
+        setSuggestions([])
+      })
+    }, 200)
+    return () => window.clearTimeout(timer)
+  }, [open, deviceId, date, draft])
+
+  const commit = (value: string) => {
+    const next = value.trim()
+    setDraft(next)
+    onQuery(next)
+    setOpen(false)
+  }
+
+  return <th ref={rootRef} className="bill-ani-filter" title="Bill ANI"
+    onClick={(event) => event.stopPropagation()}>
+    <input className="mono" placeholder="Bill ANI" value={draft}
+      aria-label="Поиск Bill ANI" autoComplete="off"
+      onFocus={() => setOpen(true)}
+      onChange={(event) => {
+        setDraft(event.target.value)
+        setOpen(true)
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          commit(draft)
+        } else if (event.key === 'Escape') {
+          setOpen(false)
+        }
+      }} />
+    {open && suggestions.length > 0 && <ul className="bill-ani-suggest" role="listbox">
+      {suggestions.map((value) => <li key={value} role="option"
+        onMouseDown={(event) => {
+          event.preventDefault()
+          commit(value)
+        }}>{value}</li>)}
+    </ul>}
+  </th>
+}
+
+function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey = '', flexPairKeys = [],
+  aniFilter }: {
   rows: SatelCdrRow[]
   columns: CdrColumnDef[]
   timezone: string
@@ -1964,6 +2044,7 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
   fillWidth?: boolean
   flexKey?: string
   flexPairKeys?: string[]
+  aniFilter?: BillAniFilterProps
 }) {
   const pairKeys = new Set(fillWidth ? flexPairKeys : [])
   const growKey = fillWidth ? flexKey : ''
@@ -1974,8 +2055,13 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
   }
   return <table className={['satel-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
-    {columns.map((column) => <th key={column.key} title={column.header}
-      className={columnClass(column.key)}>{column.header}</th>)}
+    {columns.map((column) => {
+      if (aniFilter && column.key === 'billAni') {
+        return <BillAniHeaderFilter key={column.key} {...aniFilter} />
+      }
+      return <th key={column.key} title={column.header}
+        className={columnClass(column.key)}>{column.header}</th>
+    })}
   </tr></thead><tbody>{rows.map((row) => {
     return <tr key={row.recordId} className={satelRowClassName(row)}
       onClick={() => onSelect(row)}>

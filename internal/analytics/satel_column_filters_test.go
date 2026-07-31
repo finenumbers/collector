@@ -7,22 +7,30 @@ import (
 
 func TestNormalizeSatelColumnFilters(t *testing.T) {
 	got, err := NormalizeSatelColumnFilters(map[string]string{
-		"bill_ani": " 7900 ",
-		"src_name": "",
-		"dp_name":  "route-a",
+		"bill_ani":           " 7900 ",
+		"src_name":           "",
+		"dp_name":            "route-a",
+		"bill_ani_operator":  "Rostelecom",
+		"remote_src_asn_org": "AS Org",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got["bill_ani"] != "7900" || got["dp_name"] != "route-a" {
+	if len(got) != 4 || got["bill_ani"] != "7900" || got["dp_name"] != "route-a" ||
+		got["bill_ani_operator"] != "Rostelecom" || got["remote_src_asn_org"] != "AS Org" {
 		t.Fatalf("got %#v", got)
 	}
 	if _, err := NormalizeSatelColumnFilters(map[string]string{"evil": "x"}); err == nil {
 		t.Fatal("expected unsupported column error")
 	}
-	long := strings.Repeat("1", 65)
+	long := strings.Repeat("1", satelColumnFilterMaxLen+1)
 	if _, err := NormalizeSatelColumnFilters(map[string]string{"bill_ani": long}); err == nil {
 		t.Fatal("expected length error")
+	}
+	okLen := strings.Repeat("a", satelColumnFilterMaxLen)
+	got, err = NormalizeSatelColumnFilters(map[string]string{"remote_src_asn_org": okLen})
+	if err != nil || got["remote_src_asn_org"] != okLen {
+		t.Fatalf("max len accepted: %#v err=%v", got, err)
 	}
 }
 
@@ -62,6 +70,21 @@ func TestSatelColumnValuesQueryTemplate(t *testing.T) {
 	} {
 		if !strings.Contains(src, needle) {
 			t.Fatalf("query missing %q in %q", needle, src)
+		}
+	}
+}
+
+func TestSatelFilterableColumnsCoverPresets(t *testing.T) {
+	for _, col := range []string{
+		"bill_ani", "bill_dnis", "out_orig_dnis", "src_name", "dst_name", "dp_name",
+		"disconnect_text", "bill_ani_operator", "bill_dnis_operator",
+		"bill_ani_region", "bill_dnis_region",
+		"remote_src_geoip_iso", "remote_dst_geoip_iso",
+		"remote_src_geoip_city", "remote_dst_geoip_city",
+		"remote_src_asn_org", "remote_dst_asn_org",
+	} {
+		if !SatelColumnFilterAllowed(col) {
+			t.Fatalf("missing allowlist entry %q", col)
 		}
 	}
 }

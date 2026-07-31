@@ -1130,8 +1130,8 @@ func (s *Server) listSatelColumnValues(writer http.ResponseWriter, request *http
 		limit = parsed
 	}
 	prefix := request.URL.Query().Get("q")
-	if len(prefix) > 64 {
-		writeError(writer, http.StatusBadRequest, "q must be at most 64 characters")
+	if len(prefix) > 256 {
+		writeError(writer, http.StatusBadRequest, "q must be at most 256 characters")
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)

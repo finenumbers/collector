@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const satelColumnFilterMaxLen = 256
+
 // SatelColumnFilters are AND exact-match filters on allowlisted Satel CDR columns.
 type SatelColumnFilters map[string]string
 
@@ -16,13 +18,23 @@ type SatelColumnValue struct {
 }
 
 var satelFilterableColumns = map[string]struct{}{
-	"bill_ani":        {},
-	"bill_dnis":       {},
-	"out_orig_dnis":   {},
-	"src_name":        {},
-	"dst_name":        {},
-	"dp_name":         {},
-	"disconnect_text": {},
+	"bill_ani":              {},
+	"bill_dnis":             {},
+	"out_orig_dnis":         {},
+	"src_name":              {},
+	"dst_name":              {},
+	"dp_name":               {},
+	"disconnect_text":       {},
+	"bill_ani_operator":     {},
+	"bill_dnis_operator":    {},
+	"bill_ani_region":       {},
+	"bill_dnis_region":      {},
+	"remote_src_geoip_iso":  {},
+	"remote_dst_geoip_iso":  {},
+	"remote_src_geoip_city": {},
+	"remote_dst_geoip_city": {},
+	"remote_src_asn_org":    {},
+	"remote_dst_asn_org":    {},
 }
 
 // NormalizeSatelColumnFilters keeps only allowlisted non-empty keys.
@@ -40,8 +52,8 @@ func NormalizeSatelColumnFilters(raw map[string]string) (SatelColumnFilters, err
 		if trimmed == "" {
 			continue
 		}
-		if len(trimmed) > 64 {
-			return nil, fmt.Errorf("column filter %s must be at most 64 characters", col)
+		if len(trimmed) > satelColumnFilterMaxLen {
+			return nil, fmt.Errorf("column filter %s must be at most %d characters", col, satelColumnFilterMaxLen)
 		}
 		out[col] = trimmed
 	}

@@ -647,7 +647,7 @@ const satelColumnValuesBaseQuery = `WITH times AS
 			WHERE device_id=?
 			GROUP BY record_id
 		)
-		SELECT DISTINCT c.%s
+		SELECT c.%s AS value,count() AS cnt
 		FROM collector.satel_rtu_cdr AS c FINAL
 		LEFT JOIN times AS t ON t.record_id=c.record_id
 		WHERE c.device_id=?
@@ -655,12 +655,13 @@ const satelColumnValuesBaseQuery = `WITH times AS
 			AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?
 			AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?`
 
-// ListSatelColumnValues returns distinct non-empty values for an allowlisted column
-// within timeRange, optionally filtered by prefix and peer column filters (AND).
+// ListSatelColumnValues returns distinct non-empty values with counts for an
+// allowlisted column within timeRange, optionally filtered by prefix and peer
+// column filters (AND).
 func (c *Client) ListSatelColumnValues(
 	ctx context.Context, deviceID uuid.UUID, column, prefix string, limit uint64,
 	timeRange TimeRange, filters SatelColumnFilters,
-) ([]string, error) {
+) ([]SatelColumnValue, error) {
 	column = strings.TrimSpace(column)
 	if !SatelColumnFilterAllowed(column) {
 		return nil, fmt.Errorf("unsupported suggest column %q", column)
@@ -686,21 +687,21 @@ func (c *Client) ListSatelColumnValues(
 		query += ` AND positionCaseInsensitive(c.` + column + `,?)>0`
 		args = append(args, prefix)
 	}
-	query += ` ORDER BY c.` + column + ` ASC LIMIT ?`
+	query += ` GROUP BY value ORDER BY cnt DESC,value ASC LIMIT ?`
 	args = append(args, limit)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	values := make([]string, 0, limit)
+	values := make([]SatelColumnValue, 0, limit)
 	for rows.Next() {
-		var value string
-		if err := rows.Scan(&value); err != nil {
+		var item SatelColumnValue
+		if err := rows.Scan(&item.Value, &item.Count); err != nil {
 			return nil, err
 		}
-		if value != "" {
-			values = append(values, value)
+		if item.Value != "" {
+			values = append(values, item)
 		}
 	}
 	return values, rows.Err()

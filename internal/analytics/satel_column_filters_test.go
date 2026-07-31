@@ -26,13 +26,12 @@ func TestNormalizeSatelColumnFilters(t *testing.T) {
 	}
 }
 
-func TestAppendSatelColumnFiltersStableOrder(t *testing.T) {
+func TestAppendSatelColumnFiltersExactMatch(t *testing.T) {
 	query, args := appendSatelColumnFilters("WHERE 1=1", nil, SatelColumnFilters{
 		"src_name": "a",
 		"bill_ani": "b",
 	})
-	want := "WHERE 1=1 AND positionCaseInsensitive(c.bill_ani,?)>0" +
-		" AND positionCaseInsensitive(c.src_name,?)>0"
+	want := "WHERE 1=1 AND c.bill_ani=? AND c.src_name=?"
 	if query != want {
 		t.Fatalf("query=%q want %q", query, want)
 	}
@@ -56,7 +55,7 @@ func TestClampSatelColumnSuggestLimit(t *testing.T) {
 func TestSatelColumnValuesQueryTemplate(t *testing.T) {
 	src := satelColumnValuesBaseQuery
 	for _, needle := range []string{
-		"SELECT DISTINCT c.%s",
+		"SELECT c.%s AS value,count() AS cnt",
 		"c.%s!=''",
 		"coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?",
 		"coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?",

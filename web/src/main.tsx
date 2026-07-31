@@ -1301,13 +1301,17 @@ function SatelPipelineNotice({ templateKey, replay }: {
   return null
 }
 
-function ExportButton({ deviceID, dataset, query, date }: {
+function ExportButton({ deviceID, dataset, query, date, filters }: {
   deviceID: string
   dataset: Dataset
   query: string
   date: string
+  filters?: Record<string, string>
 }) {
-  const storageKey = exportStorageKey(deviceID, dataset, date, query)
+  const filtersKey = filters && Object.keys(filters).length > 0
+    ? Object.keys(filters).sort().map((key) => `${key}=${filters[key]}`).join('&')
+    : ''
+  const storageKey = exportStorageKey(deviceID, dataset, date, query, filtersKey)
   const [restored] = useState(() =>
     restoreExportTracking(window.sessionStorage.getItem(storageKey)))
   const [job, setJob] = useState<ExportJob | null>(restored.job)
@@ -1402,7 +1406,7 @@ function ExportButton({ deviceID, dataset, query, date }: {
     setJob(null)
     api<{ job: ExportJob }>(exportJobsURL(deviceID), {
       method: 'POST',
-      body: JSON.stringify(createExportRequest(dataset, query, date, date)),
+      body: JSON.stringify(createExportRequest(dataset, query, date, date, filters)),
     })
       .then(({ job: next }) => {
         acceptJob(next)
@@ -1431,6 +1435,7 @@ function ExportButton({ deviceID, dataset, query, date }: {
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
+  const [columnFilters, setColumnFilters] = useState<SummaryColumnFilters>({})
   const timezone = activeDeviceTimezone(device)
   const dateStorageKey = `collector:date:${device.id}`
   const [date, setDate] = useState(() =>
@@ -1463,17 +1468,36 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const activePresetId = vendorPresets.some((preset) => preset.id === columnPresetId)
     ? columnPresetId
     : defaultCdrPresetId()
+  const summaryFiltersActive = isSatel && dataset === 'calls' && activePresetId === 'summary'
+  const hasActiveColumnFilters = Object.values(columnFilters).some((value) => value.trim() !== '')
+  const exportColumnFilters = summaryFiltersActive
+    ? summaryFiltersToQuery(columnFilters)
+    : undefined
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const pagePath = useCallback((pageCursor?: PageCursor) => {
-    const base = dataset === 'calls'
-      ? `/devices/${device.id}/calls?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
-      : dataset === 'antifraud'
-        ? `/devices/${device.id}/antifraud-calls?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
-        : `/devices/${device.id}/syslog-messages?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
+    if (dataset === 'calls') {
+      const params = new URLSearchParams()
+      params.set('date', date)
+      params.set('limit', String(PAGE_SIZE))
+      if (isSatel && activePresetId === 'summary') {
+        for (const [key, value] of Object.entries(summaryFiltersToQuery(columnFilters))) {
+          params.set(`f.${key}`, value)
+        }
+      } else if (query) {
+        params.set('q', query)
+      }
+      const base = `/devices/${device.id}/calls?${params.toString()}`
+      return pageCursor
+        ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
+        : base
+    }
+    const base = dataset === 'antifraud'
+      ? `/devices/${device.id}/antifraud-calls?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
+      : `/devices/${device.id}/syslog-messages?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [dataset, date, device.id, query])
+  }, [activePresetId, columnFilters, dataset, date, device.id, isSatel, query])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1558,6 +1582,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         required value={date} onChange={(event) => {
           if (event.target.value) {
             window.sessionStorage.setItem(dateStorageKey, event.target.value)
+            setColumnFilters({})
             setDate(event.target.value)
           }
         }} /></label>
@@ -1578,16 +1603,22 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           <select value={activePresetId} onChange={(event) => {
             const next = event.target.value || defaultCdrPresetId()
             window.sessionStorage.setItem(presetStorageKey, next)
+            setColumnFilters({})
             setColumnPresetId(next)
           }} aria-label="Пресет колонок">
             {vendorPresets.map((preset) =>
               <option key={preset.id} value={preset.id}>{preset.label}</option>)}
           </select>
         </label>}
-        <div className="search"><Search size={14} /><input placeholder="Поиск по данным…"
-          value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-        <ExportButton key={`${dataset}:${date}:${query}`} deviceID={device.id}
-          dataset={dataset} query={query} date={date} />
+        {summaryFiltersActive
+          ? <button type="button" className="secondary" disabled={!hasActiveColumnFilters}
+            onClick={() => setColumnFilters({})}>Сбросить фильтры</button>
+          : <div className="search"><Search size={14} /><input placeholder="Поиск по данным…"
+            value={query} onChange={(event) => setQuery(event.target.value)} /></div>}
+        <ExportButton key={`${dataset}:${date}:${query}:${filtersKeyFrom(exportColumnFilters)}`}
+          deviceID={device.id} dataset={dataset}
+          query={summaryFiltersActive ? '' : query} date={date}
+          filters={exportColumnFilters} />
       </div>
     </div>
     <div className="table-shell" ref={tableShellRef}>
@@ -1601,8 +1632,16 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           fillWidth={satelPresetFillWidth(activePresetId)}
           flexKey={satelPresetFlexKey(activePresetId)}
           flexPairKeys={satelPresetFlexPairKeys(activePresetId)}
-          aniFilter={isSatel && activePresetId === 'summary' ? {
-            deviceId: device.id, date, query, onQuery: setQuery,
+          summaryFilter={summaryFiltersActive ? {
+            deviceId: device.id,
+            date,
+            filters: columnFilters,
+            onChange: (key, value) => setColumnFilters((current) => {
+              const next = { ...current }
+              if (!value.trim()) delete next[key]
+              else next[key] = value.trim()
+              return next
+            }),
           } : undefined}
           timezone={activeDeviceTimezone(device)} onSelect={setSelectedSatelCall} />
         : <CallsTable rows={rows as CallRow[]}
@@ -1960,15 +1999,51 @@ function satelCallCell(row: SatelCdrRow, column: CdrColumnDef, timezone: string)
   }
 }
 
-type BillAniFilterProps = {
-  deviceId: string
-  date: string
-  query: string
-  onQuery: (value: string) => void
+const SUMMARY_FILTER_COLUMNS = [
+  { key: 'billAni', column: 'bill_ani', header: 'Bill ANI' },
+  { key: 'billDnis', column: 'bill_dnis', header: 'Bill DNIS' },
+  { key: 'outOrigDnis', column: 'out_orig_dnis', header: 'Out orig DNIS' },
+  { key: 'srcName', column: 'src_name', header: 'Src маршрут' },
+  { key: 'dstName', column: 'dst_name', header: 'Dst маршрут' },
+  { key: 'dpName', column: 'dp_name', header: 'DP маршрут' },
+  { key: 'disconnectText', column: 'disconnect_text', header: 'Разъединение' },
+] as const
+
+type SummaryFilterKey = typeof SUMMARY_FILTER_COLUMNS[number]['key']
+type SummaryColumnFilters = Partial<Record<SummaryFilterKey, string>>
+
+const SUMMARY_FILTER_BY_KEY = Object.fromEntries(
+  SUMMARY_FILTER_COLUMNS.map((item) => [item.key, item]),
+) as Record<SummaryFilterKey, typeof SUMMARY_FILTER_COLUMNS[number]>
+
+function summaryFiltersToQuery(filters: SummaryColumnFilters): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const item of SUMMARY_FILTER_COLUMNS) {
+    const value = filters[item.key]?.trim()
+    if (value) out[item.column] = value
+  }
+  return out
 }
 
-function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterProps) {
-  const [draft, setDraft] = useState(query)
+function filtersKeyFrom(filters?: Record<string, string>): string {
+  if (!filters || Object.keys(filters).length === 0) return ''
+  return Object.keys(filters).sort().map((key) => `${key}=${filters[key]}`).join('&')
+}
+
+type SummaryColumnFilterProps = {
+  deviceId: string
+  date: string
+  column: string
+  label: string
+  value: string
+  peerFilters: Record<string, string>
+  onChange: (value: string) => void
+}
+
+function SummaryColumnHeaderFilter({
+  deviceId, date, column, label, value, peerFilters, onChange,
+}: SummaryColumnFilterProps) {
+  const [draft, setDraft] = useState(value)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -1978,6 +2053,11 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
   const inputRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLUListElement>(null)
   const seqRef = useRef(0)
+  const peerKey = filtersKeyFrom(peerFilters)
+
+  useEffect(() => {
+    setDraft(value)
+  }, [value])
 
   const updateMenuBox = useCallback(() => {
     const el = inputRef.current
@@ -2002,15 +2082,19 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
       if (thRef.current?.contains(target) || menuRef.current?.contains(target)) return
       setOpen(false)
     }
-    const onScrollOrResize = () => setOpen(false)
+    const onResize = () => setOpen(false)
+    const onScroll = (event: Event) => {
+      const target = event.target
+      if (target instanceof Node && menuRef.current?.contains(target)) return
+      setOpen(false)
+    }
     document.addEventListener('mousedown', onDoc)
-    window.addEventListener('resize', onScrollOrResize)
-    // table-shell and page scroll would misplace a fixed menu — close instead.
-    document.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onResize)
+    document.addEventListener('scroll', onScroll, true)
     return () => {
       document.removeEventListener('mousedown', onDoc)
-      window.removeEventListener('resize', onScrollOrResize)
-      document.removeEventListener('scroll', onScrollOrResize, true)
+      window.removeEventListener('resize', onResize)
+      document.removeEventListener('scroll', onScroll, true)
     }
   }, [open])
 
@@ -2020,8 +2104,16 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
     const timer = window.setTimeout(() => {
       setLoading(true)
       setError('')
-      const path = `/devices/${deviceId}/calls/bill-ani-values?date=${encodeURIComponent(date)}` +
-        `&q=${encodeURIComponent(draft.trim())}&limit=50`
+      const params = new URLSearchParams()
+      params.set('column', column)
+      params.set('date', date)
+      params.set('q', draft.trim())
+      params.set('limit', '50')
+      for (const [key, filterValue] of Object.entries(peerFilters)) {
+        if (key === column || !filterValue) continue
+        params.set(`f.${key}`, filterValue)
+      }
+      const path = `/devices/${deviceId}/calls/column-values?${params.toString()}`
       api<{ items: string[] }>(path).then((response) => {
         if (seq !== seqRef.current) return
         setSuggestions(Array.isArray(response.items) ? response.items : [])
@@ -2029,17 +2121,17 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
       }).catch((err: unknown) => {
         if (seq !== seqRef.current) return
         setSuggestions([])
-        setError(err instanceof Error ? err.message : 'Не удалось загрузить номера')
+        setError(err instanceof Error ? err.message : 'Не удалось загрузить значения')
         setLoading(false)
       })
     }, 200)
     return () => window.clearTimeout(timer)
-  }, [open, deviceId, date, draft])
+  }, [open, deviceId, date, draft, column, peerKey, peerFilters])
 
-  const commit = (value: string) => {
-    const next = value.trim()
+  const commit = (nextValue: string) => {
+    const next = nextValue.trim()
     setDraft(next)
-    onQuery(next)
+    onChange(next)
     setOpen(false)
   }
 
@@ -2049,20 +2141,20 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
       {loading && <li className="bill-ani-suggest-status">Загрузка…</li>}
       {!loading && error && <li className="bill-ani-suggest-status">{error}</li>}
       {!loading && !error && suggestions.length === 0 &&
-        <li className="bill-ani-suggest-status">Нет номеров за день</li>}
-      {!loading && !error && suggestions.map((value) => <li key={value} role="option"
+        <li className="bill-ani-suggest-status">Нет значений за день</li>}
+      {!loading && !error && suggestions.map((item) => <li key={item} role="option"
         onMouseDown={(event) => {
           event.preventDefault()
-          commit(value)
-        }}>{value}</li>)}
+          commit(item)
+        }}>{item}</li>)}
     </ul>,
     document.body,
   ) : null
 
-  return <th ref={thRef} className="bill-ani-filter" title="Bill ANI"
+  return <th ref={thRef} className="bill-ani-filter" title={label}
     onClick={(event) => event.stopPropagation()}>
-    <input ref={inputRef} className="mono" placeholder="Bill ANI" value={draft}
-      aria-label="Поиск Bill ANI" autoComplete="off" aria-expanded={open}
+    <input ref={inputRef} className="mono" placeholder={label} value={draft}
+      aria-label={`Поиск ${label}`} autoComplete="off" aria-expanded={open}
       onFocus={() => setOpen(true)}
       onChange={(event) => {
         setDraft(event.target.value)
@@ -2081,7 +2173,7 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
 }
 
 function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey = '', flexPairKeys = [],
-  aniFilter }: {
+  summaryFilter }: {
   rows: SatelCdrRow[]
   columns: CdrColumnDef[]
   timezone: string
@@ -2089,7 +2181,12 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
   fillWidth?: boolean
   flexKey?: string
   flexPairKeys?: string[]
-  aniFilter?: BillAniFilterProps
+  summaryFilter?: {
+    deviceId: string
+    date: string
+    filters: SummaryColumnFilters
+    onChange: (key: SummaryFilterKey, value: string) => void
+  }
 }) {
   const pairKeys = new Set(fillWidth ? flexPairKeys : [])
   const growKey = fillWidth ? flexKey : ''
@@ -2098,12 +2195,23 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
     if (key === growKey) return 'col-flex'
     return undefined
   }
+  const peerQuery = summaryFilter ? summaryFiltersToQuery(summaryFilter.filters) : {}
   return <table className={['satel-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
     {columns.map((column) => {
-      if (aniFilter && column.key === 'billAni') {
-        return <BillAniHeaderFilter key={`billAni:${aniFilter.date}:${aniFilter.query}`}
-          {...aniFilter} />
+      const filterDef = summaryFilter
+        ? SUMMARY_FILTER_BY_KEY[column.key as SummaryFilterKey]
+        : undefined
+      if (summaryFilter && filterDef) {
+        return <SummaryColumnHeaderFilter
+          key={`${filterDef.key}:${summaryFilter.date}:${summaryFilter.filters[filterDef.key] || ''}`}
+          deviceId={summaryFilter.deviceId}
+          date={summaryFilter.date}
+          column={filterDef.column}
+          label={filterDef.header}
+          value={summaryFilter.filters[filterDef.key] || ''}
+          peerFilters={peerQuery}
+          onChange={(value) => summaryFilter.onChange(filterDef.key, value)} />
       }
       return <th key={column.key} title={column.header}
         className={columnClass(column.key)}>{column.header}</th>

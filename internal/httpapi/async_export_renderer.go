@@ -81,7 +81,9 @@ func (s *Server) AsyncExportRenderer() exportworker.RenderFunc {
 		switch job.Dataset {
 		case "calls":
 			if job.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
-				workbook, err = s.exportSatelCalls(request, job.DeviceID, job.Search, location)
+				workbook, err = s.exportSatelCalls(
+					request, job.DeviceID, job.Search, location, job.ColumnFilters,
+				)
 			} else {
 				workbook, err = s.exportEltexCalls(request, job.DeviceID, job.Search, location)
 			}
@@ -328,7 +330,7 @@ func (s *Server) renderSatelCallsCSVZip(
 		for {
 			page, err := s.Analytics.ListExportSatelRTUCallsPage(
 				ctx, job.DeviceID, uint64(job.ActiveRevision), job.Search,
-				s.exportPageSize(), cursor, exportJobTimeRange(job),
+				s.exportPageSize(), cursor, exportJobTimeRange(job), job.ColumnFilters,
 			)
 			if err != nil {
 				return total, err

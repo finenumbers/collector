@@ -226,7 +226,8 @@ th.bill-ani-filter { text-transform: none; }
 }
 th.bill-ani-filter input {
   display: block; width: 100%; min-width: 0; height: 22px; margin: 0; padding: 0 2px;
-  border: 0; background: transparent; color: inherit; outline: none;
+  border: 1px solid var(--line); background: #fff; color: #172033; outline: none;
+  box-sizing: border-box;
   font: inherit; font-size: 9px; letter-spacing: .025em; text-transform: none;
 }
 th.bill-ani-filter input::placeholder { color: #596579; text-transform: uppercase; letter-spacing: .025em; }

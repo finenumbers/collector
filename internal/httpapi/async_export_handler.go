@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"collector/internal/equipment"
 	"collector/internal/store"
 
 	"github.com/go-chi/chi/v5"
@@ -18,13 +19,14 @@ import (
 )
 
 type createExportInput struct {
-	Dataset  string `json:"dataset"`
-	Category string `json:"category"`
-	Search   string `json:"q"`
-	From     string `json:"from"`
-	To       string `json:"to"`
-	Format   string `json:"format"`
-	AllTime  bool   `json:"allTime"`
+	Dataset       string            `json:"dataset"`
+	Category      string            `json:"category"`
+	Search        string            `json:"q"`
+	Filters       map[string]string `json:"filters"`
+	From          string            `json:"from"`
+	To            string            `json:"to"`
+	Format        string            `json:"format"`
+	AllTime       bool              `json:"allTime"`
 }
 
 type exportJobResponse struct {
@@ -93,6 +95,11 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
+	columnFilters, err := parseSatelColumnFiltersMap(input.Filters)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
 	if input.Format == "" {
 		input.Format = "auto"
 	}
@@ -121,6 +128,10 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 			}
 		}, "requested export dataset")
 	if !ok {
+		return
+	}
+	if len(columnFilters) > 0 && device.TemplateKey != equipment.TemplateSatelRTUCDRV1 {
+		writeError(writer, http.StatusBadRequest, "column filters are only available for Satel RTU")
 		return
 	}
 	if validated.Dataset == "antifraud" {
@@ -153,19 +164,20 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "search must not exceed 256 characters")
 		return
 	}
-	if validated.Search != "" && (rangeFrom == nil || rangeTo == nil) {
+	hasSearch := validated.Search != "" || len(columnFilters) > 0
+	if hasSearch && (rangeFrom == nil || rangeTo == nil) {
 		if !input.AllTime || session.User.Role != "admin" {
 			writeError(writer, http.StatusBadRequest,
 				"search requires from/to dates; administrators may request explicit allTime async exports")
 			return
 		}
 	}
-	if input.AllTime && (validated.Search == "" || session.User.Role != "admin") {
+	if input.AllTime && (!hasSearch || session.User.Role != "admin") {
 		writeError(writer, http.StatusBadRequest,
 			"allTime is only valid for administrator search exports")
 		return
 	}
-	if validated.Search != "" && rangeFrom != nil && rangeTo != nil &&
+	if hasSearch && rangeFrom != nil && rangeTo != nil &&
 		rangeTo.Sub(*rangeFrom) > 31*24*time.Hour {
 		writeError(writer, http.StatusBadRequest, "search export date range must not exceed 31 days")
 		return
@@ -193,7 +205,8 @@ func (s *Server) createExportJob(writer http.ResponseWriter, request *http.Reque
 	}
 	job, err := s.Store.CreateExportJob(request.Context(), store.NewExportJob{
 		DeviceID: deviceID, Dataset: validated.Dataset, Category: validated.Category,
-		Search: validated.Search, RangeFrom: rangeFrom, RangeTo: rangeTo, Format: input.Format,
+		Search: validated.Search, ColumnFilters: columnFilters,
+		RangeFrom: rangeFrom, RangeTo: rangeTo, Format: input.Format,
 		RowsEstimated: snapshot.EstimatedRows, ActiveRevision: int64(snapshot.Revision),
 		Timezone: device.ActiveTimezone, TemplateKey: device.TemplateKey,
 		ParserVersion: snapshot.ParserVersion, RawHighWatermark: snapshot.HighWatermark,

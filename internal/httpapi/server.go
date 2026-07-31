@@ -134,7 +134,7 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
 			private.Get("/devices/{deviceID}/syslog-messages", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
-			private.Get("/devices/{deviceID}/calls/bill-ani-values", s.listSatelBillANIValues)
+			private.Get("/devices/{deviceID}/calls/column-values", s.listSatelColumnValues)
 			private.Get("/devices/{deviceID}/calls/{recordID}/card", s.callCard)
 			private.Get("/devices/{deviceID}/antifraud-calls", s.listAntifraudCalls)
 			private.Get("/devices/{deviceID}/antifraud-calls/{callID}", s.antifraudCallDetail)
@@ -1087,7 +1087,7 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	})
 }
 
-func (s *Server) listSatelBillANIValues(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) listSatelColumnValues(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
@@ -1099,7 +1099,12 @@ func (s *Server) listSatelBillANIValues(writer http.ResponseWriter, request *htt
 		return
 	}
 	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 {
-		writeError(writer, http.StatusBadRequest, "bill ANI values are only available for Satel RTU")
+		writeError(writer, http.StatusBadRequest, "column values are only available for Satel RTU")
+		return
+	}
+	column := strings.TrimSpace(request.URL.Query().Get("column"))
+	if !analytics.SatelColumnFilterAllowed(column) {
+		writeError(writer, http.StatusBadRequest, "column must be an allowlisted Satel Summary field")
 		return
 	}
 	timeRange, ok := deviceDateRange(writer, request, device)
@@ -1107,7 +1112,12 @@ func (s *Server) listSatelBillANIValues(writer http.ResponseWriter, request *htt
 		return
 	}
 	if timeRange == nil {
-		writeError(writer, http.StatusBadRequest, "bill ANI values require date=YYYY-MM-DD")
+		writeError(writer, http.StatusBadRequest, "column values require date=YYYY-MM-DD")
+		return
+	}
+	filters, err := parseSatelColumnFilters(request)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
 	limit := uint64(50)
@@ -1126,12 +1136,14 @@ func (s *Server) listSatelBillANIValues(writer http.ResponseWriter, request *htt
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
 	defer cancel()
-	values, err := s.Analytics.ListSatelBillANIValues(ctx, deviceID, prefix, limit, *timeRange)
+	values, err := s.Analytics.ListSatelColumnValues(
+		ctx, deviceID, column, prefix, limit, *timeRange, filters,
+	)
 	if err != nil {
 		if writeAdmissionError(writer, err) {
 			return
 		}
-		writeError(writer, http.StatusInternalServerError, "unable to query bill ANI values")
+		writeError(writer, http.StatusInternalServerError, "unable to query column values")
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": values})
@@ -1152,11 +1164,21 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	if request.URL.Query().Get("q") != "" && timeRange == nil {
+	columnFilters, err := parseSatelColumnFilters(request)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 && len(columnFilters) > 0 {
+		writeError(writer, http.StatusBadRequest, "column filters are only available for Satel RTU")
+		return
+	}
+	searchQ := request.URL.Query().Get("q")
+	if (searchQ != "" || len(columnFilters) > 0) && timeRange == nil {
 		writeError(writer, http.StatusBadRequest, "call search requires date=YYYY-MM-DD")
 		return
 	}
-	if request.URL.Query().Get("q") != "" && !s.allowCostlyRequest(currentSession(request).User.ID) {
+	if (searchQ != "" || len(columnFilters) > 0) && !s.allowCostlyRequest(currentSession(request).User.ID) {
 		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
 		return
 	}
@@ -1180,11 +1202,11 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		var err error
 		if timeRange != nil {
 			page, err = s.Analytics.ListSatelRTUCallsPageRange(
-				ctx, deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+				ctx, deviceID, searchQ, limit, cursor, timeRange, columnFilters,
 			)
 		} else {
 			page, err = s.Analytics.ListSatelRTUCallsPage(
-				ctx, deviceID, request.URL.Query().Get("q"), limit, cursor,
+				ctx, deviceID, searchQ, limit, cursor, columnFilters,
 			)
 		}
 		if err != nil {

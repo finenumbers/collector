@@ -219,34 +219,75 @@ table {
 th { position: sticky; top: 0; z-index: 3; height: 28px; padding: 0 8px; color: #596579; background: #eef2f7;
   text-align: left; font-size: 9px; letter-spacing: .025em; text-transform: uppercase;
   border-bottom: 1px solid var(--line); white-space: nowrap; width: max-content; max-width: none; }
-/* Satel Summary: Bill ANI header search — keep th height/font; menu is portaled. */
-th.bill-ani-filter { text-transform: none; }
-.table-fit > thead > tr > th.bill-ani-filter {
-  overflow: visible;
+/* Satel Summary column filters — keep th height/font; menu is portaled. */
+th.bill-ani-filter, th.col-filter-cell { text-transform: none; }
+.table-fit > thead > tr > th.bill-ani-filter,
+.table-fit > thead > tr > th.col-filter-cell { overflow: visible; }
+.col-filter-trigger-wrap {
+  display: flex; align-items: center; gap: 2px; min-width: 0; height: 22px;
 }
-th.bill-ani-filter input {
-  display: block; width: 100%; min-width: 0; height: 22px; margin: 0; padding: 0 2px;
-  border: 1px solid var(--line); background: #fff; color: #172033; outline: none;
-  box-sizing: border-box;
+.col-filter-trigger {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 4px;
+  min-width: 0; flex: 1; height: 22px; margin: 0; padding: 0 4px 0 5px;
+  border: 1px solid var(--line); border-radius: 4px; background: #fff; color: #344054;
+  box-sizing: border-box; cursor: pointer;
   font: inherit; font-size: 9px; letter-spacing: .025em; text-transform: none;
 }
-th.bill-ani-filter input::placeholder { color: #596579; text-transform: uppercase; letter-spacing: .025em; }
-/* Fixed portal menu — escapes table-shell / table-fit overflow clipping. */
-.bill-ani-suggest {
-  position: fixed; z-index: 1000; max-width: min(18rem, 90vw); max-height: 14rem;
-  overflow: auto; margin: 0; padding: 2px 0; list-style: none;
-  background: #fff; border: 1px solid var(--line); box-shadow: 0 6px 16px rgb(31 41 55 / 12%);
+.col-filter-trigger.active {
+  background: #eef2ff; border-color: #c7d2fe; color: #1e293b;
+}
+.col-filter-trigger-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.col-filter-trigger svg { flex: 0 0 auto; color: #98a2b3; }
+.col-filter-trigger-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; margin: 0; padding: 0; border: 0; border-radius: 3px;
+  background: transparent; color: #98a2b3; cursor: pointer;
+}
+.col-filter-trigger-x:hover { color: #344054; background: #e8ecf2; }
+.col-filter-menu {
+  position: fixed; z-index: 1000; display: flex; flex-direction: column;
+  max-width: min(22rem, 92vw); max-height: 16rem;
+  margin: 0; padding: 0; overflow: hidden;
+  background: #fff; border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 8px 20px rgb(31 41 55 / 14%);
   font-size: 9.5px; letter-spacing: 0; text-transform: none;
 }
-.bill-ani-suggest li {
-  padding: 4px 8px; cursor: pointer; white-space: nowrap; color: #344054;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+.col-filter-search { padding: 4px 6px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+.col-filter-search input {
+  display: block; width: 100%; height: 20px; margin: 0; padding: 0 4px;
+  border: 0; background: transparent; color: #172033; outline: none;
+  box-sizing: border-box; font: inherit; font-size: 9.5px;
 }
-.bill-ani-suggest li:hover:not(.bill-ani-suggest-status) { background: #f1f6ff; }
-.bill-ani-suggest li.bill-ani-suggest-status {
-  cursor: default; color: var(--muted);
-  font-family: inherit; white-space: normal;
+.col-filter-search input::placeholder { color: #98a2b3; }
+.col-filter-list {
+  list-style: none; margin: 0; padding: 2px 0; overflow: auto; flex: 1 1 auto;
 }
+.col-filter-list li {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 8px; cursor: pointer; color: #344054; white-space: nowrap;
+}
+.col-filter-list li:hover:not(.col-filter-status) { background: #f1f6ff; }
+.col-filter-list li.selected { background: #f5f7fb; }
+.col-filter-check {
+  display: inline-flex; width: 12px; flex: 0 0 auto; color: #3b82f6;
+}
+.col-filter-value {
+  min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+}
+.col-filter-count { flex: 0 0 auto; color: #98a2b3; font-variant-numeric: tabular-nums; }
+.col-filter-status {
+  cursor: default !important; color: var(--muted);
+  font-family: inherit; white-space: normal !important;
+}
+.col-filter-clear {
+  flex: 0 0 auto; width: 100%; margin: 0; padding: 6px 8px;
+  border: 0; border-top: 1px solid var(--line); background: #fff;
+  color: #3b6fd9; cursor: pointer; font: inherit; font-size: 9.5px; text-align: center;
+}
+.col-filter-clear:disabled { color: #98a2b3; cursor: default; }
+.col-filter-clear:not(:disabled):hover { background: #f8fafc; }
 td { height: 27px; padding: 3px 8px; border-bottom: 1px solid #e8ecf2; white-space: nowrap;
   width: max-content; max-width: none; overflow: visible; text-overflow: clip; color: #344054; }
 tbody tr:hover td { background: #f1f6ff; color: #172033; }

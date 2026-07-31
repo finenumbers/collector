@@ -6,8 +6,14 @@ import (
 	"strings"
 )
 
-// SatelColumnFilters are AND contains-filters on allowlisted Satel CDR columns.
+// SatelColumnFilters are AND exact-match filters on allowlisted Satel CDR columns.
 type SatelColumnFilters map[string]string
+
+// SatelColumnValue is a distinct column value with its day-scoped row count.
+type SatelColumnValue struct {
+	Value string `json:"value"`
+	Count uint64 `json:"count"`
+}
 
 var satelFilterableColumns = map[string]struct{}{
 	"bill_ani":        {},
@@ -60,7 +66,7 @@ func appendSatelColumnFilters(query string, args []any, filters SatelColumnFilte
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		query += ` AND positionCaseInsensitive(c.` + key + `,?)>0`
+		query += ` AND c.` + key + `=?`
 		args = append(args, filters[key])
 	}
 	return query, args

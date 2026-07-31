@@ -2,8 +2,8 @@ import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, 
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
-  CirclePlus, FileClock,
-  LogOut, PhoneCall, Search, Server, Settings, ShieldCheck,
+  Check, ChevronsUpDown, CirclePlus, FileClock,
+  LogOut, PhoneCall, Search, Server, Settings, ShieldCheck, X,
 } from 'lucide-react'
 import './styles.css'
 import {
@@ -1599,6 +1599,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     <div className="toolbar">
       <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
+        {summaryFiltersActive && <button type="button" className="secondary"
+          disabled={!hasActiveColumnFilters}
+          onClick={() => setColumnFilters({})}>Сбросить фильтры</button>}
         {dataset === 'calls' && <label className="cdr-preset">
           <select value={activePresetId} onChange={(event) => {
             const next = event.target.value || defaultCdrPresetId()
@@ -1610,11 +1613,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               <option key={preset.id} value={preset.id}>{preset.label}</option>)}
           </select>
         </label>}
-        {summaryFiltersActive
-          ? <button type="button" className="secondary" disabled={!hasActiveColumnFilters}
-            onClick={() => setColumnFilters({})}>Сбросить фильтры</button>
-          : <div className="search"><Search size={14} /><input placeholder="Поиск по данным…"
-            value={query} onChange={(event) => setQuery(event.target.value)} /></div>}
+        {!summaryFiltersActive && <div className="search"><Search size={14} />
+          <input placeholder="Поиск по данным…" value={query}
+            onChange={(event) => setQuery(event.target.value)} /></div>}
         <ExportButton key={`${dataset}:${date}:${query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
           query={summaryFiltersActive ? '' : query} date={date}
@@ -2040,49 +2041,60 @@ type SummaryColumnFilterProps = {
   onChange: (value: string) => void
 }
 
+type ColumnValueItem = { value: string; count: number }
+
 function SummaryColumnHeaderFilter({
   deviceId, date, column, label, value, peerFilters, onChange,
 }: SummaryColumnFilterProps) {
-  const [draft, setDraft] = useState(value)
+  const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [suggestions, setSuggestions] = useState<ColumnValueItem[]>([])
   const [menuBox, setMenuBox] = useState({ top: 0, left: 0, width: 0 })
   const thRef = useRef<HTMLTableCellElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const menuRef = useRef<HTMLUListElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const seqRef = useRef(0)
   const peerKey = filtersKeyFrom(peerFilters)
+  const selected = value.trim()
+  const hasSelection = selected !== ''
 
   const updateMenuBox = useCallback(() => {
-    const el = inputRef.current
+    const el = triggerRef.current
     if (!el) return
     const rect = el.getBoundingClientRect()
     setMenuBox({
       top: rect.bottom + 2,
       left: rect.left,
-      width: Math.max(rect.width, 140),
+      width: Math.max(rect.width, 200),
     })
   }, [])
 
   useLayoutEffect(() => {
     if (!open) return
     updateMenuBox()
-  }, [open, draft, updateMenuBox])
+    searchRef.current?.focus()
+  }, [open, updateMenuBox])
+
+  const closeMenu = useCallback(() => {
+    setOpen(false)
+    setSearch('')
+  }, [])
 
   useEffect(() => {
     if (!open) return
     const onDoc = (event: MouseEvent) => {
       const target = event.target as Node
       if (thRef.current?.contains(target) || menuRef.current?.contains(target)) return
-      setOpen(false)
+      closeMenu()
     }
-    const onResize = () => setOpen(false)
+    const onResize = () => closeMenu()
     const onScroll = (event: Event) => {
       const target = event.target
       if (target instanceof Node && menuRef.current?.contains(target)) return
-      setOpen(false)
+      closeMenu()
     }
     document.addEventListener('mousedown', onDoc)
     window.addEventListener('resize', onResize)
@@ -2092,7 +2104,7 @@ function SummaryColumnHeaderFilter({
       window.removeEventListener('resize', onResize)
       document.removeEventListener('scroll', onScroll, true)
     }
-  }, [open])
+  }, [open, closeMenu])
 
   useEffect(() => {
     if (!open || !date) return
@@ -2103,16 +2115,17 @@ function SummaryColumnHeaderFilter({
       const params = new URLSearchParams()
       params.set('column', column)
       params.set('date', date)
-      params.set('q', draft.trim())
+      params.set('q', search.trim())
       params.set('limit', '50')
       for (const [key, filterValue] of Object.entries(peerFilters)) {
         if (key === column || !filterValue) continue
         params.set(`f.${key}`, filterValue)
       }
       const path = `/devices/${deviceId}/calls/column-values?${params.toString()}`
-      api<{ items: string[] }>(path).then((response) => {
+      api<{ items: ColumnValueItem[] }>(path).then((response) => {
         if (seq !== seqRef.current) return
-        setSuggestions(Array.isArray(response.items) ? response.items : [])
+        const items = Array.isArray(response.items) ? response.items : []
+        setSuggestions(items.filter((item) => item && typeof item.value === 'string'))
         setLoading(false)
       }).catch((err: unknown) => {
         if (seq !== seqRef.current) return
@@ -2122,48 +2135,94 @@ function SummaryColumnHeaderFilter({
       })
     }, 200)
     return () => window.clearTimeout(timer)
-  }, [open, deviceId, date, draft, column, peerKey, peerFilters])
+  }, [open, deviceId, date, search, column, peerKey, peerFilters])
 
-  const commit = (nextValue: string) => {
-    const next = nextValue.trim()
-    setDraft(next)
-    onChange(next)
-    setOpen(false)
+  const clear = () => {
+    onChange('')
+    closeMenu()
+  }
+
+  const pick = (nextValue: string) => {
+    if (nextValue === selected) {
+      clear()
+      return
+    }
+    onChange(nextValue)
+    closeMenu()
   }
 
   const menu = open ? createPortal(
-    <ul ref={menuRef} className="bill-ani-suggest" role="listbox"
+    <div ref={menuRef} className="col-filter-menu" role="listbox"
       style={{ top: menuBox.top, left: menuBox.left, width: menuBox.width }}>
-      {loading && <li className="bill-ani-suggest-status">Загрузка…</li>}
-      {!loading && error && <li className="bill-ani-suggest-status">{error}</li>}
-      {!loading && !error && suggestions.length === 0 &&
-        <li className="bill-ani-suggest-status">Нет значений за день</li>}
-      {!loading && !error && suggestions.map((item) => <li key={item} role="option"
+      <div className="col-filter-search">
+        <input ref={searchRef} value={search}
+          placeholder={`Поиск ${label}…`}
+          aria-label={`Поиск ${label}`}
+          autoComplete="off"
+          onChange={(event) => setSearch(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') closeMenu()
+          }} />
+      </div>
+      <ul className="col-filter-list">
+        {loading && <li className="col-filter-status">Загрузка…</li>}
+        {!loading && error && <li className="col-filter-status">{error}</li>}
+        {!loading && !error && suggestions.length === 0 &&
+          <li className="col-filter-status">Нет значений за день</li>}
+        {!loading && !error && suggestions.map((item) => {
+          const isSelected = item.value === selected
+          return <li key={item.value} role="option" aria-selected={isSelected}
+            className={isSelected ? 'selected' : undefined}
+            onMouseDown={(event) => {
+              event.preventDefault()
+              pick(item.value)
+            }}>
+            <span className="col-filter-check">{isSelected ? <Check size={11} /> : null}</span>
+            <span className="col-filter-value mono" title={item.value}>{item.value}</span>
+            <span className="col-filter-count">
+              ({Number(item.count || 0).toLocaleString('ru-RU')})
+            </span>
+          </li>
+        })}
+      </ul>
+      <button type="button" className="col-filter-clear" disabled={!hasSelection}
         onMouseDown={(event) => {
           event.preventDefault()
-          commit(item)
-        }}>{item}</li>)}
-    </ul>,
+          clear()
+        }}>
+        Очистить «{label}»
+      </button>
+    </div>,
     document.body,
   ) : null
 
-  return <th ref={thRef} className="bill-ani-filter" title={label}
+  return <th ref={thRef} className="bill-ani-filter col-filter-cell" title={label}
     onClick={(event) => event.stopPropagation()}>
-    <input ref={inputRef} className="mono" placeholder={label} value={draft}
-      aria-label={`Поиск ${label}`} autoComplete="off" aria-expanded={open}
-      onFocus={() => setOpen(true)}
-      onChange={(event) => {
-        setDraft(event.target.value)
-        setOpen(true)
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault()
-          commit(draft)
-        } else if (event.key === 'Escape') {
-          setOpen(false)
-        }
-      }} />
+    <div className={['col-filter-trigger-wrap', hasSelection ? 'has-value' : ''].filter(Boolean).join(' ')}>
+      <button ref={triggerRef} type="button"
+        className={['col-filter-trigger', hasSelection ? 'active' : ''].filter(Boolean).join(' ')}
+        aria-label={`Фильтр ${label}`} aria-expanded={open}
+        onClick={() => {
+          if (open) closeMenu()
+          else {
+            setSearch('')
+            setOpen(true)
+          }
+        }}>
+        <span className="col-filter-trigger-label">
+          {hasSelection ? '1 выбрано' : label}
+        </span>
+        <ChevronsUpDown size={11} aria-hidden="true" />
+      </button>
+      {hasSelection && <button type="button" className="col-filter-trigger-x"
+        aria-label={`Очистить ${label}`}
+        onClick={(event) => {
+          event.stopPropagation()
+          clear()
+        }}>
+        <X size={11} aria-hidden="true" />
+      </button>}
+    </div>
     {menu}
   </th>
 }

@@ -29,6 +29,26 @@ func (c *Client) ConfigureWorkloads(options WorkloadOptions) {
 	c.projectionMemoryBytes = options.ProjectionMemoryBytes
 }
 
+// SetCoverageThresholds hot-applies CDR↔AntiFraud coverage windows used by AF
+// list filters and card badges when call.coverage_state is still empty.
+func (c *Client) SetCoverageThresholds(thresholds CoverageThresholds) {
+	if c == nil {
+		return
+	}
+	c.admissionMu.Lock()
+	defer c.admissionMu.Unlock()
+	c.coverageThresholds = thresholds.normalized()
+}
+
+func (c *Client) coverageWindows() CoverageThresholds {
+	if c == nil {
+		return CoverageThresholds{}.normalized()
+	}
+	c.admissionMu.Lock()
+	defer c.admissionMu.Unlock()
+	return c.coverageThresholds.normalized()
+}
+
 func (c *Client) WorkloadSnapshot() map[workload.Class]workload.Stats {
 	if c == nil {
 		return map[workload.Class]workload.Stats{}

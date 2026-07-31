@@ -290,7 +290,8 @@ func (c *Client) ListAntifraudCallsPage(
 			args = append(args, search)
 		}
 	}
-	query, args = appendAntifraudColumnFilters(query, args, filters)
+	thresholds := c.coverageWindows()
+	query, args = appendAntifraudColumnFilters(query, args, filters, thresholds)
 	if cursor != nil {
 		query += ` AND (call.first_seen_at<? OR (call.first_seen_at=? AND call.call_id<?))`
 		args = append(args, cursor.SortTime, cursor.SortTime, cursor.CallID)
@@ -325,7 +326,8 @@ func (c *Client) ListAntifraudCallsPage(
 		item.RadiusOutcome = radiusOutcomeFromSummary(rejects > 0, accepts > 0)
 		item.ChainCompleteness = chainCompletenessFromSummary(item.Phases, unpaired, fallback, item.Status)
 		item.Coverage.State = resolveAFCoverageState(item.storedCoverageState,
-			len(item.Coverage.LinkedCDRIDs) > 0, item.Coverage.Ambiguous, item.FirstSeenAt, now)
+			len(item.Coverage.LinkedCDRIDs) > 0, item.Coverage.Ambiguous, item.FirstSeenAt, now,
+			thresholds)
 		item.Coverage.Evidence = safeJSONObject(evidence)
 		items = append(items, item)
 	}
@@ -395,7 +397,7 @@ func (c *Client) AntifraudCallDetail(
 	} else {
 		detail.Coverage.State = resolveAFCoverageState(detail.storedCoverageState,
 			len(detail.Coverage.LinkedCDRIDs) > 0, detail.Coverage.Ambiguous,
-			detail.FirstSeenAt, time.Now().UTC())
+			detail.FirstSeenAt, time.Now().UTC(), c.coverageWindows())
 		if len(detail.Coverage.LinkedCDRIDs) > 0 {
 			detail.LinkedCDRs, err = c.loadCDRFacts(ctx, deviceID, detail.Coverage.LinkedCDRIDs)
 			if err != nil {
@@ -840,6 +842,7 @@ func orderedFamilies(families []string) []string {
 
 func resolveAFCoverageState(
 	stored string, matched, ambiguous bool, firstSeen, now time.Time,
+	thresholds CoverageThresholds,
 ) string {
 	if matched {
 		return "matched"
@@ -851,26 +854,29 @@ func resolveAFCoverageState(
 	case "awaiting_cdr", "expected", "late", "missing", "matched", "ambiguous":
 		return stored
 	default:
-		return deriveAFCoverageState(false, false, firstSeen, now)
+		return deriveAFCoverageState(false, false, firstSeen, now, thresholds)
 	}
 }
 
 // deriveAFCoverageState is the age fallback when call.coverage_state is empty.
-// Windows match default ExpectedGrace=5m / LateThreshold=10m / MissingTerminal=30m.
-func deriveAFCoverageState(matched, ambiguous bool, firstSeen, now time.Time) string {
+// Windows come from runtime coverage settings (same as the reconcile worker).
+func deriveAFCoverageState(
+	matched, ambiguous bool, firstSeen, now time.Time, thresholds CoverageThresholds,
+) string {
 	if matched {
 		return "matched"
 	}
 	if ambiguous {
 		return "ambiguous"
 	}
+	thresholds = thresholds.normalized()
 	age := now.Sub(firstSeen)
 	switch {
-	case age < 5*time.Minute:
+	case age < thresholds.ExpectedGrace:
 		return "awaiting_cdr"
-	case age < 10*time.Minute:
+	case age < thresholds.LateThreshold:
 		return "expected"
-	case age < 30*time.Minute:
+	case age < thresholds.MissingTerminal:
 		return "late"
 	default:
 		return "missing"

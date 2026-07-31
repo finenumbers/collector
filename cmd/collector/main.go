@@ -144,6 +144,9 @@ func main() {
 			Capacity:              doc.Platform.ClickHouseAdmissionCapacity,
 			ProjectionMemoryBytes: doc.Projection.MaxMemoryBytes,
 		})
+		// AF list/detail age fallback must use the same coverage windows as
+		// reconciliation (hot-applied from Настройки → Параметры).
+		warehouse.SetCoverageThresholds(coverageThresholds(doc))
 	}
 	applyProjectionGate(runtimeDoc)
 	applyClickHouseAdmission(runtimeDoc)

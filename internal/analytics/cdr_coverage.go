@@ -24,10 +24,17 @@ func (t CoverageThresholds) normalized() CoverageThresholds {
 		t.ExpectedGrace = 5 * time.Minute
 	}
 	if t.LateThreshold <= 0 {
+		// Match runtimesettings.Defaults / previous AF age-fallback (not ExpectedGrace).
+		t.LateThreshold = 10 * time.Minute
+	}
+	if t.LateThreshold < t.ExpectedGrace {
 		t.LateThreshold = t.ExpectedGrace
 	}
 	if t.MissingTerminal <= 0 {
 		t.MissingTerminal = 30 * time.Minute
+	}
+	if t.MissingTerminal < t.LateThreshold {
+		t.MissingTerminal = t.LateThreshold
 	}
 	if t.RetryHorizon <= 0 {
 		t.RetryHorizon = 7 * 24 * time.Hour

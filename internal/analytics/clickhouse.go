@@ -27,6 +27,9 @@ type Client struct {
 	// projectionMemoryBytes raises CustomReplay/CustomReconcile CH max_memory_usage
 	// when set above the hardcoded workload floors (see workload.go).
 	projectionMemoryBytes int64
+	// coverageThresholds drives AF list/detail age fallback when coverage_state
+	// is empty; kept in sync with runtime settings (Настройки → Параметры).
+	coverageThresholds CoverageThresholds
 }
 
 type DeviceStats struct {

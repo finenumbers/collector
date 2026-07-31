@@ -12,11 +12,12 @@ Protect `main` with a branch ruleset that:
 - requires every change to arrive through a pull request;
 - requires zero approving reviews, so a pull request may be merged after all
   automated checks pass;
-- requires these CI checks:
+- requires these CI checks from `.github/workflows/ci.yml`:
   - `Go test and vet`;
   - `Frontend lint and build`;
   - `Container and Portainer stack`;
-  - `Dependency review`;
+  - `Dependency review` (pull requests only);
+- also requires GitHub code scanning (CodeQL) when enabled for the repository:
   - `Analyze (go)`;
   - `Analyze (actions)`;
   - `Analyze (javascript-typescript)`;

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"collector/internal/redact"
+
 	"github.com/google/uuid"
 )
 
@@ -601,7 +603,7 @@ func FuzzTokenizerNeverLeaksRecognizedSecrets(f *testing.F) {
 	f.Fuzz(func(t *testing.T, input string) {
 		result := Tokenize([]byte(input), uuid.Nil)
 		for _, attribute := range result.Attributes {
-			if isSecretName(attribute.Name) &&
+			if redact.SecretName(attribute.Name) &&
 				(!attribute.Redacted || attribute.Value != "" || attribute.RawValue != "") {
 				t.Fatalf("recognized secret retained: %+v", attribute)
 			}

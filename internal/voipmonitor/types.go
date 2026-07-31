@@ -10,7 +10,6 @@ const (
 	SourceEltex = "eltex_smg"
 	SourceSatel = "satel_rtu"
 
-	StatusPending         = "pending"
 	StatusMatchedExact    = "matched_exact"
 	StatusMatchedFallback = "matched_fallback"
 	StatusUnmatched       = "unmatched"
@@ -22,7 +21,6 @@ const (
 	MissFallbackAmbiguous      = "fallback_ambiguous"
 	MissAssignedElsewhere      = "assigned_elsewhere"
 	MissNoCandidatesInWindow   = "no_candidates_in_window"
-	MissFetchGap               = "fetch_gap"
 	MissAPIError               = "api_error"
 )
 

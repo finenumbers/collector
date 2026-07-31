@@ -340,13 +340,6 @@ func (c *Client) ListSatelRTURecordsNeedingEnrichment(
 	return out, rows.Err()
 }
 
-// ListSatelRTURecordsNeedingPSTNEnrichment is kept for compatibility.
-func (c *Client) ListSatelRTURecordsNeedingPSTNEnrichment(
-	ctx context.Context, limit uint64, afterRecordID uuid.UUID,
-) ([]SatelRTURecord, error) {
-	return c.ListSatelRTURecordsNeedingEnrichment(ctx, limit, afterRecordID)
-}
-
 // ListSatelRTURecordsForPSTNRefresh pages FINAL rows with at least one eligible
 // PSTN phone (73/74/78/79), for one-shot garTerritory rewrite of old region values.
 func (c *Client) ListSatelRTURecordsForPSTNRefresh(

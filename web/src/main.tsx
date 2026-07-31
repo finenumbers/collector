@@ -1468,10 +1468,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const activePresetId = vendorPresets.some((preset) => preset.id === columnPresetId)
     ? columnPresetId
     : defaultCdrPresetId()
-  const summaryFiltersActive = isSatel && dataset === 'calls' && activePresetId === 'summary'
+  const satelColumnFiltersActive = isSatel && dataset === 'calls'
   const hasActiveColumnFilters = Object.values(columnFilters).some((value) => value.trim() !== '')
-  const exportColumnFilters = summaryFiltersActive
-    ? summaryFiltersToQuery(columnFilters)
+  const exportColumnFilters = satelColumnFiltersActive
+    ? satelFiltersToQuery(columnFilters)
     : undefined
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
   const pagePath = useCallback((pageCursor?: PageCursor) => {
@@ -1479,8 +1479,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       const params = new URLSearchParams()
       params.set('date', date)
       params.set('limit', String(PAGE_SIZE))
-      if (isSatel && activePresetId === 'summary') {
-        for (const [key, value] of Object.entries(summaryFiltersToQuery(columnFilters))) {
+      if (isSatel) {
+        for (const [key, value] of Object.entries(satelFiltersToQuery(columnFilters))) {
           params.set(`f.${key}`, value)
         }
       } else if (query) {
@@ -1497,7 +1497,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [activePresetId, columnFilters, dataset, date, device.id, isSatel, query])
+  }, [columnFilters, dataset, date, device.id, isSatel, query])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1599,7 +1599,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     <div className="toolbar">
       <div><h3>{title}</h3><span>Загружено {rows.length} записей за {date}</span></div>
       <div className="toolbar-actions">
-        {summaryFiltersActive && <button type="button" className="secondary"
+        {satelColumnFiltersActive && <button type="button" className="secondary"
           disabled={!hasActiveColumnFilters}
           onClick={() => setColumnFilters({})}>Сбросить фильтры</button>}
         {dataset === 'calls' && <label className="cdr-preset">
@@ -1613,12 +1613,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               <option key={preset.id} value={preset.id}>{preset.label}</option>)}
           </select>
         </label>}
-        {!summaryFiltersActive && <div className="search"><Search size={14} />
+        {!satelColumnFiltersActive && <div className="search"><Search size={14} />
           <input placeholder="Поиск по данным…" value={query}
             onChange={(event) => setQuery(event.target.value)} /></div>}
         <ExportButton key={`${dataset}:${date}:${query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
-          query={summaryFiltersActive ? '' : query} date={date}
+          query={satelColumnFiltersActive ? '' : query} date={date}
           filters={exportColumnFilters} />
       </div>
     </div>
@@ -1633,9 +1633,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           fillWidth={satelPresetFillWidth(activePresetId)}
           flexKey={satelPresetFlexKey(activePresetId)}
           flexPairKeys={satelPresetFlexPairKeys(activePresetId)}
-          summaryFilter={summaryFiltersActive ? {
+          columnFilter={satelColumnFiltersActive ? {
             deviceId: device.id,
             date,
+            presetId: activePresetId,
             filters: columnFilters,
             onChange: (key, value) => setColumnFilters((current) => {
               const next = { ...current }
@@ -2000,7 +2001,7 @@ function satelCallCell(row: SatelCdrRow, column: CdrColumnDef, timezone: string)
   }
 }
 
-const SUMMARY_FILTER_COLUMNS = [
+const SATEL_FILTER_COLUMNS = [
   { key: 'billAni', column: 'bill_ani', header: 'Bill ANI' },
   { key: 'billDnis', column: 'bill_dnis', header: 'Bill DNIS' },
   { key: 'outOrigDnis', column: 'out_orig_dnis', header: 'Out orig DNIS' },
@@ -2008,18 +2009,53 @@ const SUMMARY_FILTER_COLUMNS = [
   { key: 'dstName', column: 'dst_name', header: 'Dst маршрут' },
   { key: 'dpName', column: 'dp_name', header: 'DP маршрут' },
   { key: 'disconnectText', column: 'disconnect_text', header: 'Разъединение' },
+  { key: 'billAniOperator', column: 'bill_ani_operator', header: 'Оператор A' },
+  { key: 'billAniRegion', column: 'bill_ani_region', header: 'Регион A' },
+  { key: 'billDnisOperator', column: 'bill_dnis_operator', header: 'Оператор B' },
+  { key: 'billDnisRegion', column: 'bill_dnis_region', header: 'Регион B' },
+  { key: 'remoteSrcGeoipIso', column: 'remote_src_geoip_iso', header: 'GeoIP ISO A' },
+  { key: 'remoteDstGeoipIso', column: 'remote_dst_geoip_iso', header: 'GeoIP ISO B' },
+  { key: 'remoteSrcGeoipCity', column: 'remote_src_geoip_city', header: 'GeoIP City A' },
+  { key: 'remoteSrcAsnOrg', column: 'remote_src_asn_org', header: 'ASN Org A' },
+  { key: 'remoteDstGeoipCity', column: 'remote_dst_geoip_city', header: 'GeoIP City B' },
+  { key: 'remoteDstAsnOrg', column: 'remote_dst_asn_org', header: 'ASN Org B' },
 ] as const
 
-type SummaryFilterKey = typeof SUMMARY_FILTER_COLUMNS[number]['key']
-type SummaryColumnFilters = Partial<Record<SummaryFilterKey, string>>
+type SatelFilterKey = typeof SATEL_FILTER_COLUMNS[number]['key']
+type SummaryColumnFilters = Partial<Record<SatelFilterKey, string>>
 
-const SUMMARY_FILTER_BY_KEY = Object.fromEntries(
-  SUMMARY_FILTER_COLUMNS.map((item) => [item.key, item]),
-) as Record<SummaryFilterKey, typeof SUMMARY_FILTER_COLUMNS[number]>
+const SATEL_FILTER_BY_KEY = Object.fromEntries(
+  SATEL_FILTER_COLUMNS.map((item) => [item.key, item]),
+) as Record<SatelFilterKey, typeof SATEL_FILTER_COLUMNS[number]>
 
-function summaryFiltersToQuery(filters: SummaryColumnFilters): Record<string, string> {
+const SATEL_FILTER_KEYS_BY_PRESET: Record<string, ReadonlySet<SatelFilterKey>> = {
+  summary: new Set<SatelFilterKey>([
+    'billAni', 'billDnis', 'outOrigDnis', 'srcName', 'dstName', 'dpName', 'disconnectText',
+  ]),
+  operators: new Set<SatelFilterKey>([
+    'billAni', 'billDnis', 'billAniOperator', 'billAniRegion',
+    'billDnisOperator', 'billDnisRegion', 'disconnectText',
+  ]),
+  geoip: new Set<SatelFilterKey>([
+    'billAni', 'billDnis', 'remoteSrcGeoipIso', 'remoteDstGeoipIso',
+    'remoteSrcGeoipCity', 'remoteSrcAsnOrg', 'remoteDstGeoipCity', 'remoteDstAsnOrg',
+    'disconnectText',
+  ]),
+  all: new Set<SatelFilterKey>([
+    'billAni', 'billDnis', 'srcName', 'dstName', 'dpName',
+    'billAniOperator', 'billDnisOperator', 'billAniRegion', 'billDnisRegion',
+    'remoteSrcGeoipIso', 'remoteDstGeoipIso', 'remoteSrcGeoipCity', 'remoteDstGeoipCity',
+    'remoteSrcAsnOrg', 'remoteDstAsnOrg', 'disconnectText',
+  ]),
+}
+
+function satelFilterKeysForPreset(presetId: string): ReadonlySet<SatelFilterKey> {
+  return SATEL_FILTER_KEYS_BY_PRESET[presetId] || SATEL_FILTER_KEYS_BY_PRESET.summary
+}
+
+function satelFiltersToQuery(filters: SummaryColumnFilters): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const item of SUMMARY_FILTER_COLUMNS) {
+  for (const item of SATEL_FILTER_COLUMNS) {
     const value = filters[item.key]?.trim()
     if (value) out[item.column] = value
   }
@@ -2228,7 +2264,7 @@ function SummaryColumnHeaderFilter({
 }
 
 function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey = '', flexPairKeys = [],
-  summaryFilter }: {
+  columnFilter }: {
   rows: SatelCdrRow[]
   columns: CdrColumnDef[]
   timezone: string
@@ -2236,11 +2272,12 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
   fillWidth?: boolean
   flexKey?: string
   flexPairKeys?: string[]
-  summaryFilter?: {
+  columnFilter?: {
     deviceId: string
     date: string
+    presetId: string
     filters: SummaryColumnFilters
-    onChange: (key: SummaryFilterKey, value: string) => void
+    onChange: (key: SatelFilterKey, value: string) => void
   }
 }) {
   const pairKeys = new Set(fillWidth ? flexPairKeys : [])
@@ -2250,23 +2287,27 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
     if (key === growKey) return 'col-flex'
     return undefined
   }
-  const peerQuery = summaryFilter ? summaryFiltersToQuery(summaryFilter.filters) : {}
+  const presetKeys = columnFilter
+    ? satelFilterKeysForPreset(columnFilter.presetId)
+    : null
+  const peerQuery = columnFilter ? satelFiltersToQuery(columnFilter.filters) : {}
   return <table className={['satel-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
     {columns.map((column) => {
-      const filterDef = summaryFilter
-        ? SUMMARY_FILTER_BY_KEY[column.key as SummaryFilterKey]
+      const filterKey = column.key as SatelFilterKey
+      const filterDef = columnFilter && presetKeys?.has(filterKey)
+        ? SATEL_FILTER_BY_KEY[filterKey]
         : undefined
-      if (summaryFilter && filterDef) {
+      if (columnFilter && filterDef) {
         return <SummaryColumnHeaderFilter
-          key={`${filterDef.key}:${summaryFilter.date}:${summaryFilter.filters[filterDef.key] || ''}`}
-          deviceId={summaryFilter.deviceId}
-          date={summaryFilter.date}
+          key={`${filterDef.key}:${columnFilter.date}:${columnFilter.filters[filterDef.key] || ''}`}
+          deviceId={columnFilter.deviceId}
+          date={columnFilter.date}
           column={filterDef.column}
           label={filterDef.header}
-          value={summaryFilter.filters[filterDef.key] || ''}
+          value={columnFilter.filters[filterDef.key] || ''}
           peerFilters={peerQuery}
-          onChange={(value) => summaryFilter.onChange(filterDef.key, value)} />
+          onChange={(value) => columnFilter.onChange(filterDef.key, value)} />
       }
       return <th key={column.key} title={column.header}
         className={columnClass(column.key)}>{column.header}</th>

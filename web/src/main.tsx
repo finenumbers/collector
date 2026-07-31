@@ -1973,8 +1973,6 @@ function BillAniHeaderFilter({ deviceId, date, query, onQuery }: BillAniFilterPr
   const rootRef = useRef<HTMLTableCellElement>(null)
   const seqRef = useRef(0)
 
-  useEffect(() => { setDraft(query) }, [query])
-
   useEffect(() => {
     if (!open) return
     const onDoc = (event: MouseEvent) => {
@@ -2057,7 +2055,8 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
     <thead><tr>
     {columns.map((column) => {
       if (aniFilter && column.key === 'billAni') {
-        return <BillAniHeaderFilter key={column.key} {...aniFilter} />
+        return <BillAniHeaderFilter key={`billAni:${aniFilter.date}:${aniFilter.query}`}
+          {...aniFilter} />
       }
       return <th key={column.key} title={column.header}
         className={columnClass(column.key)}>{column.header}</th>

@@ -240,8 +240,11 @@ IANA timezone выбирается из выпадающего списка в �
    Session expansion идёт через `event_id IN (session index)` (без hash JOIN
    syslog справа) и ограничена ±48h.
    Ошибки ClickHouse `memory limit exceeded` / `Query was cancelled`
-   автоматически requeue’ятся и не блокируют catch-up навсегда. После релиза
-   нажмите «Requeue failed» в Диагностике, если `failed>0`, и дождитесь drain.
+   автоматически requeue’ятся и не блокируют catch-up навсегда. То же для
+   временных сетевых ошибок ClickHouse (`connection refused`, `dial tcp`, …) —
+   30s sweep возвращает их из `failed` без кнопки. После релиза нажмите
+   «Requeue failed» в Диагностике только если `failed>0` с несвязанной ошибкой,
+   и дождитесь drain.
 5. Если jobs complete, syslog lag мал, но `afAuthHeaders6h=0` и
    `classificationGap=true` — это не очередь: на SMG нет classifiable AF RADIUS
    (логирование AntiFraud / диалект), поднимать MaxEvents бесполезно.

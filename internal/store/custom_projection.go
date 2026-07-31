@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"collector/internal/customprojection"
@@ -543,16 +544,70 @@ func (s *Store) RequeueFailedOverflowProjectionJobs(ctx context.Context) (int64,
 		SET status='pending',attempts=0,next_attempt_at=now(),last_error=NULL,
 			lease_expires_at=NULL,worker_id=NULL,completed_at=NULL,updated_at=now()
 		WHERE status='failed'
-		  AND (last_error ILIKE '%exceeds%events%'
-			OR last_error ILIKE '%memory bound%'
-			OR last_error ILIKE '%memory limit exceeded%'
-			OR last_error ILIKE '%query was cancelled%'
-			OR last_error ILIKE '%timeout exceeded%'
-			OR last_error ILIKE '%context deadline exceeded%')`)
+		  AND (`+transientProjectionFailureSQL+`)`)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// Transient ClickHouse/resource/network failures that the 30s worker sweep may
+// auto-requeue out of status=failed (same effect as the diagnostics Requeue button).
+const transientProjectionFailureSQL = `last_error ILIKE '%exceeds%events%'
+			OR last_error ILIKE '%memory bound%'
+			OR last_error ILIKE '%memory limit exceeded%'
+			OR last_error ILIKE '%query was cancelled%'
+			OR last_error ILIKE '%timeout exceeded%'
+			OR last_error ILIKE '%context deadline exceeded%'
+			OR last_error ILIKE '%connection refused%'
+			OR last_error ILIKE '%connection reset%'
+			OR last_error ILIKE '%broken pipe%'
+			OR last_error ILIKE '%i/o timeout%'
+			OR last_error ILIKE '%no such host%'
+			OR last_error ILIKE '%network is unreachable%'
+			OR last_error ILIKE '%dial tcp%'
+			OR last_error ILIKE '%clickhouse%unavailable%'
+			OR last_error ILIKE '%code: 210%'
+			OR last_error ILIKE '%code: 209%'`
+
+// IsTransientProjectionLastError reports whether a failed job's last_error should
+// be swept back to pending by RequeueFailedOverflowProjectionJobs.
+func IsTransientProjectionLastError(lastError string) bool {
+	message := strings.ToLower(strings.TrimSpace(lastError))
+	if message == "" {
+		return false
+	}
+	if strings.Contains(message, "exceeds") && strings.Contains(message, "events") {
+		return true
+	}
+	for _, fragment := range []string{
+		"memory bound",
+		"memory limit exceeded",
+		"query was cancelled",
+		"timeout exceeded",
+		"context deadline exceeded",
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"i/o timeout",
+		"no such host",
+		"network is unreachable",
+		"dial tcp",
+		"clickhouse", // paired below with unavailable
+		"code: 210",
+		"code: 209",
+	} {
+		if fragment == "clickhouse" {
+			if strings.Contains(message, "clickhouse") && strings.Contains(message, "unavailable") {
+				return true
+			}
+			continue
+		}
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 type CustomProjectionQueueStats struct {

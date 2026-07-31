@@ -2055,10 +2055,6 @@ function SummaryColumnHeaderFilter({
   const seqRef = useRef(0)
   const peerKey = filtersKeyFrom(peerFilters)
 
-  useEffect(() => {
-    setDraft(value)
-  }, [value])
-
   const updateMenuBox = useCallback(() => {
     const el = inputRef.current
     if (!el) return

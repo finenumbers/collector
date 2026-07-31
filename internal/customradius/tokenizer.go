@@ -126,10 +126,6 @@ func isAVPair(name string) bool {
 		strings.HasSuffix(name, "-avpair")
 }
 
-func isSecretName(name string) bool {
-	return redact.SecretName(name)
-}
-
 func malformedQuoteWarning() Explanation {
 	return Explanation{
 		Code: "custom.attribute.malformed_quote",

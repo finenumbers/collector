@@ -22,9 +22,6 @@ type Matcher struct {
 	NumberSuffixLen    int
 	UseShareURL        bool
 	Now                func() time.Time
-
-	// Deprecated: aliased to CallIDWindow when CallIDWindow is unset.
-	TimeSkew time.Duration
 }
 
 type callIndex struct {
@@ -85,9 +82,6 @@ func appendUniqueCall(list []VMCall, call VMCall) []VMCall {
 
 func (m *Matcher) opts() matchOpts {
 	callIDWindow := m.CallIDWindow
-	if callIDWindow <= 0 {
-		callIDWindow = m.TimeSkew
-	}
 	if callIDWindow <= 0 {
 		callIDWindow = 30 * time.Minute
 	}

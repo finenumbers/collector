@@ -20,15 +20,3 @@ func TestNormalizeFirmwareScheme(t *testing.T) {
 		}
 	}
 }
-
-func TestCanonicalFirmware(t *testing.T) {
-	if value, err := CanonicalFirmware(""); err != nil || value != FirmwareScheme3232 {
-		t.Fatalf("empty firmware: %q %v", value, err)
-	}
-	if value, err := CanonicalFirmware("3.410"); err != nil || value != FirmwareScheme3410 {
-		t.Fatalf("3.410: %q %v", value, err)
-	}
-	if _, err := CanonicalFirmware("3.410.0.7443"); err == nil {
-		t.Fatal("legacy full build must be rejected on save")
-	}
-}

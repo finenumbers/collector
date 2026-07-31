@@ -23,7 +23,7 @@ docker compose -f deploy/compose.yml exec -T clickhouse \
 
 If your ClickHouse build or storage policy does not support `BACKUP TABLE`,
 take a filesystem/volume snapshot of the ClickHouse data directory instead
-(see [Backup](deployment.md#backup)). Keep the dump and snapshot until the
+(see [Backup](deployment.md#backup-and-restore)). Keep the dump and snapshot until the
 new release has served production traffic and retention/purge look healthy.
 
 Then verify the immutable copy:

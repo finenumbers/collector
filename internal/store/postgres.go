@@ -558,18 +558,6 @@ func NormalizeFirmwareScheme(value string) string {
 	return FirmwareScheme3232
 }
 
-// CanonicalFirmware accepts only the UI/API scheme identifiers.
-func CanonicalFirmware(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return FirmwareScheme3232, nil
-	}
-	if value == FirmwareScheme3232 || value == FirmwareScheme3410 {
-		return value, nil
-	}
-	return "", errors.New("firmware must be 3.23.2 or 3.410")
-}
-
 func normalizeDeviceFirmware(device *Device) {
 	if device.SourceCategory == equipment.CategoryEquipment {
 		device.Firmware = NormalizeFirmwareScheme(device.Firmware)
@@ -707,11 +695,6 @@ type IngestFileClaim struct {
 	RowsValid   uint64
 	Retry       bool
 	RemoveLocal bool
-}
-
-func IngestFileFullyIngested(status string, rowsValid uint64) bool {
-	return status == "processed" || status == "archived" ||
-		(status == "quarantined" && rowsValid > 0)
 }
 
 type IngestFileSummary struct {

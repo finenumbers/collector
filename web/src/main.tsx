@@ -1536,8 +1536,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       .catch(() => { if (active) setStatsResult({ date, value: null }) })
     return () => { active = false }
   }, [date, device.id])
+  const cursorGenerationRef = useRef(0)
   useEffect(() => {
     const generation = ++generationRef.current
+    // Invalidate any in-flight pagination cursor for the previous filter set.
+    cursorGenerationRef.current = 0
     let active = true
     const timer = window.setTimeout(() => {
       setRows([])
@@ -1556,6 +1559,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           setRows(items || [])
           setHasMore(more)
           setCursor(nextCursor || null)
+          cursorGenerationRef.current = generation
         })
         .catch((reason) => {
           if (active && generation === generationRef.current) {
@@ -1573,7 +1577,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   }, [pagePath, reload, setBusy])
   const loadMore = useCallback(() => {
     if (!cursor || !hasMore || loadingRef.current) return
-    const generation = generationRef.current
+    // Reject stale cursors left over from a filter/date change before reset fetch finishes.
+    const generation = cursorGenerationRef.current
+    if (!generation || generation !== generationRef.current) return
     setBusy(true)
     api<PageResponse<DataRow>>(pagePath(cursor))
       .then(({ items, hasMore: more, nextCursor }) => {
@@ -1581,6 +1587,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         setRows((current) => [...current, ...(items || [])])
         setHasMore(more)
         setCursor(nextCursor || null)
+        cursorGenerationRef.current = generation
+      })
+      .catch((reason) => {
+        if (generation === generationRef.current) {
+          setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
+        }
       })
       .finally(() => {
         if (generation === generationRef.current) setBusy(false)
@@ -1801,9 +1813,8 @@ function OperationalDiagnosticsPanel() {
       <span>Очередь projection · depth / lag: <strong>
         {formatCount(queue?.depth)} / {formatCount(queue?.lagSeconds ?? derived?.projectionLagSeconds)} с
       </strong></span>
-      <span>Очередь projection · max device lag / failed: <strong>
-        {formatCount(queue?.maxDeviceLagSeconds ?? derived?.maxDeviceProjectionLagSeconds)} с /
-        {formatCount(queue?.failed)}
+      <span>Очередь projection · max device lag: <strong>
+        {formatCount(queue?.maxDeviceLagSeconds ?? derived?.maxDeviceProjectionLagSeconds)} с
       </strong></span>
       <span>Очередь projection · failed / backfill: <strong>
         {formatCount(queue?.failed)} / {formatCount(queue?.backfilling)}
@@ -2150,7 +2161,7 @@ const SATEL_FILTER_KEYS_BY_PRESET: Record<string, ReadonlySet<SatelFilterKey>> =
     'disconnectText',
   ]),
   all: new Set<SatelFilterKey>([
-    'billAni', 'billDnis', 'srcName', 'dstName', 'dpName',
+    'billAni', 'billDnis', 'outOrigDnis', 'srcName', 'dstName', 'dpName',
     'billAniOperator', 'billDnisOperator', 'billAniRegion', 'billDnisRegion',
     'remoteSrcGeoipIso', 'remoteDstGeoipIso', 'remoteSrcGeoipCity', 'remoteDstGeoipCity',
     'remoteSrcAsnOrg', 'remoteDstAsnOrg', 'disconnectText',
@@ -2216,7 +2227,7 @@ const ANTIFRAUD_FILTER_BY_KEY = Object.fromEntries(
 const ANTIFRAUD_FILTER_VALUE_LABELS: Record<string, Record<string, string>> = {
   chain: {
     complete: 'Полная',
-    partial: 'Частичная',
+    partial: 'Неполная',
     minimal: 'Минимальная',
   },
   radius_outcome: {
@@ -2225,12 +2236,12 @@ const ANTIFRAUD_FILTER_VALUE_LABELS: Record<string, Record<string, string>> = {
     no_response: 'Нет ответа',
   },
   coverage: {
-    matched: 'Совпал',
+    matched: 'Связан',
     ambiguous: 'Неоднозначно',
-    awaiting_cdr: 'Ожидание CDR',
-    expected: 'Ожидается',
-    late: 'Поздний',
-    missing: 'Нет CDR',
+    awaiting_cdr: 'Ожидает CDR',
+    expected: 'Ожидается CDR',
+    late: 'CDR опаздывает',
+    missing: 'CDR отсутствует',
   },
 }
 

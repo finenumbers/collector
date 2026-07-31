@@ -476,6 +476,9 @@ func (w *CDRWatcher) processIngestReplay(
 	if err := w.Analytics.InsertSatelRTUBatch(ctx, result.Records); err != nil {
 		return err
 	}
+	if err := w.enqueueVoipmonitorBuckets(ctx, device.ID, satelRecordBuckets(result.Records)); err != nil {
+		return err
+	}
 	status, message := "processed", ""
 	if len(result.Errors) > 0 {
 		status, message = "quarantined", summarizeErrors(result.Errors)

@@ -3,6 +3,7 @@ package analytics
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"collector/internal/equipment"
@@ -634,6 +635,67 @@ func (c *Client) listSatelRTUCallsPage(
 		return SatelRTUCallPage{}, err
 	}
 	return SatelRTUCallPage{Items: items, HasMore: hasMore}, nil
+}
+
+func clampSatelBillANISuggestLimit(limit uint64) uint64 {
+	if limit == 0 || limit > 100 {
+		return 50
+	}
+	return limit
+}
+
+const satelBillANIValuesBaseQuery = `WITH times AS
+		(
+			SELECT record_id,argMax(cdr_date_utc,interpreted_at) AS cdr_date,
+				argMax(setup_time_utc,interpreted_at) AS setup_time
+			FROM collector.satel_rtu_cdr_time_facts
+			WHERE device_id=?
+			GROUP BY record_id
+		)
+		SELECT DISTINCT c.bill_ani
+		FROM collector.satel_rtu_cdr AS c FINAL
+		LEFT JOIN times AS t ON t.record_id=c.record_id
+		WHERE c.device_id=?
+			AND c.bill_ani!=''
+			AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?
+			AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?`
+
+// ListSatelBillANIValues returns distinct non-empty bill_ani values for a device
+// within timeRange (typically one local calendar day), optionally filtered by prefix.
+func (c *Client) ListSatelBillANIValues(
+	ctx context.Context, deviceID uuid.UUID, prefix string, limit uint64, timeRange TimeRange,
+) ([]string, error) {
+	ctx, release, err := c.queryContext(ctx, workload.Interactive)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	limit = clampSatelBillANISuggestLimit(limit)
+	prefix = strings.TrimSpace(prefix)
+	query := satelBillANIValuesBaseQuery
+	args := []any{deviceID, deviceID, timeRange.From, timeRange.To}
+	if prefix != "" {
+		query += ` AND positionCaseInsensitive(c.bill_ani,?)>0`
+		args = append(args, prefix)
+	}
+	query += ` ORDER BY c.bill_ani ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := c.Conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make([]string, 0, limit)
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values, rows.Err()
 }
 
 func (c *Client) SatelRTUStats(

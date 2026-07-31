@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
 			private.Get("/devices/{deviceID}/syslog-messages", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
+			private.Get("/devices/{deviceID}/calls/bill-ani-values", s.listSatelBillANIValues)
 			private.Get("/devices/{deviceID}/calls/{recordID}/card", s.callCard)
 			private.Get("/devices/{deviceID}/antifraud-calls", s.listAntifraudCalls)
 			private.Get("/devices/{deviceID}/antifraud-calls/{callID}", s.antifraudCallDetail)
@@ -1084,6 +1085,56 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
 	})
+}
+
+func (s *Server) listSatelBillANIValues(writer http.ResponseWriter, request *http.Request) {
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.TypedCDR
+	}, "typed CDR calls")
+	if !ok {
+		return
+	}
+	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 {
+		writeError(writer, http.StatusBadRequest, "bill ANI values are only available for Satel RTU")
+		return
+	}
+	timeRange, ok := deviceDateRange(writer, request, device)
+	if !ok {
+		return
+	}
+	if timeRange == nil {
+		writeError(writer, http.StatusBadRequest, "bill ANI values require date=YYYY-MM-DD")
+		return
+	}
+	limit := uint64(50)
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+	prefix := request.URL.Query().Get("q")
+	if len(prefix) > 64 {
+		writeError(writer, http.StatusBadRequest, "q must be at most 64 characters")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+	defer cancel()
+	values, err := s.Analytics.ListSatelBillANIValues(ctx, deviceID, prefix, limit, *timeRange)
+	if err != nil {
+		if writeAdmissionError(writer, err) {
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "unable to query bill ANI values")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": values})
 }
 
 func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {

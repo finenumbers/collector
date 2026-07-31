@@ -95,6 +95,9 @@ describe('equipment templates', () => {
     expect(styles).toContain('.outcome-row.pstn-ineligible')
     expect(main).toContain('pstn-absent')
     expect(main).toContain('Не существует')
+    expect(main).toContain('BillAniHeaderFilter')
+    expect(main).toContain('bill-ani-values')
+    expect(styles).toContain('th.bill-ani-filter')
     expect(main).toContain('title="Последний CDR"')
     expect(main.indexOf('title="Последний CDR"')).toBeLessThan(
       main.lastIndexOf('title="Последний приём Syslog"'),

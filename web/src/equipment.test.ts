@@ -106,6 +106,7 @@ describe('equipment templates', () => {
     expect(main).toContain('summaryFiltersActive')
     expect(main).toContain('menuRef.current?.contains(target)')
     expect(styles).toContain('.col-filter-trigger')
+    expect(styles).toMatch(/\.col-filter-trigger\s*\{[^}]*background:\s*transparent/s)
     expect(styles).toContain('.col-filter-menu')
     expect(styles).toContain('position: fixed')
     expect(styles).toContain('.col-filter-count')

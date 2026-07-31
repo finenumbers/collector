@@ -134,7 +134,8 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
 			private.Get("/devices/{deviceID}/syslog-messages", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
-			private.Get("/devices/{deviceID}/calls/column-values", s.listSatelColumnValues)
+			private.Get("/devices/{deviceID}/calls/column-values", s.listCallsColumnValues)
+			private.Get("/devices/{deviceID}/antifraud-calls/column-values", s.listAntifraudColumnValues)
 			private.Get("/devices/{deviceID}/calls/{recordID}/card", s.callCard)
 			private.Get("/devices/{deviceID}/antifraud-calls", s.listAntifraudCalls)
 			private.Get("/devices/{deviceID}/antifraud-calls/{callID}", s.antifraudCallDetail)
@@ -1087,7 +1088,7 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	})
 }
 
-func (s *Server) listSatelColumnValues(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) listCallsColumnValues(writer http.ResponseWriter, request *http.Request) {
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
@@ -1098,26 +1099,13 @@ func (s *Server) listSatelColumnValues(writer http.ResponseWriter, request *http
 	if !ok {
 		return
 	}
-	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 {
-		writeError(writer, http.StatusBadRequest, "column values are only available for Satel RTU")
-		return
-	}
 	column := strings.TrimSpace(request.URL.Query().Get("column"))
-	if !analytics.SatelColumnFilterAllowed(column) {
-		writeError(writer, http.StatusBadRequest, "column must be an allowlisted Satel Summary field")
-		return
-	}
 	timeRange, ok := deviceDateRange(writer, request, device)
 	if !ok {
 		return
 	}
 	if timeRange == nil {
 		writeError(writer, http.StatusBadRequest, "column values require date=YYYY-MM-DD")
-		return
-	}
-	filters, err := parseSatelColumnFilters(request)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
 	limit := uint64(50)
@@ -1136,9 +1124,35 @@ func (s *Server) listSatelColumnValues(writer http.ResponseWriter, request *http
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
 	defer cancel()
-	values, err := s.Analytics.ListSatelColumnValues(
-		ctx, deviceID, column, prefix, limit, *timeRange, filters,
-	)
+	var values []analytics.SatelColumnValue
+	var err error
+	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+		if !analytics.SatelColumnFilterAllowed(column) {
+			writeError(writer, http.StatusBadRequest, "column must be an allowlisted Satel field")
+			return
+		}
+		filters, filterErr := parseSatelColumnFilters(request)
+		if filterErr != nil {
+			writeError(writer, http.StatusBadRequest, filterErr.Error())
+			return
+		}
+		values, err = s.Analytics.ListSatelColumnValues(
+			ctx, deviceID, column, prefix, limit, *timeRange, filters,
+		)
+	} else {
+		if !analytics.EltexColumnFilterAllowed(column) {
+			writeError(writer, http.StatusBadRequest, "column must be an allowlisted Eltex field")
+			return
+		}
+		filters, filterErr := parseEltexColumnFilters(request)
+		if filterErr != nil {
+			writeError(writer, http.StatusBadRequest, filterErr.Error())
+			return
+		}
+		values, err = s.Analytics.ListEltexColumnValues(
+			ctx, deviceID, column, prefix, limit, *timeRange, filters,
+		)
+	}
 	if err != nil {
 		if writeAdmissionError(writer, err) {
 			return
@@ -1164,21 +1178,32 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	columnFilters, err := parseSatelColumnFilters(request)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	if device.TemplateKey != equipment.TemplateSatelRTUCDRV1 && len(columnFilters) > 0 {
-		writeError(writer, http.StatusBadRequest, "column filters are only available for Satel RTU")
-		return
-	}
 	searchQ := request.URL.Query().Get("q")
-	if (searchQ != "" || len(columnFilters) > 0) && timeRange == nil {
+	var satelFilters analytics.SatelColumnFilters
+	var eltexFilters analytics.EltexColumnFilters
+	var filterCount int
+	if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
+		parsed, err := parseSatelColumnFilters(request)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		satelFilters = parsed
+		filterCount = len(satelFilters)
+	} else {
+		parsed, err := parseEltexColumnFilters(request)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		eltexFilters = parsed
+		filterCount = len(eltexFilters)
+	}
+	if (searchQ != "" || filterCount > 0) && timeRange == nil {
 		writeError(writer, http.StatusBadRequest, "call search requires date=YYYY-MM-DD")
 		return
 	}
-	if (searchQ != "" || len(columnFilters) > 0) && !s.allowCostlyRequest(currentSession(request).User.ID) {
+	if (searchQ != "" || filterCount > 0) && !s.allowCostlyRequest(currentSession(request).User.ID) {
 		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
 		return
 	}
@@ -1202,11 +1227,11 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 		var err error
 		if timeRange != nil {
 			page, err = s.Analytics.ListSatelRTUCallsPageRange(
-				ctx, deviceID, searchQ, limit, cursor, timeRange, columnFilters,
+				ctx, deviceID, searchQ, limit, cursor, timeRange, satelFilters,
 			)
 		} else {
 			page, err = s.Analytics.ListSatelRTUCallsPage(
-				ctx, deviceID, searchQ, limit, cursor, columnFilters,
+				ctx, deviceID, searchQ, limit, cursor, satelFilters,
 			)
 		}
 		if err != nil {
@@ -1230,7 +1255,7 @@ func (s *Server) listCalls(writer http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
 	defer cancel()
 	page, err := s.Analytics.ListCallsPageRange(
-		ctx, deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+		ctx, deviceID, searchQ, limit, cursor, timeRange, eltexFilters,
 	)
 	if err != nil {
 		if writeAdmissionError(writer, err) {
@@ -1286,11 +1311,17 @@ func (s *Server) listAntifraudCalls(writer http.ResponseWriter, request *http.Re
 	if !ok {
 		return
 	}
-	if request.URL.Query().Get("q") != "" && timeRange == nil {
+	afFilters, err := parseAntifraudColumnFilters(request)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	searchQ := request.URL.Query().Get("q")
+	if (searchQ != "" || len(afFilters) > 0) && timeRange == nil {
 		writeError(writer, http.StatusBadRequest, "AntiFraud search requires date=YYYY-MM-DD")
 		return
 	}
-	if request.URL.Query().Get("q") != "" && !s.allowCostlyRequest(currentSession(request).User.ID) {
+	if (searchQ != "" || len(afFilters) > 0) && !s.allowCostlyRequest(currentSession(request).User.ID) {
 		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
 		return
 	}
@@ -1309,7 +1340,7 @@ func (s *Server) listAntifraudCalls(writer http.ResponseWriter, request *http.Re
 	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
 	defer cancel()
 	page, err := s.Analytics.ListAntifraudCallsPage(
-		ctx, deviceID, request.URL.Query().Get("q"), limit, cursor, timeRange,
+		ctx, deviceID, searchQ, limit, cursor, timeRange, afFilters,
 	)
 	if err != nil {
 		if writeAdmissionError(writer, err) {
@@ -1326,6 +1357,76 @@ func (s *Server) listAntifraudCalls(writer http.ResponseWriter, request *http.Re
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"items": page.Items, "hasMore": page.HasMore, "nextCursor": nextCursor,
 	})
+}
+
+func (s *Server) listAntifraudColumnValues(writer http.ResponseWriter, request *http.Request) {
+	if !s.customProjectionEnabled() {
+		writeError(writer, http.StatusServiceUnavailable, "Custom AntiFraud feature is unavailable")
+		return
+	}
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	device, err := s.Store.Device(request.Context(), deviceID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(writer, http.StatusNotFound, "device not found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load device")
+		return
+	}
+	if !device.Capabilities.Syslog || !device.Capabilities.Antifraud ||
+		!device.Capabilities.Radius || !device.AntifraudEnabled {
+		writeError(writer, http.StatusBadRequest, "AntiFraud column values unavailable for this device")
+		return
+	}
+	column := strings.TrimSpace(request.URL.Query().Get("column"))
+	if !analytics.AntifraudColumnFilterAllowed(column) {
+		writeError(writer, http.StatusBadRequest, "column must be an allowlisted AntiFraud field")
+		return
+	}
+	timeRange, ok := deviceDateRange(writer, request, device)
+	if !ok {
+		return
+	}
+	if timeRange == nil {
+		writeError(writer, http.StatusBadRequest, "column values require date=YYYY-MM-DD")
+		return
+	}
+	filters, err := parseAntifraudColumnFilters(request)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit := uint64(50)
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+	prefix := request.URL.Query().Get("q")
+	if len(prefix) > 256 {
+		writeError(writer, http.StatusBadRequest, "q must be at most 256 characters")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+	defer cancel()
+	values, err := s.Analytics.ListAntifraudColumnValues(
+		ctx, deviceID, column, prefix, limit, *timeRange, filters,
+	)
+	if err != nil {
+		if writeAdmissionError(writer, err) {
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "unable to query AntiFraud column values")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": values})
 }
 
 func (s *Server) antifraudCallDetail(writer http.ResponseWriter, request *http.Request) {

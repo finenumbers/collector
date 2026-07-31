@@ -228,14 +228,14 @@ type CallCard struct {
 
 func (c *Client) ListAntifraudCallsPage(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64,
-	cursor *AntifraudCallCursor, timeRange *TimeRange,
+	cursor *AntifraudCallCursor, timeRange *TimeRange, filters AntifraudColumnFilters,
 ) (AntifraudCallPage, error) {
 	ctx, release, err := c.queryContext(ctx, workload.Interactive)
 	if err != nil {
 		return AntifraudCallPage{}, err
 	}
 	defer release()
-	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
+	if (search != "" || len(filters) > 0) && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
 		return AntifraudCallPage{}, ErrSearchRequiresRange
 	}
 	const maxPage = 1000
@@ -290,6 +290,7 @@ func (c *Client) ListAntifraudCallsPage(
 			args = append(args, search)
 		}
 	}
+	query, args = appendAntifraudColumnFilters(query, args, filters)
 	if cursor != nil {
 		query += ` AND (call.first_seen_at<? OR (call.first_seen_at=? AND call.call_id<?))`
 		args = append(args, cursor.SortTime, cursor.SortTime, cursor.CallID)

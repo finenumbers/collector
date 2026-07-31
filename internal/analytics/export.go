@@ -166,9 +166,9 @@ func normalizeExportEstimate(count int64, err error) *int64 {
 
 func (c *Client) ListExportCallsPage(
 	ctx context.Context, deviceID uuid.UUID, _ uint64, search string,
-	limit uint64, cursor *CallCursor, timeRange *TimeRange,
+	limit uint64, cursor *CallCursor, timeRange *TimeRange, filters EltexColumnFilters,
 ) (CallPage, error) {
-	return c.ListCallsPageRange(ctx, deviceID, search, limit, cursor, timeRange)
+	return c.ListCallsPageRange(ctx, deviceID, search, limit, cursor, timeRange, filters)
 }
 
 func (c *Client) ListExportSatelRTUCallsPage(

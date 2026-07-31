@@ -29,34 +29,35 @@ type ExportJob struct {
 	DeviceID           uuid.UUID  `json:"deviceId"`
 	Dataset            string     `json:"dataset"`
 	Category           string     `json:"category,omitempty"`
-	Search             string     `json:"search,omitempty"`
-	RangeFrom          *time.Time `json:"rangeFrom,omitempty"`
-	RangeTo            *time.Time `json:"rangeTo,omitempty"`
-	Format             string     `json:"format"`
-	OutputFormat       string     `json:"outputFormat,omitempty"`
-	Status             string     `json:"status"`
-	Filename           string     `json:"filename,omitempty"`
-	ContentType        string     `json:"contentType,omitempty"`
-	ObjectKey          string     `json:"-"`
-	SizeBytes          *int64     `json:"sizeBytes,omitempty"`
-	SHA256             string     `json:"sha256,omitempty"`
-	RowsEstimated      *int64     `json:"rowsEstimated,omitempty"`
-	RowsProcessed      int64      `json:"rowsProcessed"`
-	BytesSpooled       int64      `json:"bytesSpooled"`
-	ActiveRevision     int64      `json:"activeRevision"`
-	Timezone           string     `json:"timezone"`
-	TemplateKey        string     `json:"templateKey"`
-	ParserVersion      string     `json:"parserVersion"`
-	RawHighWatermark   *time.Time `json:"rawHighWatermark,omitempty"`
-	RawHighWatermarkID *uuid.UUID `json:"rawHighWatermarkId,omitempty"`
-	Error              string     `json:"error,omitempty"`
-	CancelRequestedAt  *time.Time `json:"cancelRequestedAt,omitempty"`
-	CreatedAt          time.Time  `json:"createdAt"`
-	StartedAt          *time.Time `json:"startedAt,omitempty"`
-	FinishedAt         *time.Time `json:"finishedAt,omitempty"`
-	HeartbeatAt        *time.Time `json:"heartbeatAt,omitempty"`
-	ExpiresAt          *time.Time `json:"expiresAt,omitempty"`
-	WorkerID           string     `json:"-"`
+	Search             string            `json:"search,omitempty"`
+	ColumnFilters      map[string]string `json:"columnFilters,omitempty"`
+	RangeFrom          *time.Time        `json:"rangeFrom,omitempty"`
+	RangeTo            *time.Time        `json:"rangeTo,omitempty"`
+	Format             string            `json:"format"`
+	OutputFormat       string            `json:"outputFormat,omitempty"`
+	Status             string            `json:"status"`
+	Filename           string            `json:"filename,omitempty"`
+	ContentType        string            `json:"contentType,omitempty"`
+	ObjectKey          string            `json:"-"`
+	SizeBytes          *int64            `json:"sizeBytes,omitempty"`
+	SHA256             string            `json:"sha256,omitempty"`
+	RowsEstimated      *int64            `json:"rowsEstimated,omitempty"`
+	RowsProcessed      int64             `json:"rowsProcessed"`
+	BytesSpooled       int64             `json:"bytesSpooled"`
+	ActiveRevision     int64             `json:"activeRevision"`
+	Timezone           string            `json:"timezone"`
+	TemplateKey        string            `json:"templateKey"`
+	ParserVersion      string            `json:"parserVersion"`
+	RawHighWatermark   *time.Time        `json:"rawHighWatermark,omitempty"`
+	RawHighWatermarkID *uuid.UUID        `json:"rawHighWatermarkId,omitempty"`
+	Error              string            `json:"error,omitempty"`
+	CancelRequestedAt  *time.Time        `json:"cancelRequestedAt,omitempty"`
+	CreatedAt          time.Time         `json:"createdAt"`
+	StartedAt          *time.Time        `json:"startedAt,omitempty"`
+	FinishedAt         *time.Time        `json:"finishedAt,omitempty"`
+	HeartbeatAt        *time.Time        `json:"heartbeatAt,omitempty"`
+	ExpiresAt          *time.Time        `json:"expiresAt,omitempty"`
+	WorkerID           string            `json:"-"`
 }
 
 type NewExportJob struct {
@@ -64,6 +65,7 @@ type NewExportJob struct {
 	Dataset            string
 	Category           string
 	Search             string
+	ColumnFilters      map[string]string
 	RangeFrom          *time.Time
 	RangeTo            *time.Time
 	Format             string
@@ -142,6 +144,7 @@ func (s *Store) ExportWorkerAvailable(ctx context.Context, maxAge time.Duration)
 
 func scanExportJob(row pgx.Row) (ExportJob, error) {
 	var job ExportJob
+	var filtersJSON []byte
 	err := row.Scan(
 		&job.ID, &job.RequestedBy, &job.DeviceID, &job.Dataset, &job.Category, &job.Search,
 		&job.RangeFrom, &job.RangeTo, &job.Format, &job.OutputFormat, &job.Status,
@@ -150,11 +153,29 @@ func scanExportJob(row pgx.Row) (ExportJob, error) {
 		&job.Timezone, &job.TemplateKey, &job.ParserVersion, &job.RawHighWatermark,
 		&job.RawHighWatermarkID, &job.Error, &job.CancelRequestedAt, &job.CreatedAt,
 		&job.StartedAt, &job.FinishedAt, &job.HeartbeatAt, &job.ExpiresAt, &job.WorkerID,
+		&filtersJSON,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ExportJob{}, ErrNotFound
 	}
-	return job, err
+	if err != nil {
+		return ExportJob{}, err
+	}
+	job.ColumnFilters = columnFiltersFromExportJSON(filtersJSON)
+	return job, nil
+}
+
+func columnFiltersFromExportJSON(raw []byte) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var blob struct {
+		ColumnFilters map[string]string `json:"columnFilters"`
+	}
+	if err := json.Unmarshal(raw, &blob); err != nil || len(blob.ColumnFilters) == 0 {
+		return nil
+	}
+	return blob.ColumnFilters
 }
 
 const exportJobColumns = `id,requested_by,device_id,dataset,category,search,range_from,
@@ -163,7 +184,7 @@ const exportJobColumns = `id,requested_by,device_id,dataset,category,search,rang
 	rows_estimated,rows_processed,bytes_spooled,active_revision,timezone,template_key,
 	parser_version,raw_high_watermark,raw_high_watermark_id,COALESCE(error,''),
 	cancel_requested_at,created_at,started_at,finished_at,heartbeat_at,expires_at,
-	COALESCE(worker_id,'')`
+	COALESCE(worker_id,''),COALESCE(filters,'{}'::jsonb)`
 
 func (s *Store) CreateExportJob(
 	ctx context.Context, input NewExportJob, actor User, remoteIP string,
@@ -203,6 +224,7 @@ func (s *Store) CreateExportJob(
 	filters, _ := json.Marshal(map[string]any{
 		"category": input.Category, "q": input.Search,
 		"from": input.RangeFrom, "to": input.RangeTo,
+		"columnFilters": input.ColumnFilters,
 	})
 	job, err := scanExportJob(tx.QueryRow(ctx, `INSERT INTO export_jobs
 		(requested_by,device_id,dataset,filters,category,search,range_from,range_to,format,

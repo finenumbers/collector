@@ -451,27 +451,28 @@ func (c *Client) ReinterpretSatelRTUTimes(
 
 func (c *Client) ListSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
+	filters SatelColumnFilters,
 ) (SatelRTUCallPage, error) {
-	return c.ListSatelRTUCallsPageRange(ctx, deviceID, search, limit, cursor, nil)
+	return c.ListSatelRTUCallsPageRange(ctx, deviceID, search, limit, cursor, nil, filters)
 }
 
 func (c *Client) ListSatelRTUCallsPageRange(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64, cursor *CallCursor,
-	timeRange *TimeRange,
+	timeRange *TimeRange, filters SatelColumnFilters,
 ) (SatelRTUCallPage, error) {
-	return c.listSatelRTUCallsPage(ctx, deviceID, nil, search, limit, cursor, timeRange)
+	return c.listSatelRTUCallsPage(ctx, deviceID, nil, search, limit, cursor, timeRange, filters)
 }
 
 func (c *Client) listSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, revision *uint64, search string,
-	limit uint64, cursor *CallCursor, timeRange *TimeRange,
+	limit uint64, cursor *CallCursor, timeRange *TimeRange, filters SatelColumnFilters,
 ) (SatelRTUCallPage, error) {
 	ctx, release, err := c.queryContext(ctx, workload.Interactive)
 	if err != nil {
 		return SatelRTUCallPage{}, err
 	}
 	defer release()
-	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
+	if (search != "" || len(filters) > 0) && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
 		return SatelRTUCallPage{}, ErrSearchRequiresRange
 	}
 	if limit == 0 || limit > 1000 {
@@ -562,6 +563,7 @@ func (c *Client) listSatelRTUCallsPage(
 			args = append(args, search)
 		}
 	}
+	query, args = appendSatelColumnFilters(query, args, filters)
 	if cursor != nil {
 		query += ` AND (sort_time<? OR (sort_time=? AND c.record_id<?))`
 		args = append(args, cursor.SortTime, cursor.SortTime, cursor.RecordID)
@@ -637,14 +639,7 @@ func (c *Client) listSatelRTUCallsPage(
 	return SatelRTUCallPage{Items: items, HasMore: hasMore}, nil
 }
 
-func clampSatelBillANISuggestLimit(limit uint64) uint64 {
-	if limit == 0 || limit > 100 {
-		return 50
-	}
-	return limit
-}
-
-const satelBillANIValuesBaseQuery = `WITH times AS
+const satelColumnValuesBaseQuery = `WITH times AS
 		(
 			SELECT record_id,argMax(cdr_date_utc,interpreted_at) AS cdr_date,
 				argMax(setup_time_utc,interpreted_at) AS setup_time
@@ -652,33 +647,46 @@ const satelBillANIValuesBaseQuery = `WITH times AS
 			WHERE device_id=?
 			GROUP BY record_id
 		)
-		SELECT DISTINCT c.bill_ani
+		SELECT DISTINCT c.%s
 		FROM collector.satel_rtu_cdr AS c FINAL
 		LEFT JOIN times AS t ON t.record_id=c.record_id
 		WHERE c.device_id=?
-			AND c.bill_ani!=''
+			AND c.%s!=''
 			AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?
 			AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?`
 
-// ListSatelBillANIValues returns distinct non-empty bill_ani values for a device
-// within timeRange (typically one local calendar day), optionally filtered by prefix.
-func (c *Client) ListSatelBillANIValues(
-	ctx context.Context, deviceID uuid.UUID, prefix string, limit uint64, timeRange TimeRange,
+// ListSatelColumnValues returns distinct non-empty values for an allowlisted column
+// within timeRange, optionally filtered by prefix and peer column filters (AND).
+func (c *Client) ListSatelColumnValues(
+	ctx context.Context, deviceID uuid.UUID, column, prefix string, limit uint64,
+	timeRange TimeRange, filters SatelColumnFilters,
 ) ([]string, error) {
+	column = strings.TrimSpace(column)
+	if !SatelColumnFilterAllowed(column) {
+		return nil, fmt.Errorf("unsupported suggest column %q", column)
+	}
 	ctx, release, err := c.queryContext(ctx, workload.Interactive)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	limit = clampSatelBillANISuggestLimit(limit)
+	limit = clampSatelColumnSuggestLimit(limit)
 	prefix = strings.TrimSpace(prefix)
-	query := satelBillANIValuesBaseQuery
+	peer := SatelColumnFilters{}
+	for key, value := range filters {
+		if key == column {
+			continue
+		}
+		peer[key] = value
+	}
+	query := fmt.Sprintf(satelColumnValuesBaseQuery, column, column)
 	args := []any{deviceID, deviceID, timeRange.From, timeRange.To}
+	query, args = appendSatelColumnFilters(query, args, peer)
 	if prefix != "" {
-		query += ` AND positionCaseInsensitive(c.bill_ani,?)>0`
+		query += ` AND positionCaseInsensitive(c.` + column + `,?)>0`
 		args = append(args, prefix)
 	}
-	query += ` ORDER BY c.bill_ani ASC LIMIT ?`
+	query += ` ORDER BY c.` + column + ` ASC LIMIT ?`
 	args = append(args, limit)
 	rows, err := c.Conn.Query(ctx, query, args...)
 	if err != nil {

@@ -61,7 +61,14 @@ func (s *Server) exportXLSX(writer http.ResponseWriter, request *http.Request) {
 	switch export.Dataset {
 	case "calls":
 		if device.TemplateKey == equipment.TemplateSatelRTUCDRV1 {
-			workbook, err = s.exportSatelCalls(request, deviceID, export.Search, location)
+			columnFilters, filterErr := parseSatelColumnFilters(request)
+			if filterErr != nil {
+				writeError(writer, http.StatusBadRequest, filterErr.Error())
+				return
+			}
+			workbook, err = s.exportSatelCalls(
+				request, deviceID, export.Search, location, columnFilters,
+			)
 		} else {
 			workbook, err = s.exportEltexCalls(request, deviceID, export.Search, location)
 		}
@@ -180,6 +187,7 @@ func (s *Server) exportEltexCalls(
 
 func (s *Server) exportSatelCalls(
 	request *http.Request, deviceID uuid.UUID, search string, location *time.Location,
+	filters analytics.SatelColumnFilters,
 ) (*exportWorkbook, error) {
 	headers := []any{
 		"CDR ID", "CDR date", "Setup", "Connect", "Disconnect", "Duration, ms", "Elapsed",
@@ -222,11 +230,11 @@ func (s *Server) exportSatelCalls(
 		if asynchronous {
 			page, err = s.Analytics.ListExportSatelRTUCallsPage(
 				request.Context(), deviceID, uint64(asyncJob.ActiveRevision),
-				search, s.exportPageSize(), cursor, exportJobTimeRange(asyncJob),
+				search, s.exportPageSize(), cursor, exportJobTimeRange(asyncJob), filters,
 			)
 		} else {
 			page, err = s.Analytics.ListSatelRTUCallsPage(
-				request.Context(), deviceID, search, s.exportPageSize(), cursor,
+				request.Context(), deviceID, search, s.exportPageSize(), cursor, filters,
 			)
 		}
 		if err != nil {

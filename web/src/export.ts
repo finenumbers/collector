@@ -31,6 +31,7 @@ export type ExportJobDisposition = 'poll' | 'offer_download' | 'clear'
 
 export type CreateExportJobRequest = ExportTarget & {
   q?: string
+  filters?: Record<string, string>
   format: 'csv_zip'
   from?: string
   to?: string
@@ -46,10 +47,15 @@ export function createExportRequest(
   query: string,
   from?: string,
   to?: string,
+  filters?: Record<string, string>,
 ): CreateExportJobRequest {
+  const activeFilters = filters
+    ? Object.fromEntries(Object.entries(filters).filter(([, value]) => value.trim() !== ''))
+    : undefined
   return {
     ...exportTarget(navigationDataset),
     ...(query ? { q: query } : {}),
+    ...(activeFilters && Object.keys(activeFilters).length > 0 ? { filters: activeFilters } : {}),
     format: 'csv_zip',
     ...(from ? { from } : {}),
     ...(to ? { to } : {}),
@@ -84,8 +90,9 @@ export function exportStorageKey(
   dataset: ExportNavigationDataset,
   date: string,
   query: string,
+  filtersKey = '',
 ): string {
-  return `collector:export:${deviceID}:${dataset}:${date}:${query}`
+  return `collector:export:${deviceID}:${dataset}:${date}:${query}:${filtersKey}`
 }
 
 export function serializeExportTracking(job: ExportJob): string {

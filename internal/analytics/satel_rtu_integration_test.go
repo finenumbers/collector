@@ -78,7 +78,7 @@ func TestSatelRTUInsertListStatsAndIdempotency(t *testing.T) {
 		To:   time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC),
 	}
 	page, err := client.ListSatelRTUCallsPageRange(
-		ctx, deviceID, "searchable", 10, nil, selectedDay,
+		ctx, deviceID, "searchable", 10, nil, selectedDay, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestSatelRTUInsertListStatsAndIdempotency(t *testing.T) {
 		t.Fatalf("unexpected Satel page: %+v", page)
 	}
 	datedPage, err := client.ListSatelRTUCallsPageRange(
-		ctx, deviceID, "searchable", 10, nil, selectedDay,
+		ctx, deviceID, "searchable", 10, nil, selectedDay, nil,
 	)
 	if err != nil || len(datedPage.Items) != 1 {
 		t.Fatalf("dated Satel page: %+v err=%v", datedPage, err)

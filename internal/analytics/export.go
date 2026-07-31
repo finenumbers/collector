@@ -173,9 +173,9 @@ func (c *Client) ListExportCallsPage(
 
 func (c *Client) ListExportSatelRTUCallsPage(
 	ctx context.Context, deviceID uuid.UUID, revision uint64, search string,
-	limit uint64, cursor *CallCursor, timeRange *TimeRange,
+	limit uint64, cursor *CallCursor, timeRange *TimeRange, filters SatelColumnFilters,
 ) (SatelRTUCallPage, error) {
 	return c.listSatelRTUCallsPage(
-		ctx, deviceID, &revision, search, limit, cursor, timeRange,
+		ctx, deviceID, &revision, search, limit, cursor, timeRange, filters,
 	)
 }

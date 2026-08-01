@@ -325,6 +325,11 @@ func (w *Worker) processBucketWindows(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Keep ownership alive across dense hour→5m rebuilds (lease may be
+		// shorter than wall-clock for the full hour).
+		if err := w.Queue.RefreshCustomProjectionLease(ctx, job, cfg.Lease); err != nil {
+			return err
+		}
 		end := cursor.Add(span)
 		if end.After(to) {
 			end = to
@@ -658,7 +663,9 @@ func IsClickHouseResourceError(err error) bool {
 	return strings.Contains(message, "memory limit exceeded") ||
 		strings.Contains(message, "query was cancelled") ||
 		strings.Contains(message, "timeout exceeded") ||
-		strings.Contains(message, "context deadline exceeded")
+		strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "code: 216") ||
+		strings.Contains(message, "already running")
 }
 
 func (w *Worker) loadSessionEvents(

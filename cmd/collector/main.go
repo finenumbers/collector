@@ -514,6 +514,10 @@ func enrichAndWriteSatelPage(
 	pstn *pstnlookup.Client, geoip *geoiplookup.Client,
 	records []analytics.SatelRTURecord, workers int, forcePSTN bool,
 ) (int, error) {
+	before := make([]satelEnrichmentSnapshot, len(records))
+	for i, record := range records {
+		before[i] = snapshotSatelEnrichment(record)
+	}
 	if forcePSTN {
 		analytics.EnrichSatelRecordsForcePSTN(ctx, pstn, geoip, records, workers)
 	} else {
@@ -521,7 +525,10 @@ func enrichAndWriteSatelPage(
 	}
 	now := time.Now().UTC()
 	toInsert := make([]analytics.SatelRTURecord, 0, len(records))
-	for _, record := range records {
+	for i, record := range records {
+		if !forcePSTN && before[i] == snapshotSatelEnrichment(record) {
+			continue // no field changes — skip CH rewrite / ingested_at bump
+		}
 		if record.BillANIOperator == "" && record.BillDNISOperator == "" &&
 			record.BillANIRegion == "" && record.BillDNISRegion == "" &&
 			record.RemoteSrcGeoipISO == "" && record.RemoteDstGeoipISO == "" &&
@@ -539,6 +546,22 @@ func enrichAndWriteSatelPage(
 		return 0, err
 	}
 	return len(toInsert), nil
+}
+
+type satelEnrichmentSnapshot struct {
+	aniOp, dnisOp, aniReg, dnisReg string
+	srcISO, srcCity, srcASN        string
+	dstISO, dstCity, dstASN        string
+}
+
+func snapshotSatelEnrichment(record analytics.SatelRTURecord) satelEnrichmentSnapshot {
+	return satelEnrichmentSnapshot{
+		aniOp: record.BillANIOperator, dnisOp: record.BillDNISOperator,
+		aniReg: record.BillANIRegion, dnisReg: record.BillDNISRegion,
+		srcISO: record.RemoteSrcGeoipISO, srcCity: record.RemoteSrcGeoipCity,
+		srcASN: record.RemoteSrcASNOrg, dstISO: record.RemoteDstGeoipISO,
+		dstCity: record.RemoteDstGeoipCity, dstASN: record.RemoteDstASNOrg,
+	}
 }
 
 func runEnrichmentCatchUp(
@@ -613,6 +636,21 @@ func runEnrichmentCatchUp(
 			continue
 		}
 		if geoip != nil && geoip.Enabled() && pageNeedsGeoIPEnrichment(records) {
+			if geoip.CoolingDown() {
+				// Upstream outage: do not pin the cursor on one page every 2s.
+				after = records[len(records)-1].RecordID
+				backoff := sleepFor
+				if backoff < 30*time.Second {
+					backoff = 30 * time.Second
+				}
+				slog.Warn("enrichment catch-up advancing past GeoIP gaps while API cooling down",
+					"page", len(records), "written", written, "backoff", backoff.String(),
+					"lastRecordId", after.String())
+				if !sleepContext(ctx, backoff) {
+					return
+				}
+				continue
+			}
 			slog.Warn("enrichment catch-up GeoIP gaps unresolved, retrying page",
 				"page", len(records), "written", written,
 				"lastRecordId", records[len(records)-1].RecordID.String())

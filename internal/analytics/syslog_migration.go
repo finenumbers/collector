@@ -90,17 +90,17 @@ func (c *Client) PreflightLegacySyslogCleanup(
 		LegacyParserJobsChecked: options.LegacyParserJobsChecked,
 		ActiveLegacyParserJobs:  options.ActiveLegacyParserJobs,
 	}
-	if err := c.Conn.QueryRow(ctx, fmt.Sprintf(syslogCopyDigestQuery, "raw_syslog")).
+	if err := c.queryRow(ctx, fmt.Sprintf(syslogCopyDigestQuery, "raw_syslog")).
 		Scan(&result.Source.Rows, &result.Source.Sum, &result.Source.Xor); err != nil {
 		return result, fmt.Errorf("digest collector.raw_syslog: %w", err)
 	}
-	if err := c.Conn.QueryRow(ctx, fmt.Sprintf(syslogCopyDigestQuery, "syslog_messages")).
+	if err := c.queryRow(ctx, fmt.Sprintf(syslogCopyDigestQuery, "syslog_messages")).
 		Scan(&result.Destination.Rows, &result.Destination.Sum, &result.Destination.Xor); err != nil {
 		return result, fmt.Errorf("digest collector.syslog_messages: %w", err)
 	}
 	result.CopyVerified = result.Source == result.Destination
 
-	rows, err := c.Conn.Query(ctx, `SELECT name FROM system.tables
+	rows, err := c.query(ctx, `SELECT name FROM system.tables
 		WHERE database='collector' AND name IN ? ORDER BY name`, legacySyslogTables)
 	if err != nil {
 		return result, fmt.Errorf("inventory legacy ClickHouse tables: %w", err)
@@ -119,7 +119,7 @@ func (c *Client) PreflightLegacySyslogCleanup(
 	sort.Strings(result.LegacyTables)
 
 	var available uint64
-	if err := c.Conn.QueryRow(ctx, `SELECT min(available_space) FROM system.disks`).Scan(&available); err == nil {
+	if err := c.queryRow(ctx, `SELECT min(available_space) FROM system.disks`).Scan(&available); err == nil {
 		result.AvailableDiskBytes = &available
 	}
 	result.ReadyForCleanup = result.CopyVerified &&

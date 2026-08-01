@@ -118,7 +118,7 @@ func (c *Client) LoadVoipmonitorEltexCandidates(
 	if limit <= 0 || limit > 5000 {
 		limit = 2000
 	}
-	rows, err := c.Conn.Query(ctx, `SELECT c.record_id,
+	rows, err := c.query(ctx, `SELECT c.record_id,
 		coalesce(t.setup_time,c.setup_time,c.ingested_at),
 		c.duration_ms,c.connect_time,c.disconnect_time,
 		c.incoming_cgpn,c.outgoing_cgpn,c.incoming_cdpn,c.outgoing_cdpn,
@@ -190,7 +190,7 @@ func (c *Client) LoadVoipmonitorSatelCandidates(
 	if limit <= 0 || limit > 5000 {
 		limit = 2000
 	}
-	rows, err := c.Conn.Query(ctx, `SELECT c.record_id,
+	rows, err := c.query(ctx, `SELECT c.record_id,
 		coalesce(t.setup_time_utc,t.cdr_date_utc,c.setup_time,c.ingested_at),
 		c.duration_ms,c.connect_time,c.disconnect_time,
 		c.bill_ani,c.bill_dnis,c.in_ani,c.in_dnis,c.out_ani,c.out_dnis,
@@ -295,7 +295,7 @@ func (c *Client) loadVoipmonitorLinkMap(
 		return nil, err
 	}
 	defer release()
-	rows, err := c.Conn.Query(ctx, `SELECT source_record_id,voipmonitor_cdr_id,voipmonitor_call_id,
+	rows, err := c.query(ctx, `SELECT source_record_id,voipmonitor_cdr_id,voipmonitor_call_id,
 		voipmonitor_card_url,match_status,match_method,match_score
 		FROM collector.cdr_voipmonitor_links_current
 		WHERE device_id=? AND source_system=? AND source_record_id IN ?`,

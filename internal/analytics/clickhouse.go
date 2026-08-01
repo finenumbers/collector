@@ -182,10 +182,10 @@ func (c *Client) Migrate(
 		}
 		defer release()
 	}
-	if err := c.Conn.Exec(ctx, `CREATE DATABASE IF NOT EXISTS collector`); err != nil {
+	if err := c.exec(ctx, `CREATE DATABASE IF NOT EXISTS collector`); err != nil {
 		return err
 	}
-	if err := c.Conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS collector.schema_migrations
+	if err := c.exec(ctx, `CREATE TABLE IF NOT EXISTS collector.schema_migrations
 		(version String, applied_at DateTime64(3, 'UTC'))
 		ENGINE = ReplacingMergeTree(applied_at) ORDER BY version`); err != nil {
 		return err
@@ -200,7 +200,7 @@ func (c *Client) Migrate(
 			continue
 		}
 		var applied uint64
-		if err := c.Conn.QueryRow(ctx,
+		if err := c.queryRow(ctx,
 			`SELECT count() FROM collector.schema_migrations WHERE version=?`, entry.Name()).
 			Scan(&applied); err != nil {
 			return err
@@ -231,11 +231,11 @@ func (c *Client) Migrate(
 			if strings.TrimSpace(statement) == "" {
 				continue
 			}
-			if err := c.Conn.Exec(ctx, statement); err != nil {
+			if err := c.exec(ctx, statement); err != nil {
 				return fmt.Errorf("%s: %w", entry.Name(), err)
 			}
 		}
-		if err := c.Conn.Exec(ctx,
+		if err := c.exec(ctx,
 			`INSERT INTO collector.schema_migrations(version,applied_at) VALUES(?,now64(3))`,
 			entry.Name()); err != nil {
 			return fmt.Errorf("%s: recording migration: %w", entry.Name(), err)
@@ -407,7 +407,7 @@ func (c *Client) ReinterpretCDRTimes(
 		return err
 	}
 	defer release()
-	return c.Conn.Exec(ctx, `INSERT INTO collector.cdr_time_interpretations
+	return c.exec(ctx, `INSERT INTO collector.cdr_time_interpretations
 		(record_id,device_id,interpreted_at,setup_time,connect_time,disconnect_time,
 		 source_timezone,source_utc_offset_minutes)
 		SELECT c.record_id,c.device_id,now64(6),
@@ -495,7 +495,7 @@ func (c *Client) ListCallsPageRange(
 	}
 	query += ` ORDER BY sort_time DESC,c.record_id DESC LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := c.Conn.Query(ctx, query, args...)
+	rows, err := c.query(ctx, query, args...)
 	if err != nil {
 		return CallPage{}, err
 	}
@@ -549,7 +549,7 @@ func (c *Client) StatsRange(
 	}
 	defer release()
 	var result DeviceStats
-	err = c.Conn.QueryRow(ctx, `SELECT count(),countIf(release_cause IS NOT NULL AND release_cause!=16),
+	err = c.queryRow(ctx, `SELECT count(),countIf(release_cause IS NOT NULL AND release_cause!=16),
 		ifNull(avg(duration_ms),0)
 		FROM collector.cdr_records AS c FINAL
 		LEFT JOIN collector.cdr_time_interpretations AS t FINAL
@@ -561,7 +561,7 @@ func (c *Client) StatsRange(
 	if err != nil {
 		return DeviceStats{}, err
 	}
-	err = c.Conn.QueryRow(ctx, `SELECT count() FROM collector.syslog_messages FINAL
+	err = c.queryRow(ctx, `SELECT count() FROM collector.syslog_messages FINAL
 		WHERE device_id=? AND received_at>=? AND received_at<?`,
 		deviceID, timeRange.From, timeRange.To).Scan(&result.SyslogMessages24h)
 	return result, err
@@ -573,7 +573,7 @@ func (c *Client) PurgeDeviceData(ctx context.Context, deviceID uuid.UUID) error 
 		return err
 	}
 	defer release()
-	rows, err := c.Conn.Query(ctx, `SELECT name
+	rows, err := c.query(ctx, `SELECT name
 		FROM system.tables
 		WHERE database='collector'
 		  AND name IN (
@@ -622,12 +622,12 @@ func (c *Client) PurgeDeviceData(ctx context.Context, deviceID uuid.UUID) error 
 			"ALTER TABLE collector.`%s` DELETE WHERE device_id=? SETTINGS mutations_sync=1",
 			table,
 		)
-		if err := c.Conn.Exec(ctx, query, deviceID); err != nil {
+		if err := c.exec(ctx, query, deviceID); err != nil {
 			return fmt.Errorf("purge ClickHouse table %s: %w", table, err)
 		}
 		var remaining uint64
 		verify := fmt.Sprintf("SELECT count() FROM collector.`%s` WHERE device_id=?", table)
-		if err := c.Conn.QueryRow(ctx, verify, deviceID).Scan(&remaining); err != nil {
+		if err := c.queryRow(ctx, verify, deviceID).Scan(&remaining); err != nil {
 			return err
 		}
 		if remaining != 0 {

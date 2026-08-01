@@ -34,6 +34,11 @@ func TestIsTransientProjectionLastError(t *testing.T) {
 		{name: "ch unavailable", err: "clickhouse unavailable: pool empty", want: true},
 		{name: "code 210", err: "code: 210. DB::NetException", want: true},
 		{name: "code 209", err: "code: 209. Timeout exceeded", want: true},
+		{
+			name: "code 216 already running",
+			err:  "code: 216, message: Query with id = collector-custom_replay-8205578f-49fe-4fa0-9491-8ccfb5a0852a is already running.",
+			want: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,6 +64,8 @@ func TestTransientProjectionFailureSQLCoversNetworkFragments(t *testing.T) {
 		"clickhouse%unavailable",
 		"code: 210",
 		"code: 209",
+		"code: 216",
+		"already running",
 	} {
 		if !strings.Contains(lower, strings.ToLower(fragment)) {
 			t.Fatalf("transientProjectionFailureSQL missing %q", fragment)

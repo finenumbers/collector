@@ -17,6 +17,7 @@ import (
 
 const DefaultURL = "https://geoip.finenumbers.com/api/v1/lookup"
 const DefaultCacheTTL = 24 * time.Hour
+const DefaultErrorCooldown = 45 * time.Second
 
 type Result struct {
 	CountryISO string
@@ -25,20 +26,23 @@ type Result struct {
 }
 
 type Client struct {
-	BaseURL    string
-	Token      string
-	EnabledFlag bool
-	HTTPClient *http.Client
-	CacheTTL   time.Duration
-	Telemetry  *lookuptelemetry.Registry
+	BaseURL       string
+	Token         string
+	EnabledFlag   bool
+	HTTPClient    *http.Client
+	CacheTTL      time.Duration
+	ErrorCooldown time.Duration
+	Telemetry     *lookuptelemetry.Registry
 
-	mu    sync.Mutex
-	cache map[string]cacheEntry
+	mu            sync.Mutex
+	cache         map[string]cacheEntry
+	lastFailureAt time.Time
 }
 
 type cacheEntry struct {
 	result    Result
 	expiresAt time.Time
+	failed    bool
 }
 
 func New(baseURL, token string, enabled bool) *Client {
@@ -46,18 +50,34 @@ func New(baseURL, token string, enabled bool) *Client {
 		baseURL = DefaultURL
 	}
 	return &Client{
-		BaseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		Token:       strings.TrimSpace(token),
-		EnabledFlag: enabled,
-		HTTPClient:  &http.Client{Timeout: 3 * time.Second},
-		CacheTTL:    DefaultCacheTTL,
-		Telemetry:   lookuptelemetry.Default,
-		cache:       make(map[string]cacheEntry),
+		BaseURL:       strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		Token:         strings.TrimSpace(token),
+		EnabledFlag:   enabled,
+		HTTPClient:    &http.Client{Timeout: 3 * time.Second},
+		CacheTTL:      DefaultCacheTTL,
+		ErrorCooldown: DefaultErrorCooldown,
+		Telemetry:     lookuptelemetry.Default,
+		cache:         make(map[string]cacheEntry),
 	}
 }
 
 func (c *Client) Enabled() bool {
 	return c != nil && c.EnabledFlag && c.Token != ""
+}
+
+// CoolingDown reports a recent upstream failure (5xx/transport) so catch-up can
+// stop busy-looping the same GeoIP-gap page.
+func (c *Client) CoolingDown() bool {
+	if c == nil {
+		return false
+	}
+	cooldown := c.ErrorCooldown
+	if cooldown <= 0 {
+		cooldown = DefaultErrorCooldown
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.lastFailureAt.IsZero() && time.Since(c.lastFailureAt) < cooldown
 }
 
 // StripHostPort removes :port from host:port or [ipv6]:port.
@@ -100,7 +120,10 @@ func (c *Client) Lookup(ctx context.Context, rawAddr string) (Result, error) {
 	if ip == "" || net.ParseIP(ip) == nil {
 		return Result{}, nil
 	}
-	if result, ok := c.getCached(ip); ok {
+	if result, ok, failed := c.getCached(ip); ok {
+		if failed {
+			return Result{}, fmt.Errorf("geoip lookup cooling down for %s", ip)
+		}
 		if c.Telemetry != nil {
 			c.Telemetry.RecordCacheHit("geoip")
 		}
@@ -110,6 +133,7 @@ func (c *Client) Lookup(ctx context.Context, rawAddr string) (Result, error) {
 	result, err := c.fetch(ctx, ip)
 	latency := time.Since(start)
 	if err != nil {
+		c.rememberFailure(ip, err)
 		if c.Telemetry != nil {
 			c.Telemetry.RecordError("geoip", latency, err.Error())
 		}
@@ -141,7 +165,10 @@ func (c *Client) LookupMany(ctx context.Context, addrs []string, workers int) ma
 			continue
 		}
 		seen[ip] = struct{}{}
-		if result, ok := c.getCached(ip); ok {
+		if result, ok, failed := c.getCached(ip); ok {
+			if failed {
+				continue // omit: do not overwrite existing GeoIP fields with empty
+			}
 			out[ip] = result
 			if c.Telemetry != nil {
 				c.Telemetry.RecordCacheHit("geoip")
@@ -156,6 +183,7 @@ func (c *Client) LookupMany(ctx context.Context, addrs []string, workers int) ma
 	type item struct {
 		ip     string
 		result Result
+		ok     bool
 	}
 	jobs := make(chan string)
 	results := make(chan item, len(unique))
@@ -172,17 +200,18 @@ func (c *Client) LookupMany(ctx context.Context, addrs []string, workers int) ma
 				result, err := c.fetch(ctx, ip)
 				latency := time.Since(start)
 				if err != nil {
-					result = Result{}
+					c.rememberFailure(ip, err)
 					if c.Telemetry != nil {
 						c.Telemetry.RecordError("geoip", latency, err.Error())
 					}
-				} else {
-					c.putCached(ip, result)
-					if c.Telemetry != nil {
-						c.Telemetry.RecordSuccess("geoip", latency)
-					}
+					results <- item{ip: ip, ok: false}
+					continue
 				}
-				results <- item{ip: ip, result: result}
+				c.putCached(ip, result)
+				if c.Telemetry != nil {
+					c.Telemetry.RecordSuccess("geoip", latency)
+				}
+				results <- item{ip: ip, result: result, ok: true}
 			}
 		}()
 	}
@@ -202,12 +231,14 @@ func (c *Client) LookupMany(ctx context.Context, addrs []string, workers int) ma
 		close(results)
 	}()
 	for item := range results {
-		out[item.ip] = item.result
+		if item.ok {
+			out[item.ip] = item.result
+		}
 	}
 	return out
 }
 
-func (c *Client) getCached(ip string) (Result, bool) {
+func (c *Client) getCached(ip string) (Result, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.cache[ip]
@@ -215,9 +246,9 @@ func (c *Client) getCached(ip string) (Result, bool) {
 		if ok {
 			delete(c.cache, ip)
 		}
-		return Result{}, false
+		return Result{}, false, false
 	}
-	return entry.result, true
+	return entry.result, true, entry.failed
 }
 
 func (c *Client) putCached(ip string, result Result) {
@@ -228,6 +259,26 @@ func (c *Client) putCached(ip string, result Result) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cache[ip] = cacheEntry{result: result, expiresAt: time.Now().Add(ttl)}
+}
+
+func (c *Client) rememberFailure(ip string, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	cooldown := c.ErrorCooldown
+	if cooldown <= 0 {
+		cooldown = DefaultErrorCooldown
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastFailureAt = time.Now()
+	// Negative-cache 5xx/transport briefly so catch-up does not hammer the same IPs.
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "status 5") || strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "connection") || strings.Contains(msg, "502") ||
+		strings.Contains(msg, "503") || strings.Contains(msg, "504") {
+		c.cache[ip] = cacheEntry{failed: true, expiresAt: time.Now().Add(cooldown)}
+	}
 }
 
 type apiResponse struct {

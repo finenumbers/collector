@@ -136,15 +136,18 @@ func enrichSatelRecords(
 			}
 			byIP := geoip.LookupMany(ctx, addrs, workers)
 			for index := range records {
-				srcISO, srcCity, srcASN, dstISO, dstCity, dstASN := geoiplookup.ApplyToAddrs(
-					records[index].RemoteSrcSigAddress, records[index].RemoteDstSigAddress, byIP,
-				)
-				records[index].RemoteSrcGeoipISO = srcISO
-				records[index].RemoteSrcGeoipCity = srcCity
-				records[index].RemoteSrcASNOrg = srcASN
-				records[index].RemoteDstGeoipISO = dstISO
-				records[index].RemoteDstGeoipCity = dstCity
-				records[index].RemoteDstASNOrg = dstASN
+				// Only overwrite sides present in byIP so failed lookups do not
+				// wipe previously filled GeoIP columns (aligned with PSTN).
+				if result, ok := byIP[geoiplookup.StripHostPort(records[index].RemoteSrcSigAddress)]; ok {
+					records[index].RemoteSrcGeoipISO = result.CountryISO
+					records[index].RemoteSrcGeoipCity = result.City
+					records[index].RemoteSrcASNOrg = result.ASNOrg
+				}
+				if result, ok := byIP[geoiplookup.StripHostPort(records[index].RemoteDstSigAddress)]; ok {
+					records[index].RemoteDstGeoipISO = result.CountryISO
+					records[index].RemoteDstGeoipCity = result.City
+					records[index].RemoteDstASNOrg = result.ASNOrg
+				}
 			}
 		}()
 	}
@@ -338,7 +341,7 @@ func (c *Client) ListSatelRTURecordsNeedingEnrichment(
 			AND (` + satelNeedsEnrichmentPredicate() + `)
 		ORDER BY record_id ASC
 		LIMIT ?`
-	rows, err := c.Conn.Query(ctx, query, afterRecordID, limit)
+	rows, err := c.query(ctx, query, afterRecordID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +376,7 @@ func (c *Client) ListSatelRTURecordsForPSTNRefresh(
 			AND ` + satelPSTNCallEligibleExpr() + `
 		ORDER BY record_id ASC
 		LIMIT ?`
-	rows, err := c.Conn.Query(ctx, query, afterRecordID, limit)
+	rows, err := c.query(ctx, query, afterRecordID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +415,7 @@ func (c *Client) EnrichmentCoverage(ctx context.Context, windowSeconds uint64) (
 	}
 	defer release()
 	out := EnrichmentCoverageSnapshot{WindowSeconds: windowSeconds}
-	err = c.Conn.QueryRow(ctx, `
+	err = c.queryRow(ctx, `
 		SELECT
 			count(),
 			countIf(`+satelPSTNCallEligibleExpr()+`),
@@ -435,7 +438,7 @@ func (c *Client) EnrichmentCoverage(ctx context.Context, windowSeconds uint64) (
 	if out.GeoipEligible > 0 {
 		out.GeoipCoverage = float64(out.GeoipEnriched) / float64(out.GeoipEligible)
 	}
-	if err := c.Conn.QueryRow(ctx, `
+	if err := c.queryRow(ctx, `
 		SELECT count()
 		FROM collector.satel_rtu_cdr FINAL
 		WHERE `+satelNeedsEnrichmentPredicate()).Scan(&out.Backlog); err != nil {

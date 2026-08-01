@@ -33,7 +33,7 @@ func (c *Client) DiscoverSyslogBuckets(
 	}
 	// No FINAL: event_id is unique per insert, and ORDER BY matches the table key.
 	// FINAL over multi-million syslog_messages starves the shared ClickHouse pool.
-	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT received_at,event_id
+	rows, err := c.query(ctx, `SELECT DISTINCT received_at,event_id
 		FROM collector.syslog_messages
 		WHERE device_id=? AND (received_at>? OR (received_at=? AND event_id>?))
 		ORDER BY received_at,event_id LIMIT ?`,
@@ -97,7 +97,7 @@ func (c *Client) LoadCustomRadiusEvents(
 	// Include RADIUS headers and Custom attribute-dump lines. Eltex often logs
 	// Acct-Session-Id / Eltex-AVPair on a separate line without the word RADIUS;
 	// excluding those dumps leaves packets without session keys.
-	rows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id,device_id,received_at,toString(source_ip),
+	rows, err := c.query(ctx, `SELECT DISTINCT event_id,device_id,received_at,toString(source_ip),
 		source_port,transport,payload FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?
 		  AND multiSearchAnyCaseInsensitiveUTF8(payload, [
@@ -188,7 +188,7 @@ func (c *Client) loadSessionEventIDs(
 		if end > len(identities) {
 			end = len(identities)
 		}
-		rows, err := c.Conn.Query(ctx, `SELECT DISTINCT event_id
+		rows, err := c.query(ctx, `SELECT DISTINCT event_id
 			FROM collector.custom_radius_session_events_current
 			WHERE device_id=? AND identity_value IN ?
 			  AND received_at>=? AND received_at<?
@@ -230,7 +230,7 @@ func (c *Client) loadSyslogEventsByID(
 	if len(eventIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := c.Conn.Query(ctx, `SELECT event_id,device_id,received_at,toString(source_ip),
+	rows, err := c.query(ctx, `SELECT event_id,device_id,received_at,toString(source_ip),
 		source_port,transport,payload
 		FROM collector.syslog_messages
 		WHERE device_id=? AND event_id IN ?
@@ -495,7 +495,7 @@ func (c *Client) ActivateCustomProjectionSnapshot(
 	}
 	defer release()
 	var previous *uuid.UUID
-	err = c.Conn.QueryRow(ctx, `SELECT nullIf(
+	err = c.queryRow(ctx, `SELECT nullIf(
 			argMaxIf(snapshot_id,projection_seq,marker='active'),
 			toUUID('00000000-0000-0000-0000-000000000000'))
 		FROM collector.custom_projection_state
@@ -504,7 +504,7 @@ func (c *Client) ActivateCustomProjectionSnapshot(
 		return err
 	}
 	rowCount := uint64(len(snapshot.Result.Packets) + len(snapshot.Result.Calls))
-	if err := c.Conn.Exec(ctx, `INSERT INTO collector.custom_projection_state
+	if err := c.exec(ctx, `INSERT INTO collector.custom_projection_state
 		(device_id,bucket_start,policy_revision,projection_seq,snapshot_id,previous_snapshot_id,
 		marker,watermark_received_at,watermark_event_id,row_count,activated_at,deleted)
 		VALUES(?,?,?,?,?,?,'active',?,?,?,?,0)`,
@@ -514,7 +514,7 @@ func (c *Client) ActivateCustomProjectionSnapshot(
 		return err
 	}
 	if len(snapshot.Result.Calls) != 0 {
-		if err := c.Conn.Exec(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
+		if err := c.exec(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
 			(device_id,bucket_start,policy_revision,projection_seq,reason,enqueued_at,deleted)
 			VALUES(?,?,?,?,?,now64(6),0)`,
 			snapshot.DeviceID, snapshot.BucketStart, snapshot.PolicyRevision,
@@ -546,7 +546,7 @@ func (c *Client) tombstoneCustomSnapshot(
 		 FROM collector.custom_radius_session_events WHERE device_id=? AND bucket_start=? AND snapshot_id=?`,
 	}
 	for _, query := range queries {
-		if err := c.Conn.Exec(
+		if err := c.exec(
 			ctx, query, snapshot.ProjectionSeq, snapshot.DeviceID, snapshot.BucketStart, previous,
 		); err != nil {
 			return err
@@ -563,7 +563,7 @@ func (c *Client) WriteCustomProjectionDisabled(
 		return err
 	}
 	defer release()
-	if err := c.Conn.Exec(ctx, `INSERT INTO collector.custom_projection_state
+	if err := c.exec(ctx, `INSERT INTO collector.custom_projection_state
 		(device_id,bucket_start,policy_revision,projection_seq,snapshot_id,marker,row_count,
 		activated_at,deleted)
 		SELECT device_id,bucket_start,?, ?,toUUID('00000000-0000-0000-0000-000000000000'),
@@ -573,7 +573,7 @@ func (c *Client) WriteCustomProjectionDisabled(
 		job.PolicyRevision, job.ProjectionSeq, job.DeviceID); err != nil {
 		return err
 	}
-	if err := c.Conn.Exec(ctx, `INSERT INTO collector.cdr_antifraud_coverage
+	if err := c.exec(ctx, `INSERT INTO collector.cdr_antifraud_coverage
 		(device_id,event_month,cdr_id,policy_revision,reconciliation_version,projection_seq,
 		state,expected_at,grace_expires_at,missing_terminal_at,retry_until,matched_call_id,
 		method,reason,delta_ms,matched_evidence_json,ambiguous,ambiguity_reason,updated_at,deleted)
@@ -584,7 +584,7 @@ func (c *Client) WriteCustomProjectionDisabled(
 		job.PolicyRevision, job.ProjectionSeq, job.DeviceID); err != nil {
 		return err
 	}
-	return c.Conn.Exec(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
+	return c.exec(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
 		(device_id,bucket_start,policy_revision,projection_seq,reason,enqueued_at,deleted)
 		SELECT device_id,bucket_start,?,?,'device_disabled',now64(6),1
 		FROM collector.cdr_reconciliation_dirty_buckets

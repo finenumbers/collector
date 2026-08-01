@@ -34,7 +34,7 @@ func (c *Client) DeviceProjectionFreshness(
 	defer release()
 	for _, deviceID := range deviceIDs {
 		item := DeviceProjectionFreshness{DeviceID: deviceID}
-		if err := c.Conn.QueryRow(ctx, `SELECT
+		if err := c.queryRow(ctx, `SELECT
 			greatest(0, dateDiff('second', ifNull(
 				(SELECT max(received_at) FROM collector.syslog_messages WHERE device_id=?),
 				now64(6)), now64(6))),

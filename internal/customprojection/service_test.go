@@ -424,6 +424,11 @@ func TestIsEventLimitError(t *testing.T) {
 	if !IsClickHouseResourceError(fmt.Errorf("code: 394, message: Query was cancelled")) {
 		t.Fatal("clickhouse cancel error not detected")
 	}
+	if !IsClickHouseResourceError(fmt.Errorf(
+		"code: 216, message: Query with id = collector-custom_replay-x is already running.",
+	)) {
+		t.Fatal("clickhouse already-running error not detected")
+	}
 }
 
 func TestUnansweredRequestSchedulesDurableDeadline(t *testing.T) {

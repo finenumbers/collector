@@ -568,7 +568,9 @@ const transientProjectionFailureSQL = `last_error ILIKE '%exceeds%events%'
 			OR last_error ILIKE '%dial tcp%'
 			OR last_error ILIKE '%clickhouse%unavailable%'
 			OR last_error ILIKE '%code: 210%'
-			OR last_error ILIKE '%code: 209%'`
+			OR last_error ILIKE '%code: 209%'
+			OR last_error ILIKE '%code: 216%'
+			OR last_error ILIKE '%already running%'`
 
 // IsTransientProjectionLastError reports whether a failed job's last_error should
 // be swept back to pending by RequeueFailedOverflowProjectionJobs.
@@ -596,6 +598,8 @@ func IsTransientProjectionLastError(lastError string) bool {
 		"clickhouse", // paired below with unavailable
 		"code: 210",
 		"code: 209",
+		"code: 216",
+		"already running",
 	} {
 		if fragment == "clickhouse" {
 			if strings.Contains(message, "clickhouse") && strings.Contains(message, "unavailable") {

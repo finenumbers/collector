@@ -297,7 +297,7 @@ func (c *Client) InsertSatelRTUBatch(
 		return err
 	}
 	defer release()
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.satel_rtu_cdr
+	batch, err := c.prepareBatch(ctx, `INSERT INTO collector.satel_rtu_cdr
 		(record_id,device_id,file_id,row_number,ingested_at,parser_version,template_key,cdr_id,
 		cdr_date,setup_time,connect_time,disconnect_time,duration_ms,elapsed_time,outcome,
 		in_ani,in_dnis,out_ani,out_dnis,bill_ani,bill_dnis,
@@ -395,7 +395,7 @@ func (c *Client) InsertSatelRTUBatch(
 func (c *Client) insertSatelRTUTimeFacts(
 	ctx context.Context, records []SatelRTURecord,
 ) error {
-	batch, err := c.Conn.PrepareBatch(ctx, `INSERT INTO collector.satel_rtu_cdr_time_facts
+	batch, err := c.prepareBatch(ctx, `INSERT INTO collector.satel_rtu_cdr_time_facts
 		(device_id,timezone_revision,record_id,interpreted_at,cdr_date_utc,setup_time_utc,
 		connect_time_utc,disconnect_time_utc,term_setup_time_utc,term_connect_time_utc,
 		term_disconnect_time_utc,source_timezone,source_utc_offset_minutes)`)
@@ -429,7 +429,7 @@ func (c *Client) ReinterpretSatelRTUTimes(
 		return err
 	}
 	defer release()
-	return c.Conn.Exec(ctx, `INSERT INTO collector.satel_rtu_cdr_time_facts
+	return c.exec(ctx, `INSERT INTO collector.satel_rtu_cdr_time_facts
 		(device_id,timezone_revision,record_id,interpreted_at,cdr_date_utc,setup_time_utc,
 		connect_time_utc,disconnect_time_utc,term_setup_time_utc,term_connect_time_utc,
 		term_disconnect_time_utc,source_timezone,source_utc_offset_minutes)
@@ -570,7 +570,7 @@ func (c *Client) listSatelRTUCallsPage(
 	}
 	query += ` ORDER BY sort_time DESC,c.record_id DESC LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := c.Conn.Query(ctx, query, args...)
+	rows, err := c.query(ctx, query, args...)
 	if err != nil {
 		return SatelRTUCallPage{}, err
 	}
@@ -689,7 +689,7 @@ func (c *Client) ListSatelColumnValues(
 	}
 	query += ` GROUP BY value ORDER BY cnt DESC,value ASC LIMIT ?`
 	args = append(args, limit)
-	rows, err := c.Conn.Query(ctx, query, args...)
+	rows, err := c.query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -743,7 +743,7 @@ func (c *Client) SatelRTUStatsRange(
 	query += ` AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)>=?
 		AND coalesce(t.setup_time,t.cdr_date,c.ingested_at)<?`
 	args = append(args, timeRange.From, timeRange.To)
-	err = c.Conn.QueryRow(ctx, query, args...).Scan(
+	err = c.queryRow(ctx, query, args...).Scan(
 		&result.Calls24h, &result.FailedCalls24h, &result.AverageTalkMS,
 	)
 	return result, err

@@ -43,7 +43,7 @@ func (c *Client) ApplyRetention(ctx context.Context, class string, days int) err
 		return fmt.Errorf("retention class %q has no ClickHouse mapping", class)
 	}
 	var mutations, merges uint64
-	if err := c.Conn.QueryRow(ctx, `SELECT
+	if err := c.queryRow(ctx, `SELECT
 		(SELECT count() FROM system.mutations WHERE database='collector' AND NOT is_done),
 		(SELECT count() FROM system.merges WHERE database='collector')`).
 		Scan(&mutations, &merges); err != nil {
@@ -61,7 +61,7 @@ func (c *Client) ApplyRetention(ctx context.Context, class string, days int) err
 			"ALTER TABLE collector.`%s` MODIFY TTL toDateTime(%s) + INTERVAL %s DAY DELETE",
 			table.name, table.timeExpr, safeDays,
 		)
-		if err := c.Conn.Exec(ctx, query); err != nil {
+		if err := c.exec(ctx, query); err != nil {
 			return fmt.Errorf("apply %s retention to %s: %w", class, table.name, err)
 		}
 	}

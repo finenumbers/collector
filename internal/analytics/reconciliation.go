@@ -21,7 +21,7 @@ func (c *Client) DiscoverCDRBuckets(
 	if limit <= 0 || limit > maxDiscover {
 		limit = 256
 	}
-	rows, err := c.Conn.Query(ctx, `SELECT record_id,
+	rows, err := c.query(ctx, `SELECT record_id,
 		coalesce(setup_time,connect_time,disconnect_time,ingested_at)
 		FROM collector.cdr_records FINAL
 		WHERE device_id=? AND (
@@ -76,7 +76,7 @@ func (c *Client) LoadReconciliationEvidence(
 	}
 	defer release()
 	from, to := bucket.Start.Add(-horizon), bucket.Start.Add(time.Hour+horizon)
-	cdrRows, err := c.Conn.Query(ctx, `SELECT record_id,device_id,
+	cdrRows, err := c.query(ctx, `SELECT record_id,device_id,
 		coalesce(setup_time,connect_time,disconnect_time,ingested_at),ingested_at,
 		radius_session_id_normalized,unique_tag,raw_fields,
 		incoming_cgpn,incoming_cdpn,outgoing_cgpn,outgoing_cdpn
@@ -112,7 +112,7 @@ func (c *Client) LoadReconciliationEvidence(
 	if err := cdrRows.Close(); err != nil {
 		return nil, nil, err
 	}
-	callRows, err := c.Conn.Query(ctx, `SELECT call_id,device_id,first_seen_at,
+	callRows, err := c.query(ctx, `SELECT call_id,device_id,first_seen_at,
 		acct_session_id,acct_session_ids,h323_conf_id,calling,called,policy_revision
 		FROM collector.custom_antifraud_calls_current
 		WHERE device_id=? AND policy_revision=? AND first_seen_at>=? AND first_seen_at<?
@@ -204,7 +204,7 @@ func (c *Client) WriteReconciliationResult(
 	}); err != nil {
 		return err
 	}
-	return c.Conn.Exec(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
+	return c.exec(ctx, `INSERT INTO collector.cdr_reconciliation_dirty_buckets
 		(device_id,bucket_start,policy_revision,projection_seq,reason,enqueued_at,deleted)
 		VALUES(?,?,?,?,?,now64(6),1)`,
 		bucket.DeviceID, bucket.Start, bucket.PolicyRevision, seq, "processed")

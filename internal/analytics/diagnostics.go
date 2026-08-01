@@ -28,7 +28,7 @@ func (c *Client) OperationalDiagnostics(ctx context.Context) (OperationalDiagnos
 	defer release()
 	var result OperationalDiagnostics
 	var matched, expected, late, missing, notApplicable, ambiguous uint64
-	err = c.Conn.QueryRow(ctx, `SELECT
+	err = c.queryRow(ctx, `SELECT
 		(SELECT greatest(0,dateDiff('second',ifNull(max(activated_at),now64(6)),now64(6)))
 		 FROM collector.custom_projection_state),
 		(SELECT count() FROM collector.custom_antifraud_calls_current),

@@ -13,7 +13,7 @@ import (
 func (c *Client) withBatch(
 	ctx context.Context, query string, fn func(driver.Batch) error,
 ) error {
-	batch, err := c.Conn.PrepareBatch(ctx, query)
+	batch, err := c.prepareBatch(ctx, query)
 	if err != nil {
 		return err
 	}

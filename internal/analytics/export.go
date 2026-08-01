@@ -47,14 +47,14 @@ func (c *Client) PinExportSnapshot(
 	defer cancelSnapshot()
 	switch dataset {
 	case "syslog":
-		err = c.Conn.QueryRow(snapshotCtx, `SELECT received_at,event_id
+		err = c.queryRow(snapshotCtx, `SELECT received_at,event_id
 			FROM collector.syslog_messages FINAL WHERE device_id=?
 			ORDER BY received_at DESC,event_id DESC LIMIT 1`, deviceID).Scan(&high, &id)
 	case "calls":
 		result.ParserVersion = template
 		if template == equipment.TemplateSatelRTUCDRV1 {
 			result.ParserVersion = SatelRTUParserVersion
-			err = c.Conn.QueryRow(snapshotCtx, `WITH times AS (
+			err = c.queryRow(snapshotCtx, `WITH times AS (
 				SELECT record_id,argMax(setup_time_utc,interpreted_at) AS setup_time,
 					argMax(cdr_date_utc,interpreted_at) AS cdr_date
 				FROM collector.satel_rtu_cdr_time_facts
@@ -67,7 +67,7 @@ func (c *Client) PinExportSnapshot(
 			ORDER BY sort_time DESC,c.record_id DESC LIMIT 1`,
 				deviceID, revision, deviceID, revision).Scan(&high, &id)
 		} else {
-			err = c.Conn.QueryRow(snapshotCtx, `SELECT
+			err = c.queryRow(snapshotCtx, `SELECT
 				coalesce(parseDateTime64BestEffortOrNull(
 					coalesce(nullIf(raw_fields['setup_time'],''),nullIf(raw_fields['setup'],'')),
 					6,?),ingested_at) AS sort_time,record_id
@@ -76,7 +76,7 @@ func (c *Client) PinExportSnapshot(
 				timezone, deviceID).Scan(&high, &id)
 		}
 	case "antifraud":
-		err = c.Conn.QueryRow(snapshotCtx, `SELECT first_seen_at,call_id
+		err = c.queryRow(snapshotCtx, `SELECT first_seen_at,call_id
 			FROM collector.custom_antifraud_calls_current WHERE device_id=?
 			ORDER BY first_seen_at DESC,call_id DESC LIMIT 1`, deviceID).Scan(&high, &id)
 	}
@@ -153,7 +153,7 @@ func (c *Client) estimateExportRows(
 	estimateCtx, cancel := context.WithTimeout(ctx, exportEstimateTimeout)
 	defer cancel()
 	var count int64
-	err := c.Conn.QueryRow(estimateCtx, query, args...).Scan(&count)
+	err := c.queryRow(estimateCtx, query, args...).Scan(&count)
 	return normalizeExportEstimate(count, err)
 }
 

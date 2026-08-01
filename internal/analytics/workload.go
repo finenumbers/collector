@@ -7,7 +7,6 @@ import (
 	"collector/internal/workload"
 
 	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/google/uuid"
 )
 
 type WorkloadOptions struct {
@@ -78,8 +77,10 @@ func (c *Client) queryContext(
 	}
 	timeout, threads, memory, resultRows, resultBytes := c.workloadQueryLimits(class)
 	queryCtx, cancel := context.WithTimeout(admitted, timeout)
+	// Bind workload class for withFreshQueryID; do NOT set WithQueryID here —
+	// one shared id across multi-query CustomReplay sessions causes CH 216.
+	queryCtx = context.WithValue(queryCtx, workloadClassKey{}, class)
 	queryCtx = clickhouse.Context(queryCtx,
-		clickhouse.WithQueryID("collector-"+string(class)+"-"+uuid.NewString()),
 		clickhouse.WithSettings(clickhouse.Settings{
 			"log_comment":                        "collector workload=" + string(class),
 			"max_execution_time":                 uint64(max(timeout/time.Second, 1)),

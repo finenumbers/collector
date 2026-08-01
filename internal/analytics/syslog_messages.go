@@ -118,7 +118,7 @@ func (c *Client) ListSyslogMessagesPage(
 	}
 	query += ` ORDER BY received_at DESC,event_id DESC LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := c.Conn.Query(ctx, query, args...)
+	rows, err := c.query(ctx, query, args...)
 	if err != nil {
 		return SyslogMessagePage{}, err
 	}

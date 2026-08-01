@@ -56,7 +56,7 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		return result.Devices[id]
 	}
 
-	rows, err := c.Conn.Query(ctx, `SELECT device_id,count(),
+	rows, err := c.query(ctx, `SELECT device_id,count(),
 		countIf(release_cause IS NOT NULL AND release_cause!=16),
 		ifNull(avg(duration_ms),0),max(ingested_at)
 		FROM collector.cdr_records FINAL
@@ -84,7 +84,7 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		}
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT device_id,count(),countIf(outcome!='answered'),
+	rows, err = c.query(ctx, `SELECT device_id,count(),countIf(outcome!='answered'),
 		ifNull(avgIf(duration_ms,outcome='answered'),0),
 		countIf(`+satelPSTNAllColumnsFilledExpr()+`),
 		countIf(`+satelGeoipAllColumnsFilledExpr()+`),
@@ -120,7 +120,7 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		}
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT device_id,max(received_at)
+	rows, err = c.query(ctx, `SELECT device_id,max(received_at)
 		FROM collector.syslog_messages FINAL
 		WHERE received_at>=now()-toIntervalSecond(?)
 		GROUP BY device_id`, seconds)
@@ -141,7 +141,7 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		_ = rows.Close()
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT device_id,count(),countIf(status='blocked'),
+	rows, err = c.query(ctx, `SELECT device_id,count(),countIf(status='blocked'),
 		countIf(status IN ('unavailable_fallback','ambiguous_indeterminate','pending','open'))
 		FROM collector.custom_antifraud_calls_current
 		WHERE first_seen_at>=now()-toIntervalSecond(?)
@@ -166,7 +166,7 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		_ = rows.Close()
 	}
 
-	rows, err = c.Conn.Query(ctx, `SELECT device_id,max(last_seen_at)
+	rows, err = c.query(ctx, `SELECT device_id,max(last_seen_at)
 		FROM collector.custom_antifraud_calls_current
 		WHERE last_seen_at>=now()-toIntervalSecond(?)
 		GROUP BY device_id`, seconds)
@@ -187,7 +187,7 @@ func (c *Client) Dashboard(ctx context.Context, window time.Duration) DashboardA
 		_ = rows.Close()
 	}
 
-	rows, err = c.Conn.Query(ctx, `
+	rows, err = c.query(ctx, `
 		SELECT device_id,
 			countIf(match_status='matched_exact'),
 			countIf(match_status='matched_fallback'),
@@ -269,12 +269,12 @@ func (c *Client) DeviceStorageBytes(
 	}
 	defer release()
 	var syslogBytes, cdrBytes uint64
-	if err := c.Conn.QueryRow(ctx, `SELECT ifNull(sum(length(payload)),0)
+	if err := c.queryRow(ctx, `SELECT ifNull(sum(length(payload)),0)
 		FROM collector.syslog_messages WHERE device_id IN ?`, deviceIDs).
 		Scan(&syslogBytes); err != nil {
 		return 0, err
 	}
-	if err := c.Conn.QueryRow(ctx, `SELECT ifNull(sum(byteSize(*)),0)
+	if err := c.queryRow(ctx, `SELECT ifNull(sum(byteSize(*)),0)
 		FROM collector.cdr_records WHERE device_id IN ?`, deviceIDs).
 		Scan(&cdrBytes); err != nil {
 		return 0, err

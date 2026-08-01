@@ -298,7 +298,7 @@ func (c *Client) ListAntifraudCallsPage(
 	}
 	query += ` ORDER BY call.first_seen_at DESC,call.call_id DESC LIMIT ?`
 	args = append(args, limit+1)
-	rows, err := c.Conn.Query(ctx, query, args...)
+	rows, err := c.query(ctx, query, args...)
 	if err != nil {
 		return AntifraudCallPage{}, err
 	}
@@ -351,7 +351,7 @@ func (c *Client) AntifraudCallDetail(
 	defer release()
 	var detail AntifraudCallDetail
 	var attributes, unmatched string
-	err = c.Conn.QueryRow(ctx, `SELECT call.snapshot_id,call.contract_key,call.call_id,call.first_seen_at,call.last_seen_at,call.acct_session_id,
+	err = c.queryRow(ctx, `SELECT call.snapshot_id,call.contract_key,call.call_id,call.first_seen_at,call.last_seen_at,call.acct_session_id,
 		call.acct_session_ids,call.h323_conf_id,call.calling,call.called,call.status,call.coverage_state,call.explanation_codes,call.accounting_start,call.accounting_stop,
 		call.session_duration_seconds,call.ordered_attributes_json,call.unmatched_provenance_json,call.orphan_packet_ids
 		FROM collector.custom_antifraud_calls AS call FINAL
@@ -415,7 +415,7 @@ func (c *Client) AntifraudCallDetail(
 func (c *Client) loadAntifraudExchanges(
 	ctx context.Context, deviceID uuid.UUID, detail *AntifraudCallDetail,
 ) error {
-	rows, err := c.Conn.Query(ctx, `SELECT exchange_id,request_id,response_id,attempt_ids,
+	rows, err := c.query(ctx, `SELECT exchange_id,request_id,response_id,attempt_ids,
 		status,decision,explanation_codes,occurred_at
 		FROM collector.custom_radius_exchanges_current
 		WHERE device_id=? AND snapshot_id=? AND contract_key=? AND deleted=0
@@ -449,7 +449,7 @@ func (c *Client) loadAntifraudExchanges(
 func (c *Client) loadAntifraudPackets(
 	ctx context.Context, deviceID, callID uuid.UUID, detail *AntifraudCallDetail,
 ) error {
-	rows, err := c.Conn.Query(ctx, `SELECT packet.packet_id,packet.first_seen_at,packet.last_seen_at,
+	rows, err := c.query(ctx, `SELECT packet.packet_id,packet.first_seen_at,packet.last_seen_at,
 		packet.family,packet.radius_type,packet.direction,packet.phase,packet.decision,
 		packet.confidence,packet.status,packet.request_id,packet.response_id,
 		exchange.attempt_ids,packet.ordered_attributes_json,packet.explanation_codes,
@@ -522,7 +522,7 @@ func (c *Client) loadPacketMembers(
 	if len(packetIDs) == 0 {
 		return result, false, nil
 	}
-	rows, err := c.Conn.Query(ctx, `SELECT packet_id,event_id,received_at,toString(source_ip),source_port
+	rows, err := c.query(ctx, `SELECT packet_id,event_id,received_at,toString(source_ip),source_port
 		FROM collector.custom_radius_packet_members_current
 		WHERE device_id=? AND packet_id IN ? AND deleted=0
 		ORDER BY packet_id,member_order LIMIT ?`,
@@ -553,7 +553,7 @@ func (c *Client) loadCallCoverage(
 	ctx context.Context, deviceID, callID uuid.UUID, coverage *CoverageSummary,
 ) error {
 	var evidence string
-	err := c.Conn.QueryRow(ctx, `SELECT any(method),any(reason),any(delta_ms),max(ambiguous),
+	err := c.queryRow(ctx, `SELECT any(method),any(reason),any(delta_ms),max(ambiguous),
 		any(ambiguity_reason),any(matched_evidence_json),groupUniqArray(cdr_id),max(assigned_at)
 		FROM collector.cdr_antifraud_assignments_current WHERE device_id=? AND call_id=?`,
 		deviceID, callID).Scan(
@@ -590,7 +590,7 @@ func (c *Client) CallCard(
 	}
 	var callID *uuid.UUID
 	var evidence string
-	err = c.Conn.QueryRow(ctx, `SELECT state,method,reason,delta_ms,ambiguous,ambiguity_reason,
+	err = c.queryRow(ctx, `SELECT state,method,reason,delta_ms,ambiguous,ambiguity_reason,
 		matched_evidence_json,matched_call_id,updated_at
 		FROM collector.cdr_antifraud_coverage_current WHERE device_id=? AND cdr_id=? LIMIT 1`,
 		deviceID, recordID).Scan(
@@ -626,7 +626,7 @@ func (c *Client) loadCDRFacts(
 	if len(ids) == 0 {
 		return []CDRFacts{}, nil
 	}
-	rows, err := c.Conn.Query(ctx, `SELECT c.record_id,coalesce(t.setup_time,c.setup_time),
+	rows, err := c.query(ctx, `SELECT c.record_id,coalesce(t.setup_time,c.setup_time),
 		coalesce(t.connect_time,c.connect_time),coalesce(t.disconnect_time,c.disconnect_time),
 		c.duration_ms,c.release_cause,c.release_info,c.incoming_cgpn,c.outgoing_cgpn,
 		c.incoming_cdpn,c.outgoing_cdpn,c.incoming_description,c.outgoing_description,

@@ -114,7 +114,7 @@ func (c *Client) ListEltexColumnValues(
 	}
 	query += ` GROUP BY value ORDER BY cnt DESC,value ASC LIMIT ?`
 	args = append(args, limit)
-	rows, err := c.Conn.Query(ctx, query, args...)
+	rows, err := c.query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

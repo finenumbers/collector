@@ -257,6 +257,9 @@ AF tip на тихом SMG (мало звонков) часто **шум**. Dens
      (env `CUSTOM_PROJECTION_*` — только seed пустой БД);
    - `projection.threads≥2` рекомендуется для dense catch-up: open UTC-hour
      lease-exempt и может cutover’иться параллельно с одним closed-hour job.
+   - Dense catch-up windowed rebuild **уступает** live open-hour между 5m
+     окнами (soft yield, не `failed`), иначе contentLag растёт при занятом
+     CustomReplay. Catch-up 20ч+ при зелёном live tip — нормально.
    - Если `lastError` = `projection device lease changed before refresh`: это
      регрессия lease-exempt (open-hour Complete/Refresh трогал чужой device
      lease). После фикса open-hour помнит `HoldsDeviceLease=false` с claim и

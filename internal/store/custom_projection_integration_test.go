@@ -491,6 +491,78 @@ func TestOpenHourCompleteDoesNotDropClosedDeviceLease(t *testing.T) {
 	}
 }
 
+func TestHasPendingOpenHourAndYieldClosedHour(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "yield-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "yield-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::7007", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx,
+		`DELETE FROM custom_projection_jobs WHERE device_id=$1`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	openHour := time.Now().UTC().Truncate(time.Hour)
+	closed := openHour.Add(-6 * time.Hour)
+	if err := control.EnqueueCustomProjectionBuckets(
+		ctx, device.ID, 1, []time.Time{closed, openHour},
+	); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := control.HasPendingOpenHourProjection(ctx)
+	if err != nil || !pending {
+		t.Fatalf("pending open before claim: pending=%v err=%v", pending, err)
+	}
+	openJob, ok, err := control.ClaimCustomProjectionJob(ctx, "live-yield", time.Minute)
+	if err != nil || !ok || openJob.HoldsDeviceLease {
+		t.Fatalf("open claim=%#v ok=%v err=%v", openJob, ok, err)
+	}
+	pending, err = control.HasPendingOpenHourProjection(ctx)
+	if err != nil || !pending {
+		t.Fatalf("running open hour must count as pending tip work: pending=%v err=%v", pending, err)
+	}
+	closedJob, ok, err := control.ClaimCustomProjectionJob(ctx, "catchup-yield", time.Minute)
+	if err != nil || !ok || !closedJob.HoldsDeviceLease {
+		t.Fatalf("closed claim=%#v ok=%v err=%v", closedJob, ok, err)
+	}
+	var attemptsBefore int
+	if err := control.DB.QueryRow(ctx, `SELECT attempts FROM custom_projection_jobs WHERE id=$1`,
+		closedJob.ID).Scan(&attemptsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.YieldCustomProjectionJob(ctx, closedJob); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var attemptsAfter int
+	var leaseCount int
+	if err := control.DB.QueryRow(ctx, `SELECT status,attempts FROM custom_projection_jobs WHERE id=$1`,
+		closedJob.ID).Scan(&status, &attemptsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attemptsAfter != attemptsBefore-1 {
+		t.Fatalf("yield status=%s attempts=%d→%d", status, attemptsBefore, attemptsAfter)
+	}
+	if err := control.DB.QueryRow(ctx, `SELECT count(*) FROM custom_projection_device_leases
+		WHERE device_id=$1`, device.ID).Scan(&leaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if leaseCount != 0 {
+		t.Fatalf("yield must release device lease, count=%d", leaseCount)
+	}
+}
+
 func TestRefreshLeaseUsesClaimTimeFlagAfterHourRollover(t *testing.T) {
 	control := isolatedMigrationStore(t)
 	ctx := context.Background()

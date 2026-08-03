@@ -70,6 +70,10 @@ type Snapshot struct {
 	Result         customradius.Result
 }
 
+// ErrYieldedForOpenHour means a closed-hour rebuild cooperatively released the
+// job so live open-hour tip work can use the worker / CustomReplay lane.
+var ErrYieldedForOpenHour = errors.New("yielded closed-hour projection for open-hour tip")
+
 type Queue interface {
 	ClaimCustomProjectionJob(context.Context, string, time.Duration) (Job, bool, error)
 	CustomAntifraudPolicy(context.Context, uuid.UUID) (Policy, error)
@@ -83,6 +87,8 @@ type Queue interface {
 	RefreshCustomProjectionLease(context.Context, Job, time.Duration) error
 	CutoverCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
 	EnqueueCDRReconciliationBuckets(context.Context, uuid.UUID, uint64, []time.Time) error
+	HasPendingOpenHourProjection(context.Context) (bool, error)
+	YieldCustomProjectionJob(context.Context, Job) error
 }
 
 type Warehouse interface {
@@ -243,6 +249,9 @@ func (w *Worker) runLoop(ctx context.Context, workerID string) error {
 			}()
 			return w.process(ctx, cfg, job)
 		}()
+		if errors.Is(err, ErrYieldedForOpenHour) {
+			continue
+		}
 		if err != nil {
 			w.Metrics.Failures.Add(1)
 			if failErr := w.Queue.FailCustomProjectionJob(ctx, job, err, cfg.Sleep); failErr != nil {
@@ -335,6 +344,9 @@ func (w *Worker) processBucketWindows(
 		// Keep ownership alive across dense hour→5m rebuilds (lease may be
 		// shorter than wall-clock for the full hour).
 		if err := w.Queue.RefreshCustomProjectionLease(ctx, job, cfg.Lease); err != nil {
+			return err
+		}
+		if err := w.yieldClosedHourForOpenTip(ctx, job); err != nil {
 			return err
 		}
 		end := cursor.Add(span)
@@ -444,11 +456,33 @@ func (w *Worker) processBucketWindows(
 		// Dense hours accumulate 5m windows in-process and activate once at
 		// finalize so the previous complete tip stays visible during rebuild.
 	}
+	if err := w.yieldClosedHourForOpenTip(ctx, job); err != nil {
+		return err
+	}
 	merged := materializeWindowResult(packetsByID, callsByID, nextDeadline)
 	watermarkTime, watermarkID = AdvanceEmptyBucketWatermark(
 		watermarkTime, watermarkID, to, time.Now().UTC(),
 	)
 	return w.publishBucket(ctx, cfg, job, from, merged, watermarkTime, watermarkID, affected)
+}
+
+// yieldClosedHourForOpenTip soft-releases a closed-hour catch-up job when any
+// open UTC-hour tip work is pending/running so CustomReplay is not monopolized.
+func (w *Worker) yieldClosedHourForOpenTip(ctx context.Context, job Job) error {
+	if !job.HoldsDeviceLease || job.Kind != JobBucket {
+		return nil
+	}
+	pending, err := w.Queue.HasPendingOpenHourProjection(ctx)
+	if err != nil {
+		return err
+	}
+	if !pending {
+		return nil
+	}
+	if err := w.Queue.YieldCustomProjectionJob(ctx, job); err != nil {
+		return err
+	}
+	return ErrYieldedForOpenHour
 }
 
 func materializeWindowResult(
@@ -587,14 +621,21 @@ func (w *Worker) publishBucket(
 	if err := w.Queue.RefreshCustomProjectionLease(ctx, job, cfg.Lease); err != nil {
 		return err
 	}
-	releaseHeavy, err := w.acquireHeavyLane(ctx)
-	if err != nil {
-		return err
+	// Open-hour tip cutover is small; skip the deploy-wide PG heavy lane so a
+	// large closed-hour activate cannot block live tip publish.
+	releaseHeavy := func() {}
+	if job.HoldsDeviceLease {
+		var err error
+		releaseHeavy, err = w.acquireHeavyLane(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	defer releaseHeavy()
 	cutoverCtx := ctx
 	releaseAdmission := func() {}
 	if admitter, ok := w.Warehouse.(workloadAdmitter); ok {
+		var err error
 		cutoverCtx, releaseAdmission, err = admitter.AdmitWorkload(ctx, workload.CustomReplay)
 		if err != nil {
 			return err

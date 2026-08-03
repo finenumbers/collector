@@ -243,7 +243,8 @@ IANA timezone выбирается из выпадающего списка в �
 
 Симптом: syslog/CDR свежие, а на устройстве `depth>0` / `failed>0` / health lag >5 мин;
 breach **прыгает** между SMG — смотрите health, не event tip. Global activated lag и
-AF tip на тихом SMG (мало звонков) часто **шум**.
+AF tip на тихом SMG (мало звонков) часто **шум**. Dense catch-up больше не должен
+блокировать open UTC-hour: live hour lease-exempt при `projection.threads≥2`.
 
 1. В «Диагностика» откройте `projectionDevices`: `failed`, `lastError`, `depth`,
    `healthLagSeconds`, `classificationGap`. Если `depth≈0`, `failed=0`, syslog свежий,
@@ -254,7 +255,8 @@ AF tip на тихом SMG (мало звонков) часто **шум**.
    - в **Настройки → Параметры** поднимите `projection.maxEvents` (≥50000),
      `projection.maxMemoryBytes` (≥256MiB) и `projection.sleep=1s`
      (env `CUSTOM_PROJECTION_*` — только seed пустой БД);
-   - `projection.threads=2` допустим (есть per-device lease).
+   - `projection.threads≥2` рекомендуется для dense catch-up: open UTC-hour
+     lease-exempt и может cutover’иться параллельно с одним closed-hour job.
 3. Requeue failed jobs: admin
    `POST /api/devices/{deviceID}/projection/requeue-failed`
    (сбрасывает `failed`→`pending` для устройства и overflow-failed глобально).

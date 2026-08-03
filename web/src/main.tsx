@@ -1664,29 +1664,25 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       .filter((row) => redactDisplayText(row.payload).toLowerCase().includes(needle))
       .map((row) => row.eventId)
   }, [dataset, rows, syslogFindTrim])
-  useEffect(() => {
-    setSyslogFindIndex(0)
-  }, [syslogFindTrim, date, device.id])
-  useEffect(() => {
-    if (syslogMatchIds.length === 0) {
-      setSyslogFindIndex(0)
-      return
-    }
-    setSyslogFindIndex((current) => Math.min(current, syslogMatchIds.length - 1))
-  }, [syslogMatchIds])
-  const syslogActiveEventId = syslogMatchIds[syslogFindIndex] || ''
+  const syslogActiveIndex = syslogMatchIds.length
+    ? Math.min(syslogFindIndex, syslogMatchIds.length - 1)
+    : 0
+  const syslogActiveEventId = syslogMatchIds[syslogActiveIndex] || ''
   useEffect(() => {
     if (dataset !== 'syslog' || !syslogActiveEventId) return
     const root = tableShellRef.current
     if (!root) return
-    const target = root.querySelector(`[data-event-id="${syslogActiveEventId}"]`)
+    const target = root.querySelector(`[data-event-id="${CSS.escape(syslogActiveEventId)}"]`)
     if (target instanceof HTMLElement) {
       target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     }
   }, [dataset, syslogActiveEventId, syslogViewMode, rows.length])
   const goSyslogFindNext = () => {
     if (syslogMatchIds.length === 0) return
-    setSyslogFindIndex((current) => (current + 1) % syslogMatchIds.length)
+    setSyslogFindIndex((current) => {
+      const safe = Math.min(current, syslogMatchIds.length - 1)
+      return (safe + 1) % syslogMatchIds.length
+    })
   }
   const clearSyslogFind = () => {
     setSyslogFind('')
@@ -1708,6 +1704,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             setColumnFilters({})
             setEltexColumnFilters({})
             setAntifraudColumnFilters({})
+            setSyslogFindIndex(0)
             setDate(event.target.value)
           }
         }} /></label>
@@ -1747,7 +1744,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           <Search size={14} />
           <input placeholder="Найти в загруженных…" value={syslogFind}
             aria-label="Найти в Syslog"
-            onChange={(event) => setSyslogFind(event.target.value)}
+            onChange={(event) => {
+              setSyslogFind(event.target.value)
+              setSyslogFindIndex(0)
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault()
@@ -1756,7 +1756,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             }} />
           {syslogFindTrim ? <span className="syslog-find-count" aria-live="polite">
             {syslogMatchIds.length
-              ? `${syslogFindIndex + 1} / ${syslogMatchIds.length}`
+              ? `${syslogActiveIndex + 1} / ${syslogMatchIds.length}`
               : '0 / 0'}
           </span> : null}
           <button type="button" className="syslog-find-next" disabled={!syslogMatchIds.length}

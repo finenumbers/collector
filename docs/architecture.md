@@ -53,10 +53,10 @@ devices and per device (`open UTC-hour → older buckets → discover`), not fro
 event-tip watermarks and not eternal discover ahead of hour catch-up.
 Empty-hour cutovers still advance the watermark to the bucket end (clamped to
 `now` for the open hour) so tip clocks do not freeze on the last AF call.
-Projection SLO uses **live health lag** (`max(activated, AF tip)` only while
-`bucketDepth>0`, plus failures and classification gap). Historical
-`oldestBucketAge` / discover age are catch-up signals and must not alone paint
-fleet SLO red. Workload admission prefers `custom_replay` over `export` when
+Projection SLO uses **live health lag** while `bucketDepth>0`:
+`max(activated, contentLag)` where `contentLag = max(0, AFCallLag - AFSyslogLag)`
+(absolute last-call age never alone paints SLO). Historical `oldestBucketAge` /
+discover age are catch-up signals and must not alone paint fleet SLO red. Workload admission prefers `custom_replay` over `export` when
 both wait on the shared heavy lane. Discover scans use the non-heavy `custom_reconcile`
 admission class so tiny cursor pages are not serialized behind hour payload
 loads or exports. Hour buckets that exceed runtime `projection.maxEvents`

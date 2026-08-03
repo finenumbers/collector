@@ -103,6 +103,8 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 			ActivatedLagSeconds: tip.ActivatedLagSeconds,
 			WatermarkLagSeconds: item.WatermarkLagSeconds,
 			AFCallLagSeconds:    tip.AFCallLagSeconds,
+			AFSyslogLagSeconds:  tip.AFSyslogLagSeconds,
+			HasAFSyslogTip:      tip.HasAFSyslogTip,
 			ClassificationGap:   tip.ClassificationGap,
 		})
 		if health.HealthLagSeconds > maxDeviceLag {
@@ -134,11 +136,14 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 			"lastError":            item.LastError,
 			"syslogLagSeconds":     tip.SyslogLagSeconds,
 			"afCallLagSeconds":     tip.AFCallLagSeconds,
+			"afSyslogLagSeconds":   tip.AFSyslogLagSeconds,
+			"hasAFSyslogTip":       tip.HasAFSyslogTip,
 			"activatedLagSeconds":  tip.ActivatedLagSeconds,
 			"afAuthHeaders6h":      tip.AFAuthHeaders6h,
 			"xpgkHeaders6h":        tip.XpgkHeaders6h,
 			"classificationGap":    tip.ClassificationGap,
 			"healthLagSeconds":     health.HealthLagSeconds,
+			"contentLagSeconds":    health.ContentLagSeconds,
 			"eventTipLagSeconds":   health.EventTipLagSeconds,
 			"projectionLagSeconds": health.ProjectionLagSeconds,
 			"projectionSloMet":     health.ProjectionSLOMet,

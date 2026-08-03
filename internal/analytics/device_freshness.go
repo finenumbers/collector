@@ -12,6 +12,8 @@ type DeviceProjectionFreshness struct {
 	DeviceID             uuid.UUID `json:"deviceId"`
 	SyslogLagSeconds     int64     `json:"syslogLagSeconds"`
 	AFCallLagSeconds     int64     `json:"afCallLagSeconds"`
+	AFSyslogLagSeconds   int64     `json:"afSyslogLagSeconds"`
+	HasAFSyslogTip       bool      `json:"hasAFSyslogTip"`
 	ActivatedLagSeconds  int64     `json:"activatedLagSeconds"`
 	AFAuthHeaders6h      uint64    `json:"afAuthHeaders6h"`
 	XpgkHeaders6h        uint64    `json:"xpgkHeaders6h"`
@@ -34,6 +36,7 @@ func (c *Client) DeviceProjectionFreshness(
 	defer release()
 	for _, deviceID := range deviceIDs {
 		item := DeviceProjectionFreshness{DeviceID: deviceID}
+		var hasAFSyslog uint8
 		if err := c.queryRow(ctx, `SELECT
 			greatest(0, dateDiff('second', ifNull(
 				(SELECT max(received_at) FROM collector.syslog_messages WHERE device_id=?),
@@ -49,13 +52,29 @@ func (c *Client) DeviceProjectionFreshness(
 				WHERE device_id=? AND received_at>=now()-INTERVAL 6 HOUR),
 			(SELECT countIf(positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0)
 				FROM collector.syslog_messages
-				WHERE device_id=? AND received_at>=now()-INTERVAL 6 HOUR)`,
-			deviceID, deviceID, deviceID, deviceID, deviceID,
+				WHERE device_id=? AND received_at>=now()-INTERVAL 6 HOUR),
+			greatest(0, dateDiff('second', ifNull(
+				(SELECT max(received_at) FROM collector.syslog_messages
+					WHERE device_id=?
+					  AND (positionCaseInsensitiveUTF8(payload,'Antifraud-Auth-Request')>0
+					       OR positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0)),
+				now64(6)), now64(6))),
+			if((SELECT max(received_at) FROM collector.syslog_messages
+				WHERE device_id=?
+				  AND (positionCaseInsensitiveUTF8(payload,'Antifraud-Auth-Request')>0
+				       OR positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0)) IS NULL, 0, 1)`,
+			deviceID, deviceID, deviceID, deviceID, deviceID, deviceID, deviceID,
 		).Scan(
 			&item.SyslogLagSeconds, &item.AFCallLagSeconds, &item.ActivatedLagSeconds,
 			&item.AFAuthHeaders6h, &item.XpgkHeaders6h,
+			&item.AFSyslogLagSeconds, &hasAFSyslog,
 		); err != nil {
 			return nil, err
+		}
+		item.HasAFSyslogTip = hasAFSyslog == 1
+		if !item.HasAFSyslogTip {
+			// No AF-classifiable syslog tip: do not invent content debt from epoch.
+			item.AFSyslogLagSeconds = 0
 		}
 		item.ProjectionLagSeconds = item.ActivatedLagSeconds
 		item.ClassificationGap = item.SyslogLagSeconds <= 300 &&

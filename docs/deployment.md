@@ -186,24 +186,26 @@ health vs event-tip ages, classification gap, coverage states и SLO, orphans/am
 Читайте per-device метрики **в этом порядке**:
 
 1. `failed` / `lastError` / `bucketDepth` — реальные hour jobs или отказ.
-2. `healthLagSeconds` (**live** = `max(activated, AF tip)` только при `bucketDepth>0`).
-   Eternal discover не считается backlog; idle/discover-only не stall.
-3. `syslogLagSeconds` — жив ли ingest.
+2. `healthLagSeconds` (**live** = `max(activated, contentLag)` при `bucketDepth>0`).
+   `contentLag = max(0, AF tip − AF syslog tip)`. Абсолютный AF tip на тихом SMG
+   (3 звонка) **не** красит SLO. Eternal discover не backlog.
+3. `syslogLagSeconds` / `afSyslogLagSeconds` — жив ли ingest / AF-класс syslog.
 4. `classificationGap` + `afAuthHeaders6h` / `xpgkHeaders6h` — диалект/логирование, не очередь.
 5. CDR freshness (`Последний CDR` vs `Последний приём`) — отдельный сигнал FTP/CDR.
 
 | Сигнал | Значение |
 |--------|----------|
-| `healthLagSeconds`, `maxDeviceLagSeconds` при `bucketDepth>0` | live tip health |
+| `healthLagSeconds`, `contentLagSeconds` при `bucketDepth>0` | live projection health |
 | `failed`, `lastError`, `bucketDepth` | health очереди |
-| `oldestBucketAge` | catch-up (возраст старого hour job), **не** SLO tip |
-| `eventTipLagSeconds`, `afCallLagSeconds`, `watermarkLagSeconds` | tip ages (на тихом SMG растут сами) |
+| `oldestBucketAge` | catch-up (возраст старого hour job), **не** SLO |
+| `afCallLagSeconds`, `eventTipLagSeconds`, `watermarkLagSeconds` | tip ages (на тихом SMG растут сами) |
+| `afSyslogLagSeconds` | возраст последнего AF-classifiable syslog |
 | `discoverAge`, eternal discover | не backlog work age |
 | global `lagSeconds` (max activated) | может врать при stall одного SMG |
 
 Операторский критерий SLO: `projectionSloMet` / live `maxDeviceLagSeconds`,
-`anyDeviceFailed`, `anyClassificationGap`. Catch-up `oldestBucketAge=25ч` при свежем
-AF tip **не** должен один красить флот.
+`anyDeviceFailed`, `anyClassificationGap`. Тихий Moscow с `activated≤300` и
+`contentLag≈0` при catch-up 22ч — **SLO ok**; AF tip 1660с только informational.
 
 Обязательные алерты: container restart, оба local spool depth/size (`ingress.db`,
 `syslog.db`), handoff errors, NATS lag/storage, **per-device health lag** >5 мин при
@@ -284,6 +286,7 @@ AF tip на тихом SMG (мало звонков) часто **шум**.
 
 Перед promotion прогоните 30 минут с одним тихим и одним dense SMG:
 
-- тихий: `depth=0` → `projectionSloMet=ok` даже при большом AF tip lag;
-- dense: health lag ≤5 мин после остановки нагрузки; SLO не «прыгает» на тихий;
-- `oldestBucketAge` отражает backlog buckets; `discoverAge` отдельно и не красит oldest.
+- тихий mid-catch-up: `bucketDepth>0`, `activated≤300`, `contentLag≈0` → `projectionSloMet=ok`
+  даже при AF tip ≫5 мин;
+- dense: live health ≤5 мин; SLO не красит флот абсолютным tip тихого SMG;
+- `oldestBucketAge` / `discoverAge` — catch-up only.

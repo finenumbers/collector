@@ -50,6 +50,36 @@ func TestFindSyslogMessageRequiresQ(t *testing.T) {
 	}
 }
 
+func TestCountSyslogFindRequiresQ(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/?date=2026-08-03", nil)
+
+	(&Server{}).countSyslogFind(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "q is required") {
+		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
+}
+
+func TestListEventsRejectsConflictingCursors(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet,
+		"/?date=2026-08-03&from=2026-08-03T12:00:00Z&from_id="+uuid.NewString()+
+			"&before=2026-08-03T11:00:00Z&before_id="+uuid.NewString(), nil)
+
+	(&Server{}).listEvents(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "use only one of before, from, or after") {
+		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
+}
+
 func TestDashboardWindowValidation(t *testing.T) {
 	for _, value := range []string{"", "1h", "24h", "7d"} {
 		if _, err := analytics.ValidateDashboardWindow(value); err != nil {

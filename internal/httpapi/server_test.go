@@ -36,6 +36,20 @@ func TestRawSyslogListRejectsLegacyCategory(t *testing.T) {
 	}
 }
 
+func TestFindSyslogMessageRequiresQ(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/?date=2026-08-03", nil)
+
+	(&Server{}).findSyslogMessage(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "q is required") {
+		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
+}
+
 func TestDashboardWindowValidation(t *testing.T) {
 	for _, value := range []string{"", "1h", "24h", "7d"} {
 		if _, err := analytics.ValidateDashboardWindow(value); err != nil {

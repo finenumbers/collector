@@ -132,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Post("/devices", s.createDevice)
 			private.With(s.requireAdmin).Patch("/devices/{deviceID}", s.updateDevice)
 			private.With(s.requireAdmin).Delete("/devices/{deviceID}", s.deleteDevice)
+			private.Get("/devices/{deviceID}/syslog-messages/find", s.findSyslogMessage)
 			private.Get("/devices/{deviceID}/syslog-messages", s.listEvents)
 			private.Get("/devices/{deviceID}/calls", s.listCalls)
 			private.Get("/devices/{deviceID}/calls/column-values", s.listCallsColumnValues)
@@ -1023,6 +1024,88 @@ func deviceDateRange(
 		return nil, false
 	}
 	return &analytics.TimeRange{From: from.UTC(), To: from.AddDate(0, 0, 1).UTC()}, true
+}
+
+func (s *Server) findSyslogMessage(writer http.ResponseWriter, request *http.Request) {
+	search := strings.TrimSpace(request.URL.Query().Get("q"))
+	if search == "" {
+		writeError(writer, http.StatusBadRequest, "q is required")
+		return
+	}
+	deviceID, ok := parseDeviceID(writer, request)
+	if !ok {
+		return
+	}
+	device, ok := s.deviceWithCapability(writer, request, deviceID, func(device store.Device) bool {
+		return device.Capabilities.Syslog
+	}, "Syslog events")
+	if !ok {
+		return
+	}
+	timeRange, ok := deviceDateRange(writer, request, device)
+	if !ok {
+		return
+	}
+	if timeRange == nil {
+		writeError(writer, http.StatusBadRequest, "payload search requires date=YYYY-MM-DD")
+		return
+	}
+	if !s.allowCostlyRequest(currentSession(request).User.ID) {
+		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
+		return
+	}
+	var cursor *analytics.SyslogMessageCursor
+	before := request.URL.Query().Get("before")
+	beforeID := request.URL.Query().Get("before_id")
+	if before != "" || beforeID != "" {
+		receivedAt, timeErr := time.Parse(time.RFC3339Nano, before)
+		eventID, idErr := uuid.Parse(beforeID)
+		if timeErr != nil || idErr != nil {
+			writeError(writer, http.StatusBadRequest, "invalid event cursor")
+			return
+		}
+		cursor = &analytics.SyslogMessageCursor{ReceivedAt: receivedAt, EventID: eventID}
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
+	defer cancel()
+	var total uint64
+	if cursor == nil {
+		counted, countErr := s.Analytics.CountSyslogMessages(ctx, deviceID, search, timeRange)
+		if countErr != nil {
+			if errors.Is(countErr, analytics.ErrSearchRequiresRange) {
+				writeError(writer, http.StatusBadRequest, "payload search requires date=YYYY-MM-DD")
+				return
+			}
+			if writeAdmissionError(writer, countErr) {
+				return
+			}
+			writeError(writer, http.StatusInternalServerError, "unable to count syslog matches")
+			return
+		}
+		total = counted
+	}
+	match, err := s.Analytics.FindSyslogMessage(ctx, deviceID, search, cursor, timeRange)
+	if err != nil {
+		if errors.Is(err, analytics.ErrSearchRequiresRange) {
+			writeError(writer, http.StatusBadRequest, "payload search requires date=YYYY-MM-DD")
+			return
+		}
+		if writeAdmissionError(writer, err) {
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "unable to find syslog match")
+		return
+	}
+	if !match.Found {
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"eventId": nil, "receivedAt": nil, "total": total, "hasMore": false,
+		})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"eventId": match.EventID, "receivedAt": match.ReceivedAt,
+		"total": total, "hasMore": match.HasMore,
+	})
 }
 
 func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {

@@ -337,9 +337,9 @@ tbody tr { cursor: pointer; }
 /*
  * Full-viewport tables (table-layout:auto + width:100%):
  * - compact cols: width:1% + nowrap → shrink-wrap to longest cell/header;
- * - .col-flex / .col-flex-pair: take remaining width with ellipsis.
+ * - .col-flex / .col-flex-pair / .col-flex-3 / .col-flex-4: leftover with ellipsis.
  * max-width:0 on flex cols is required so long text cannot inflate the table
- * past the container (Регион A/B, ASN, disconnect text).
+ * past the container (маршруты, операторы/регионы, ASN).
  */
 .table-fit,
 .satel-cdr-table.table-fit,
@@ -351,8 +351,8 @@ tbody tr { cursor: pointer; }
   max-width: 100%;
   table-layout: auto;
 }
-.table-fit > thead > tr > th:not(.col-flex):not(.col-flex-pair),
-.table-fit > tbody > tr > td:not(.col-flex):not(.col-flex-pair),
+.table-fit > thead > tr > th:not(.col-flex):not(.col-flex-pair):not(.col-flex-3):not(.col-flex-4),
+.table-fit > tbody > tr > td:not(.col-flex):not(.col-flex-pair):not(.col-flex-3):not(.col-flex-4),
 .syslog-table > thead > tr > th:not(.col-flex),
 .syslog-table > tbody > tr > td:not(.col-flex) {
   width: 1%;
@@ -372,16 +372,25 @@ tbody tr { cursor: pointer; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* Equal dynamic share of leftover width (e.g. Регион A / Регион B). */
+/* Equal dynamic share of leftover width (2 / 3 / 4 columns). */
 .table-fit > thead > tr > th.col-flex-pair,
-.table-fit > tbody > tr > td.col-flex-pair {
-  width: 50%;
+.table-fit > tbody > tr > td.col-flex-pair,
+.table-fit > thead > tr > th.col-flex-3,
+.table-fit > tbody > tr > td.col-flex-3,
+.table-fit > thead > tr > th.col-flex-4,
+.table-fit > tbody > tr > td.col-flex-4 {
   min-width: 6rem;
   max-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.table-fit > thead > tr > th.col-flex-pair,
+.table-fit > tbody > tr > td.col-flex-pair { width: 50%; }
+.table-fit > thead > tr > th.col-flex-3,
+.table-fit > tbody > tr > td.col-flex-3 { width: 33.333%; }
+.table-fit > thead > tr > th.col-flex-4,
+.table-fit > tbody > tr > td.col-flex-4 { width: 25%; }
 .cdr-preset { display: flex; margin: 0; flex-direction: row; align-items: center; gap: 6px;
   font-size: 12px; color: #475467; }
 .cdr-preset select { min-width: 140px; }

@@ -308,14 +308,44 @@ export function satelPresetFillWidth(presetId: string): boolean {
   return presetId === 'summary' || presetId === 'geoip' || presetId === 'operators'
 }
 
-/** Keys that share remaining width equally (col-flex-pair). */
-export function satelPresetFlexPairKeys(presetId: string): string[] {
-  if (presetId === 'geoip') return ['remoteSrcAsnOrg', 'remoteDstAsnOrg']
-  if (presetId === 'operators') return ['billAniRegion', 'billDnisRegion']
-  return []
+/** Equal-share flex class for table-fit columns. */
+export type CdrFlexShareClass = 'col-flex-pair' | 'col-flex-3' | 'col-flex-4'
+
+/** Keys that share remaining width equally within a Satel preset. */
+export function satelPresetFlexShare(presetId: string): {
+  keys: string[]
+  className: CdrFlexShareClass
+} {
+  if (presetId === 'summary') {
+    return { keys: ['srcName', 'dstName', 'dpName'], className: 'col-flex-3' }
+  }
+  if (presetId === 'geoip') {
+    return { keys: ['remoteSrcAsnOrg', 'remoteDstAsnOrg'], className: 'col-flex-pair' }
+  }
+  if (presetId === 'operators') {
+    return {
+      keys: ['billAniOperator', 'billAniRegion', 'billDnisOperator', 'billDnisRegion'],
+      className: 'col-flex-4',
+    }
+  }
+  return { keys: [], className: 'col-flex-pair' }
 }
 
-/** Single column that absorbs leftover width (col-flex). */
-export function satelPresetFlexKey(presetId: string): string {
-  return presetId === 'summary' ? 'disconnectText' : ''
+export function satelPresetFlexPairKeys(presetId: string): string[] {
+  const share = satelPresetFlexShare(presetId)
+  return share.className === 'col-flex-pair' ? share.keys : []
+}
+
+/** Equipment Summary: equal dynamic share for route + result columns. */
+export function eltexPresetFlexShare(presetId: string): {
+  keys: string[]
+  className: CdrFlexShareClass
+} {
+  if (presetId === 'summary') {
+    return {
+      keys: ['incomingDescription', 'outgoingDescription', 'releaseInfo'],
+      className: 'col-flex-3',
+    }
+  }
+  return { keys: [], className: 'col-flex-pair' }
 }

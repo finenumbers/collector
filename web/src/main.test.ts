@@ -82,15 +82,15 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('onSelect={setSelectedEvent}')
   })
 
-  it('uses client-side Syslog find without API q= filter', () => {
+  it('uses Syslog find with API q= for the selected day', () => {
     expect(main).toContain('function highlightFind')
     expect(main).toContain('syslogFind')
     expect(main).toContain('syslog-find-hit')
     expect(main).toContain('syslog-find-clear')
-    expect(main).toContain('Найти в загруженных')
+    expect(main).toContain('Найти за сутки')
     expect(main).toContain('/syslog-messages?date=')
-    expect(main).not.toContain('syslog-messages?q=${encodeURIComponent(query)}')
-    expect(main).toContain('dataset === \'syslog\' ? \'\' : query')
+    expect(main).toContain('&q=${encodeURIComponent(find)}')
+    expect(main).toContain("dataset === 'syslog' ? syslogFind : query")
   })
 
   it('hides antifraud tab when antifraudEnabled is false', () => {

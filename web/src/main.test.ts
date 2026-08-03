@@ -82,6 +82,17 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('onSelect={setSelectedEvent}')
   })
 
+  it('uses client-side Syslog find without API q= filter', () => {
+    expect(main).toContain('function highlightFind')
+    expect(main).toContain('syslogFind')
+    expect(main).toContain('syslog-find-hit')
+    expect(main).toContain('syslog-find-clear')
+    expect(main).toContain('Найти в загруженных')
+    expect(main).toContain('/syslog-messages?date=')
+    expect(main).not.toContain('syslog-messages?q=${encodeURIComponent(query)}')
+    expect(main).toContain('dataset === \'syslog\' ? \'\' : query')
+  })
+
   it('hides antifraud tab when antifraudEnabled is false', () => {
     const template = fallbackTemplates[0]
     expect(deviceSurfaces({ ...template, antifraudEnabled: false }))

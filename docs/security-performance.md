@@ -93,8 +93,9 @@ fixed anonymized capture at expected peak plus 50% for 30 minutes and record:
 
 - interactive p95 under 2 seconds and p99 under 5 seconds;
 - zero admission leaks/deadlocks and bounded cancellation under 1 second;
-- projection **health** lag under 5 minutes after load stops (`depth→0`); quiet
-  SMGs must not false-breach on AF tip / watermark age alone;
+- projection **live health** lag under 5 minutes after load stops; quiet SMGs must
+  not false-breach on absolute AF tip / watermark / catch-up age alone
+  (`contentLag≈0` + fresh activated is ok);
 - coverage late+missing at or below 1% after the configured grace;
 - export/replay never overlap in the heavy lane; when both wait, custom_replay
   is preferred over export;

@@ -267,11 +267,14 @@ type ProjectionDeviceDiagnostics = {
   lastError?: string
   syslogLagSeconds: number
   afCallLagSeconds: number
+  afSyslogLagSeconds?: number
+  hasAFSyslogTip?: boolean
   activatedLagSeconds: number
   afAuthHeaders6h: number
   xpgkHeaders6h: number
   classificationGap: boolean
   healthLagSeconds?: number
+  contentLagSeconds?: number
   eventTipLagSeconds?: number
   projectionLagSeconds: number
   projectionSloMet: boolean
@@ -1890,8 +1893,10 @@ function OperationalDiagnosticsPanel() {
         <strong>Projection по устройствам</strong>
         {devices.map((device) => <span key={device.deviceId}>
           {device.name}: live health {formatCount(device.healthLagSeconds ?? device.projectionLagSeconds)} с ·
+          content {formatCount(device.contentLagSeconds)} с ·
           buckets {formatCount(device.bucketDepth ?? 0)}/{formatCount(device.depth)} ·
           AF tip {formatCount(device.afCallLagSeconds)} с ·
+          AF syslog {formatCount(device.afSyslogLagSeconds)} с ·
           activated {formatCount(device.activatedLagSeconds)} с ·
           catch-up {formatDurationNanos(device.oldestBucketAge ?? device.oldestAge)} ·
           failed {formatCount(device.failed)} ·

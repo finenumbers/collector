@@ -186,7 +186,10 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
 .toolbar h3 { font-size: 14px; margin: 0 0 2px; }
 .toolbar > div > span { color: var(--muted); font-size: 10px; }
-.toolbar-actions { display: flex; align-items: center; gap: 7px; }
+.toolbar-actions { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.toolbar-actions > .view-toggle,
+.toolbar-actions > .export-button-wrap,
+.toolbar-actions > .secondary { flex-shrink: 0; }
 .view-toggle { display: inline-flex; align-items: stretch; border: 1px solid var(--line);
   border-radius: var(--control-radius); background: var(--panel-2); overflow: hidden; }
 .view-toggle button { min-height: var(--control-height); padding: 0 10px; border: 0; border-radius: 0;
@@ -216,7 +219,7 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .search:focus-within { border-color: var(--accent); }
 .search svg { color: var(--muted); }
 .search input { flex: 1; height: calc(var(--control-height) - 2px); border: 0; padding: 0 7px 0 0; }
-.search.syslog-find { width: min(420px, 100%); padding-right: 4px; gap: 4px; }
+.search.syslog-find { width: min(260px, 100%); flex: 0 1 260px; min-width: 0; padding-right: 4px; gap: 4px; }
 .syslog-find-count { flex: none; color: var(--muted); font-size: 10px; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
 .syslog-find-next, .syslog-find-clear { flex: none; width: 26px; min-height: 26px; height: 26px;

@@ -85,10 +85,40 @@ func (c *Client) InsertSyslogMessagesBatch(
 		})
 }
 
+// SyslogListBound selects keyset pagination mode. At most one of Before/From/After.
+type SyslogListBound struct {
+	// Before: exclusive older-than cursor (default infinite scroll down).
+	Before *SyslogMessageCursor
+	// From: inclusive start — first row is this event, then older.
+	From *SyslogMessageCursor
+	// After: exclusive newer-than — fetch newer rows (ASC), return DESC.
+	After *SyslogMessageCursor
+}
+
 func (c *Client) ListSyslogMessagesPage(
 	ctx context.Context, deviceID uuid.UUID, search string, limit uint64,
 	cursor *SyslogMessageCursor, timeRange *TimeRange,
 ) (SyslogMessagePage, error) {
+	return c.ListSyslogMessagesBound(ctx, deviceID, search, limit, SyslogListBound{Before: cursor}, timeRange)
+}
+
+func (c *Client) ListSyslogMessagesBound(
+	ctx context.Context, deviceID uuid.UUID, search string, limit uint64,
+	bound SyslogListBound, timeRange *TimeRange,
+) (SyslogMessagePage, error) {
+	modes := 0
+	if bound.Before != nil {
+		modes++
+	}
+	if bound.From != nil {
+		modes++
+	}
+	if bound.After != nil {
+		modes++
+	}
+	if modes > 1 {
+		return SyslogMessagePage{}, errors.New("conflicting syslog list cursors")
+	}
 	ctx, release, err := c.queryContext(ctx, workload.Interactive)
 	if err != nil {
 		return SyslogMessagePage{}, err
@@ -113,11 +143,23 @@ func (c *Client) ListSyslogMessagesPage(
 		query += ` AND positionCaseInsensitiveUTF8(payload,?)>0`
 		args = append(args, search)
 	}
-	if cursor != nil {
+	newer := bound.After != nil
+	switch {
+	case bound.Before != nil:
 		query += ` AND (received_at<? OR (received_at=? AND event_id<?))`
-		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
+		args = append(args, bound.Before.ReceivedAt, bound.Before.ReceivedAt, bound.Before.EventID)
+	case bound.From != nil:
+		query += ` AND (received_at<? OR (received_at=? AND event_id<=?))`
+		args = append(args, bound.From.ReceivedAt, bound.From.ReceivedAt, bound.From.EventID)
+	case bound.After != nil:
+		query += ` AND (received_at>? OR (received_at=? AND event_id>?))`
+		args = append(args, bound.After.ReceivedAt, bound.After.ReceivedAt, bound.After.EventID)
 	}
-	query += ` ORDER BY received_at DESC,event_id DESC LIMIT ?`
+	if newer {
+		query += ` ORDER BY received_at ASC,event_id ASC LIMIT ?`
+	} else {
+		query += ` ORDER BY received_at DESC,event_id DESC LIMIT ?`
+	}
 	args = append(args, limit+1)
 	rows, err := c.query(ctx, query, args...)
 	if err != nil {
@@ -146,6 +188,11 @@ func (c *Client) ListSyslogMessagesPage(
 	hasMore := uint64(len(items)) > limit
 	if hasMore {
 		items = items[:limit]
+	}
+	if newer {
+		for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+			items[left], items[right] = items[right], items[left]
+		}
 	}
 	return SyslogMessagePage{Items: items, HasMore: hasMore}, nil
 }

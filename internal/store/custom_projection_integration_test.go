@@ -328,16 +328,12 @@ func TestCustomProjectionQueueOldestAgeIgnoresDiscover(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := control.DB.Exec(ctx, `INSERT INTO custom_projection_jobs
-		(device_id,kind,status,policy_revision,next_attempt_at,created_at)
+		(device_id,kind,status,policy_revision,next_attempt_at,created_at,bucket_start)
 		VALUES
-		($1,'discover','pending',1,now(),now()-interval '56 hours'),
-		($1,'bucket','pending',1,now(),now()-interval '10 minutes')`,
+		($1,'discover','pending',1,now(),now()-interval '56 hours',NULL),
+		($1,'bucket','pending',1,now(),now()-interval '10 minutes',
+			date_trunc('hour', now()-interval '2 hours'))`,
 		device.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := control.DB.Exec(ctx, `UPDATE custom_projection_jobs
-		SET bucket_start=date_trunc('hour', now()-interval '2 hours')
-		WHERE device_id=$1 AND kind='bucket'`, device.ID); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := control.CustomProjectionQueueStats(ctx)

@@ -175,6 +175,7 @@ func (s *Store) EnqueueCustomProjectionBuckets(
 				generation=custom_projection_jobs.generation+1,
 				projection_seq=nextval('custom_projection_seq'),
 				cutoff_at=NULL,
+				window_start=NULL,
 				status=CASE WHEN custom_projection_jobs.status='running'
 					THEN 'running' ELSE 'pending' END,
 				next_attempt_at=LEAST(custom_projection_jobs.next_attempt_at,now()),
@@ -195,12 +196,14 @@ func (s *Store) ClaimCustomProjectionJob(
 	ctx context.Context, workerID string, lease time.Duration,
 ) (customprojection.Job, bool, error) {
 	var job customprojection.Job
-	var bucket, cursorTime, cutoff *time.Time
+	var bucket, cursorTime, cutoff, windowStart *time.Time
 	var cursorID *uuid.UUID
 	var openHour bool
 	// Open UTC-hour buckets are exempt from the per-device lease so dense
 	// closed-hour windowed rebuild cannot starve live tip cutover. Closed-hour
 	// and discover jobs still take an exclusive device lease.
+	// Among open-hour jobs, least-recently-claimed wins so one SMG cannot sticky-
+	// starve the fleet under the singleton CustomReplay lane.
 	err := s.DB.QueryRow(ctx, `WITH eligible AS (
 			SELECT DISTINCT ON (device_id) id,
 				(kind='bucket'
@@ -240,6 +243,11 @@ func (s *Store) ClaimCustomProjectionJob(
 					WHEN job.kind='discover' THEN 2
 					ELSE 3
 				END,
+				CASE
+					WHEN eligible.open_hour
+					THEN COALESCE(job.last_claimed_at, '-infinity'::timestamptz)
+					ELSE 'infinity'::timestamptz
+				END ASC,
 				COALESCE(job.bucket_start, 'infinity'::timestamptz) ASC,
 				job.created_at ASC,
 				job.updated_at ASC
@@ -260,18 +268,19 @@ func (s *Store) ClaimCustomProjectionJob(
 		)
 		UPDATE custom_projection_jobs job
 		SET status='running',worker_id=$1,lease_expires_at=now()+$2::interval,
-			claimed_generation=generation,attempts=attempts+1,updated_at=now()
+			claimed_generation=generation,attempts=attempts+1,
+			last_claimed_at=now(),updated_at=now()
 		FROM picked
 		WHERE job.id=picked.id
 		  AND (picked.open_hour
 			OR EXISTS (SELECT 1 FROM leased WHERE leased.device_id=job.device_id))
 		RETURNING job.id,job.device_id,job.policy_revision,job.projection_seq,job.kind,
 			job.bucket_start,job.cursor_received_at,job.cursor_event_id,
-			job.generation,job.cutoff_at,picked.open_hour`,
+			job.generation,job.cutoff_at,job.window_start,picked.open_hour`,
 		workerID, lease.String(),
 	).Scan(
 		&job.ID, &job.DeviceID, &job.PolicyRevision, &job.ProjectionSeq, &job.Kind,
-		&bucket, &cursorTime, &cursorID, &job.Generation, &cutoff, &openHour,
+		&bucket, &cursorTime, &cursorID, &job.Generation, &cutoff, &windowStart, &openHour,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return customprojection.Job{}, false, nil
@@ -290,6 +299,9 @@ func (s *Store) ClaimCustomProjectionJob(
 	}
 	if cutoff != nil {
 		job.CutoffAt = *cutoff
+	}
+	if windowStart != nil {
+		job.WindowStart = *windowStart
 	}
 	job.WorkerID = workerID
 	// Open-hour claims never insert a device lease; remember that for the full
@@ -362,6 +374,7 @@ func (s *Store) CompleteCustomProjectionJob(
 			next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
 				ELSE LEAST(next_attempt_at,now()) END,
 			last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
+			window_start=CASE WHEN generation=claimed_generation THEN NULL ELSE window_start END,
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
 		WHERE id=$1`, job.ID); err != nil {
 		return err
@@ -527,6 +540,7 @@ func (s *Store) applyCustomProjectionCutover(
 			next_attempt_at=CASE WHEN generation=claimed_generation THEN next_attempt_at
 				ELSE LEAST(next_attempt_at,now()) END,
 			last_error=CASE WHEN generation=claimed_generation THEN NULL ELSE last_error END,
+			window_start=CASE WHEN generation=claimed_generation THEN NULL ELSE window_start END,
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
 		WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
 		return err
@@ -536,6 +550,90 @@ func (s *Store) applyCustomProjectionCutover(
 			WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
 			return err
 		}
+	}
+	return tx.Commit(ctx)
+}
+
+// ProgressCustomProjection activates a mid-rebuild tip while keeping the job running.
+func (s *Store) ProgressCustomProjection(
+	ctx context.Context,
+	job customprojection.Job,
+	snapshot customprojection.Snapshot,
+	activate func(context.Context) error,
+) error {
+	conn, err := s.DB.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx,
+		`SELECT pg_advisory_lock(hashtextextended($1::text,$2))`,
+		job.DeviceID.String(), customProjectionAdvisorySeed,
+	); err != nil {
+		return err
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(unlockCtx,
+			`SELECT pg_advisory_unlock(hashtextextended($1::text,$2))`,
+			job.DeviceID.String(), customProjectionAdvisorySeed)
+	}()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var enabled bool
+	var revision uint64
+	if err := tx.QueryRow(ctx, `SELECT antifraud_enabled,antifraud_policy_revision
+		FROM devices WHERE id=$1 AND enabled AND purge_state='active' FOR UPDATE`,
+		job.DeviceID).Scan(&enabled, &revision); err != nil {
+		return err
+	}
+	if !enabled || revision != job.PolicyRevision {
+		return errors.New("antifraud policy changed before snapshot progress")
+	}
+	var status, owner string
+	var claimedGeneration uint64
+	if err := tx.QueryRow(ctx, `SELECT status,COALESCE(worker_id,''),claimed_generation
+		FROM custom_projection_jobs WHERE id=$1 FOR UPDATE`, job.ID).
+		Scan(&status, &owner, &claimedGeneration); err != nil {
+		return err
+	}
+	if status != "running" || owner != job.WorkerID || claimedGeneration != job.Generation {
+		return errors.New("projection lease changed before snapshot progress")
+	}
+	if err := activate(ctx); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE custom_projection_watermarks
+		SET previous_snapshot_id=active_snapshot_id,active_snapshot_id=$3,
+			watermark_received_at=CASE
+				WHEN $4::timestamptz IS NULL OR $4::timestamptz='0001-01-01'::timestamptz
+					THEN watermark_received_at
+				WHEN watermark_received_at IS NULL OR $4::timestamptz>=watermark_received_at
+					THEN $4::timestamptz
+				ELSE watermark_received_at
+			END,
+			watermark_event_id=CASE
+				WHEN $4::timestamptz IS NULL OR $4::timestamptz='0001-01-01'::timestamptz
+					THEN watermark_event_id
+				WHEN watermark_received_at IS NULL OR $4::timestamptz>watermark_received_at
+					THEN NULLIF($5,'00000000-0000-0000-0000-000000000000'::uuid)
+				WHEN $4::timestamptz=watermark_received_at
+					THEN COALESCE(NULLIF($5,'00000000-0000-0000-0000-000000000000'::uuid), watermark_event_id)
+				ELSE watermark_event_id
+			END,
+			projection_seq=$6,state='active',updated_at=now()
+		WHERE device_id=$1 AND policy_revision=$2`,
+		job.DeviceID, job.PolicyRevision, snapshot.ID, snapshot.WatermarkTime,
+		snapshot.WatermarkID, snapshot.ProjectionSeq)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("projection watermark compare-and-swap failed")
 	}
 	return tx.Commit(ctx)
 }
@@ -564,7 +662,8 @@ func (s *Store) FailCustomProjectionJob(
 }
 
 // HasPendingOpenHourProjection reports whether any open UTC-hour bucket is
-// waiting or already running so closed-hour windowed rebuild can yield CH.
+// waiting or already running so closed-hour windowed rebuild can yield CH
+// between windows.
 func (s *Store) HasPendingOpenHourProjection(ctx context.Context) (bool, error) {
 	var exists bool
 	err := s.DB.QueryRow(ctx, `SELECT EXISTS (
@@ -579,16 +678,37 @@ func (s *Store) HasPendingOpenHourProjection(ctx context.Context) (bool, error) 
 	return exists, err
 }
 
+// HasWaitingOpenHourProjection reports an open UTC-hour job that still needs a
+// worker. Used before starting a closed-hour hour load so catch-up does not
+// run while live tip is unclaimed, without blocking catch-up forever whenever
+// some other SMG open-hour is already running.
+func (s *Store) HasWaitingOpenHourProjection(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM custom_projection_jobs
+		WHERE kind='bucket'
+		  AND bucket_start=date_trunc('hour', timezone('UTC', now()))
+		  AND status='pending' AND next_attempt_at<=now()
+	)`).Scan(&exists)
+	return exists, err
+}
+
 // YieldCustomProjectionJob soft-releases a running closed-hour job so a worker
-// can claim the live open hour. Undoes the claim attempt bump; never marks failed.
+// can claim the live open hour. Persists WindowStart so catch-up resumes mid-hour.
+// Undoes the claim attempt bump; never marks failed.
 func (s *Store) YieldCustomProjectionJob(ctx context.Context, job customprojection.Job) error {
+	var window any
+	if !job.WindowStart.IsZero() {
+		window = job.WindowStart.UTC()
+	}
 	tag, err := s.DB.Exec(ctx, `UPDATE custom_projection_jobs
 		SET status='pending',next_attempt_at=now(),
 			attempts=GREATEST(attempts-1,0),
+			window_start=COALESCE($4::timestamptz, window_start),
 			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
 		WHERE id=$1 AND status='running' AND COALESCE(worker_id,'')=$2
 			AND claimed_generation=$3`,
-		job.ID, job.WorkerID, job.Generation)
+		job.ID, job.WorkerID, job.Generation, window)
 	if err != nil {
 		return err
 	}
@@ -707,6 +827,9 @@ type CustomProjectionDeviceStats struct {
 	WatermarkState      string        `json:"watermarkState"`
 	WatermarkLagSeconds int64         `json:"watermarkLagSeconds"`
 	LastError           string        `json:"lastError,omitempty"`
+	// OpenHourStatus is pending|running|idle for the current UTC open-hour job.
+	OpenHourStatus     string `json:"openHourStatus,omitempty"`
+	OpenHourAgeSeconds int64  `json:"openHourAgeSeconds,omitempty"`
 }
 
 func (s *Store) CustomProjectionQueueStats(
@@ -751,7 +874,26 @@ func (s *Store) CustomProjectionDeviceStats(
 			WHERE j.device_id=device.id AND j.status='failed'
 			  AND j.last_error IS NOT NULL AND j.last_error<>''
 			ORDER BY j.updated_at DESC LIMIT 1
-		),'')
+		),''),
+		COALESCE((
+			SELECT CASE
+				WHEN j.status='running' THEN 'running'
+				WHEN j.status='pending' THEN 'pending'
+				ELSE 'idle'
+			END
+			FROM custom_projection_jobs j
+			WHERE j.device_id=device.id AND j.kind='bucket'
+			  AND j.bucket_start=date_trunc('hour', timezone('UTC', now()))
+			ORDER BY j.updated_at DESC LIMIT 1
+		),'idle'),
+		COALESCE((
+			SELECT GREATEST(0,EXTRACT(epoch FROM now()-j.updated_at))::bigint
+			FROM custom_projection_jobs j
+			WHERE j.device_id=device.id AND j.kind='bucket'
+			  AND j.bucket_start=date_trunc('hour', timezone('UTC', now()))
+			  AND j.status IN ('pending','running')
+			ORDER BY j.updated_at ASC LIMIT 1
+		),0)
 		FROM devices device
 		LEFT JOIN custom_projection_jobs job ON job.device_id=device.id
 		LEFT JOIN custom_projection_watermarks watermark ON watermark.device_id=device.id
@@ -772,6 +914,7 @@ func (s *Store) CustomProjectionDeviceStats(
 			&item.DeviceID, &item.Name, &item.Depth, &item.BucketDepth, &item.Failed,
 			&item.Backfilling, &oldestBucketSeconds, &item.WatermarkState,
 			&item.WatermarkLagSeconds, &item.LastError,
+			&item.OpenHourStatus, &item.OpenHourAgeSeconds,
 		); err != nil {
 			return nil, err
 		}

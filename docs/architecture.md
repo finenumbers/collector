@@ -56,8 +56,14 @@ closed-hour lease after UTC rollover. Each projection thread uses a unique
 `worker_id` (`…-tN`) so concurrent jobs on one process do not share lease rows.
 Closed-hour windowed rebuild **yields** between 5m windows (and before finalize)
 when any open UTC-hour job is pending/running: soft-requeue without `failed` so
-the singleton CustomReplay lane can serve live tip cutover. Open-hour tip
-publish skips the deploy-wide PG ClickHouse heavy lane.
+the singleton CustomReplay lane can serve live tip cutover (including before the
+initial hour `LoadCustomRadiusEvents` / `finishBucket` path). Closed-hour yield
+persists a 5m `window_start` cursor so catch-up resumes mid-hour instead of
+thrashing from zero under continuous live enqueue. Open-hour windowed rebuild
+progressive-activates merged-so-far after each 5m window; closed-hour stays
+finalize-only. Open-hour tip publish skips the deploy-wide PG ClickHouse heavy
+lane. Among open-hour jobs, claim uses **least-recently-claimed** fairness so
+one SMG cannot sticky-starve the fleet.
 Claim prefers **real bucket backlog** across devices and per device
 (`open UTC-hour → older buckets → discover`), not frozen event-tip watermarks
 and not eternal discover ahead of hour catch-up. With `projection.threads≥2`,

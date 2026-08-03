@@ -147,6 +147,8 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 			"eventTipLagSeconds":   health.EventTipLagSeconds,
 			"projectionLagSeconds": health.ProjectionLagSeconds,
 			"projectionSloMet":     health.ProjectionSLOMet,
+			"openHourStatus":       item.OpenHourStatus,
+			"openHourAgeSeconds":   item.OpenHourAgeSeconds,
 		})
 	}
 	if len(deviceStats) > 0 {

@@ -278,6 +278,8 @@ type ProjectionDeviceDiagnostics = {
   eventTipLagSeconds?: number
   projectionLagSeconds: number
   projectionSloMet: boolean
+  openHourStatus?: string
+  openHourAgeSeconds?: number
 }
 type OperationalDiagnostics = {
   generatedAt: string
@@ -1921,6 +1923,8 @@ function OperationalDiagnosticsPanel() {
           AF tip {formatCount(device.afCallLagSeconds)} с ·
           AF syslog {formatCount(device.afSyslogLagSeconds)} с ·
           activated {formatCount(device.activatedLagSeconds)} с ·
+          open-hour {device.openHourStatus || 'idle'}
+          {device.openHourAgeSeconds ? ` ${formatCount(device.openHourAgeSeconds)} с` : ''} ·
           catch-up {formatDurationNanos(device.oldestBucketAge ?? device.oldestAge)} ·
           failed {formatCount(device.failed)} ·
           SLO {device.projectionSloMet ? 'ok' : 'breach'}

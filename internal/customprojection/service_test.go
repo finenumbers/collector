@@ -24,6 +24,7 @@ type projectionQueueMock struct {
 	enqueueErr        error
 	beforeLock        func()
 	pendingOpenHour   bool
+	waitingOpenHour   *bool
 	deadlines         []time.Time
 	buckets           []time.Time
 	projectionBuckets []time.Time
@@ -92,8 +93,23 @@ func (m *projectionQueueMock) EnqueueCDRReconciliationBuckets(
 func (m *projectionQueueMock) HasPendingOpenHourProjection(context.Context) (bool, error) {
 	return m.pendingOpenHour, nil
 }
+func (m *projectionQueueMock) HasWaitingOpenHourProjection(context.Context) (bool, error) {
+	if m.waitingOpenHour != nil {
+		return *m.waitingOpenHour, nil
+	}
+	return m.pendingOpenHour, nil
+}
 func (m *projectionQueueMock) YieldCustomProjectionJob(context.Context, Job) error {
 	m.yielded++
+	return nil
+}
+func (m *projectionQueueMock) ProgressCustomProjection(
+	ctx context.Context, _ Job, snapshot Snapshot, activate func(context.Context) error,
+) error {
+	if err := activate(ctx); err != nil {
+		return err
+	}
+	m.projectionBuckets = append(m.projectionBuckets, snapshot.BucketStart)
 	return nil
 }
 func (m *projectionQueueMock) LockDeviceWrites(uuid.UUID) func() {
@@ -323,7 +339,7 @@ func TestOverflowSplitsHourLoad(t *testing.T) {
 	worker := &Worker{Queue: queue, Warehouse: warehouse, Config: Config{MaxEvents: 100}}
 	if err := worker.process(context.Background(), worker.Config.normalized(), Job{
 		ID: uuid.New(), DeviceID: deviceID, PolicyRevision: 1, ProjectionSeq: 1,
-		Kind: JobBucket, BucketStart: bucket,
+		Kind: JobBucket, BucketStart: bucket, HoldsDeviceLease: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -404,12 +420,12 @@ func TestDenseHourFinalizeOnlyDuringWindowedRebuild(t *testing.T) {
 	worker := &Worker{Queue: queue, Warehouse: warehouse, Config: Config{MaxEvents: 10, MaxMemoryBytes: 1 << 20}}
 	if err := worker.process(context.Background(), worker.Config.normalized(), Job{
 		ID: uuid.New(), DeviceID: deviceID, PolicyRevision: 1, ProjectionSeq: 1,
-		Kind: JobBucket, BucketStart: bucket, WorkerID: "test-worker",
+		Kind: JobBucket, BucketStart: bucket, WorkerID: "test-worker", HoldsDeviceLease: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(warehouse.activations) != 1 || queue.completed != 1 {
-		t.Fatalf("dense hour must finalize-only: activations=%v completed=%d",
+		t.Fatalf("closed-hour dense rebuild must finalize-only: activations=%v completed=%d",
 			warehouse.activations, queue.completed)
 	}
 	if queue.refreshed < 1 {
@@ -476,9 +492,11 @@ func TestUnansweredRequestSchedulesDurableDeadline(t *testing.T) {
 func TestClosedHourWindowedRebuildYieldsForOpenHour(t *testing.T) {
 	deviceID := uuid.New()
 	bucket := time.Date(2026, 7, 27, 3, 0, 0, 0, time.UTC)
+	waiting := false
 	queue := &projectionQueueMock{
 		policy:          Policy{DeviceID: deviceID, Enabled: true, Revision: 1},
-		pendingOpenHour: true,
+		pendingOpenHour: true,  // open-hour already running elsewhere
+		waitingOpenHour: &waiting, // not unclaimed — allow catch-up to start
 	}
 	warehouse := &projectionWarehouseMock{
 		loadFn: func(from, to time.Time, limit int) ([]customradius.RawEvent, error) {
@@ -500,6 +518,9 @@ func TestClosedHourWindowedRebuildYieldsForOpenHour(t *testing.T) {
 	}
 	if queue.yielded != 1 {
 		t.Fatalf("yielded=%d, want 1", queue.yielded)
+	}
+	if warehouse.loadCalls < 1 {
+		t.Fatal("catch-up should process at least one window before yield")
 	}
 	if queue.completed != 0 || len(warehouse.activations) != 0 {
 		t.Fatal("yield must not finalize closed-hour snapshot")
@@ -535,5 +556,36 @@ func TestOpenHourWindowedRebuildDoesNotSelfYield(t *testing.T) {
 	}
 	if queue.completed != 1 {
 		t.Fatalf("open-hour should finalize: completed=%d", queue.completed)
+	}
+	// Live tip must advance during dense open-hour rebuild, not only at finalize.
+	if len(warehouse.activations) < 2 {
+		t.Fatalf("open-hour should progressive-activate: activations=%v", warehouse.activations)
+	}
+}
+
+func TestClosedHourYieldsBeforeHourLoad(t *testing.T) {
+	deviceID := uuid.New()
+	bucket := time.Date(2026, 7, 27, 3, 0, 0, 0, time.UTC)
+	queue := &projectionQueueMock{
+		policy:          Policy{DeviceID: deviceID, Enabled: true, Revision: 1},
+		pendingOpenHour: true,
+	}
+	loads := 0
+	warehouse := &projectionWarehouseMock{
+		loadFn: func(from, to time.Time, limit int) ([]customradius.RawEvent, error) {
+			loads++
+			return nil, nil
+		},
+	}
+	worker := &Worker{Queue: queue, Warehouse: warehouse, Config: Config{MaxEvents: 100}}
+	err := worker.process(context.Background(), worker.Config.normalized(), Job{
+		ID: uuid.New(), DeviceID: deviceID, PolicyRevision: 1, ProjectionSeq: 1,
+		Kind: JobBucket, BucketStart: bucket, HoldsDeviceLease: true, WorkerID: "catchup",
+	})
+	if !errors.Is(err, ErrYieldedForOpenHour) {
+		t.Fatalf("want ErrYieldedForOpenHour, got %v", err)
+	}
+	if loads != 0 {
+		t.Fatalf("closed-hour must yield before CH hour load: loads=%d", loads)
 	}
 }

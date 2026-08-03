@@ -187,6 +187,24 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .toolbar h3 { font-size: 14px; margin: 0 0 2px; }
 .toolbar > div > span { color: var(--muted); font-size: 10px; }
 .toolbar-actions { display: flex; align-items: center; gap: 7px; }
+.view-toggle { display: inline-flex; align-items: stretch; border: 1px solid var(--line);
+  border-radius: var(--control-radius); background: var(--panel-2); overflow: hidden; }
+.view-toggle button { min-height: var(--control-height); padding: 0 10px; border: 0; border-radius: 0;
+  background: transparent; color: var(--muted); font-size: 12px; }
+.view-toggle button + button { border-left: 1px solid var(--line); }
+.view-toggle button:hover { background: #eef2f7; color: var(--text); }
+.view-toggle button.active { color: #174ea6; background: var(--accent-soft); font-weight: 600; }
+.syslog-raw-log { display: flex; flex-direction: column; width: 100%; min-width: 0;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+.syslog-raw-line { display: flex; gap: 10px; align-items: flex-start; width: 100%;
+  min-height: 0; margin: 0; padding: 4px 8px; border: 0; border-radius: 0; border-bottom: 1px solid #eef2f7;
+  background: transparent; color: inherit; text-align: left; cursor: pointer;
+  font: inherit; }
+.syslog-raw-line:hover { background: #f4f7fb; }
+.syslog-raw-line:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.syslog-raw-time { flex: none; width: 20ch; color: var(--muted); white-space: nowrap; }
+.syslog-raw-payload { min-width: 0; flex: 1; white-space: pre-wrap; word-break: break-word;
+  overflow-wrap: anywhere; color: #344054; }
 .export-button-wrap { position: relative; display: flex; align-items: center; }
 .export-button-wrap > a.secondary { display: inline-flex; align-items: center;
   color: inherit; text-decoration: none; font-size: var(--control-font-size); }

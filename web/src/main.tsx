@@ -676,6 +676,13 @@ type PageResponse<T> = {
 }
 type DataRow = EventRow | CallRow | SatelCdrRow | AntifraudRow
 type Dataset = ExportNavigationDataset
+type SyslogViewMode = 'table' | 'raw'
+
+const SYSLOG_VIEW_STORAGE_KEY = 'collector:syslog-view'
+
+function readSyslogViewMode(): SyslogViewMode {
+  return window.sessionStorage.getItem(SYSLOG_VIEW_STORAGE_KEY) === 'table' ? 'table' : 'raw'
+}
 
 let csrfToken = ''
 const PAGE_SIZE = 100
@@ -1476,6 +1483,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const presetStorageKey = cdrPresetStorageKey(device.id)
   const [columnPresetId, setColumnPresetId] = useState(() =>
     window.sessionStorage.getItem(presetStorageKey) || defaultCdrPresetId())
+  const [syslogViewMode, setSyslogViewMode] = useState<SyslogViewMode>(readSyslogViewMode)
   const vendorPresets = cdrPresetsForVendor(cdrVendor)
   const activePresetId = vendorPresets.some((preset) => preset.id === columnPresetId)
     ? columnPresetId
@@ -1672,6 +1680,18 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         {!columnFiltersActive && <div className="search"><Search size={14} />
           <input placeholder="Поиск по данным…" value={query}
             onChange={(event) => setQuery(event.target.value)} /></div>}
+        {dataset === 'syslog' && <div className="view-toggle" role="group" aria-label="Вид Syslog">
+          <button type="button" className={syslogViewMode === 'table' ? 'active' : ''}
+            onClick={() => {
+              window.sessionStorage.setItem(SYSLOG_VIEW_STORAGE_KEY, 'table')
+              setSyslogViewMode('table')
+            }}>Table</button>
+          <button type="button" className={syslogViewMode === 'raw' ? 'active' : ''}
+            onClick={() => {
+              window.sessionStorage.setItem(SYSLOG_VIEW_STORAGE_KEY, 'raw')
+              setSyslogViewMode('raw')
+            }}>Raw</button>
+        </div>}
         <ExportButton key={`${dataset}:${date}:${query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
           query={columnFiltersActive ? '' : query} date={date}
@@ -1731,8 +1751,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               }),
             } : undefined}
             onSelect={setSelectedAntifraud} />
-          : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
-            onSelect={setSelectedEvent} />}
+          : syslogViewMode === 'raw'
+            ? <EventsRawLog rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
+              onSelect={setSelectedEvent} />
+            : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
+              onSelect={setSelectedEvent} />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
         {loading && rows.length > 0 ? 'Загрузка следующих 100 записей…' : hasMore ? '' : rows.length > 0 ? 'Все записи загружены' : ''}
@@ -2901,6 +2924,20 @@ function EventsTable({ rows, timezone, onSelect }: {
     <th className="col-flex">Payload</th><th>SHA-256</th></tr></thead>
     <tbody>{rows.map((row) => <EventTableRow key={row.eventId} row={row}
       timezone={timezone} onSelect={onSelect} />)}</tbody></table>
+}
+
+function EventsRawLog({ rows, timezone, onSelect }: {
+  rows: EventRow[]
+  timezone: string
+  onSelect: (row: EventRow) => void
+}) {
+  return <div className="syslog-raw-log" role="list">
+    {rows.map((row) => <button type="button" key={row.eventId} className="syslog-raw-line"
+      role="listitem" onClick={() => onSelect(row)}>
+      <span className="syslog-raw-time">{formatTime(row.receivedAt, timezone)}</span>
+      <span className="syslog-raw-payload">{redactDisplayText(row.payload) || '—'}</span>
+    </button>)}
+  </div>
 }
 
 function EventTableRow({ row, timezone, onSelect }: {

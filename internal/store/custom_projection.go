@@ -197,14 +197,23 @@ func (s *Store) ClaimCustomProjectionJob(
 	var job customprojection.Job
 	var bucket, cursorTime, cutoff *time.Time
 	var cursorID *uuid.UUID
+	// Open UTC-hour buckets are exempt from the per-device lease so dense
+	// closed-hour windowed rebuild cannot starve live tip cutover. Closed-hour
+	// and discover jobs still take an exclusive device lease.
 	err := s.DB.QueryRow(ctx, `WITH eligible AS (
-			SELECT DISTINCT ON (device_id) id
+			SELECT DISTINCT ON (device_id) id,
+				(kind='bucket'
+					AND bucket_start=date_trunc('hour', timezone('UTC', now()))) AS open_hour
 			FROM custom_projection_jobs job
 			WHERE ((status='pending' AND next_attempt_at<=now())
 			   OR (status='running' AND job.lease_expires_at<now()))
-			  AND NOT EXISTS (
-				SELECT 1 FROM custom_projection_device_leases lease
-				WHERE lease.device_id=job.device_id AND lease.lease_expires_at>=now()
+			  AND (
+				(kind='bucket'
+					AND bucket_start=date_trunc('hour', timezone('UTC', now())))
+				OR NOT EXISTS (
+					SELECT 1 FROM custom_projection_device_leases lease
+					WHERE lease.device_id=job.device_id AND lease.lease_expires_at>=now()
+				)
 			  )
 			ORDER BY device_id,
 				CASE
@@ -218,9 +227,8 @@ func (s *Store) ClaimCustomProjectionJob(
 				COALESCE(bucket_start, 'infinity'::timestamptz) ASC,
 				updated_at,created_at
 		), picked AS (
-			-- Prefer live hour and real bucket backlog over eternal discover and
-			-- frozen event-tip watermarks (whack-a-mole across quiet SMGs).
-			SELECT job.id FROM custom_projection_jobs job
+			SELECT job.id, eligible.open_hour
+			FROM custom_projection_jobs job
 			JOIN eligible USING (id)
 			ORDER BY
 				CASE
@@ -239,7 +247,9 @@ func (s *Store) ClaimCustomProjectionJob(
 			INSERT INTO custom_projection_device_leases
 				(device_id,worker_id,lease_expires_at)
 			SELECT job.device_id,$1,now()+$2::interval
-			FROM custom_projection_jobs job JOIN picked USING (id)
+			FROM custom_projection_jobs job
+			JOIN picked USING (id)
+			WHERE NOT picked.open_hour
 			ON CONFLICT (device_id) DO UPDATE SET
 				worker_id=EXCLUDED.worker_id,lease_expires_at=EXCLUDED.lease_expires_at,
 				updated_at=now()
@@ -250,7 +260,10 @@ func (s *Store) ClaimCustomProjectionJob(
 		UPDATE custom_projection_jobs job
 		SET status='running',worker_id=$1,lease_expires_at=now()+$2::interval,
 			claimed_generation=generation,attempts=attempts+1,updated_at=now()
-		FROM picked,leased WHERE job.id=picked.id AND leased.device_id=job.device_id
+		FROM picked
+		WHERE job.id=picked.id
+		  AND (picked.open_hour
+			OR EXISTS (SELECT 1 FROM leased WHERE leased.device_id=job.device_id))
 		RETURNING job.id,job.device_id,job.policy_revision,job.projection_seq,job.kind,
 			job.bucket_start,job.cursor_received_at,job.cursor_event_id,
 			job.generation,job.cutoff_at`,
@@ -387,6 +400,7 @@ func (s *Store) CutoverCustomProjection(
 
 // RefreshCustomProjectionLease extends job + device leases while a windowed
 // rebuild is still writing ClickHouse snapshots outside the cutover tx.
+// Open UTC-hour jobs do not hold a device lease; 0 device-lease rows is OK for them.
 func (s *Store) RefreshCustomProjectionLease(
 	ctx context.Context, job customprojection.Job, lease time.Duration,
 ) error {
@@ -411,10 +425,21 @@ func (s *Store) RefreshCustomProjectionLease(
 	if err != nil {
 		return err
 	}
+	if isOpenUTCHourBucket(job) {
+		return nil
+	}
 	if tag.RowsAffected() != 1 {
 		return errors.New("projection device lease changed before refresh")
 	}
 	return nil
+}
+
+func isOpenUTCHourBucket(job customprojection.Job) bool {
+	if job.Kind != customprojection.JobBucket {
+		return false
+	}
+	openHour := time.Now().UTC().Truncate(time.Hour)
+	return job.BucketStart.UTC().Equal(openHour)
 }
 
 func (s *Store) applyCustomProjectionCutover(

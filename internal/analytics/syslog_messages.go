@@ -197,7 +197,7 @@ func (c *Client) ListSyslogMessagesBound(
 	return SyslogMessagePage{Items: items, HasMore: hasMore}, nil
 }
 
-// SyslogFindResult is one payload match within a device day, newest-first.
+// SyslogFindResult is one payload match within a device day.
 type SyslogFindResult struct {
 	EventID    uuid.UUID
 	ReceivedAt time.Time
@@ -205,9 +205,23 @@ type SyslogFindResult struct {
 	HasMore    bool
 }
 
+// SyslogFindBound selects find direction. At most one of Before/After; Oldest forces oldest match.
+type SyslogFindBound struct {
+	Before *SyslogMessageCursor // next older than this (DESC)
+	After  *SyslogMessageCursor // next newer than this (ASC)
+	Oldest bool                 // oldest match in range (ASC, no cursor)
+}
+
 func (c *Client) FindSyslogMessage(
 	ctx context.Context, deviceID uuid.UUID, search string,
 	cursor *SyslogMessageCursor, timeRange *TimeRange,
+) (SyslogFindResult, error) {
+	return c.FindSyslogMessageBound(ctx, deviceID, search, SyslogFindBound{Before: cursor}, timeRange)
+}
+
+func (c *Client) FindSyslogMessageBound(
+	ctx context.Context, deviceID uuid.UUID, search string,
+	bound SyslogFindBound, timeRange *TimeRange,
 ) (SyslogFindResult, error) {
 	search = strings.TrimSpace(search)
 	if search == "" {
@@ -215,6 +229,12 @@ func (c *Client) FindSyslogMessage(
 	}
 	if timeRange == nil && !c.admittedAs(ctx, workload.Export) {
 		return SyslogFindResult{}, ErrSearchRequiresRange
+	}
+	if bound.Before != nil && bound.After != nil {
+		return SyslogFindResult{}, errors.New("conflicting syslog find cursors")
+	}
+	if bound.Oldest && (bound.Before != nil || bound.After != nil) {
+		return SyslogFindResult{}, errors.New("conflicting syslog find cursors")
 	}
 	ctx, release, err := c.queryContext(ctx, workload.Interactive)
 	if err != nil {
@@ -230,11 +250,20 @@ func (c *Client) FindSyslogMessage(
 	}
 	query += ` AND positionCaseInsensitiveUTF8(payload,?)>0`
 	args = append(args, search)
-	if cursor != nil {
+	newer := bound.After != nil || bound.Oldest
+	switch {
+	case bound.Before != nil:
 		query += ` AND (received_at<? OR (received_at=? AND event_id<?))`
-		args = append(args, cursor.ReceivedAt, cursor.ReceivedAt, cursor.EventID)
+		args = append(args, bound.Before.ReceivedAt, bound.Before.ReceivedAt, bound.Before.EventID)
+	case bound.After != nil:
+		query += ` AND (received_at>? OR (received_at=? AND event_id>?))`
+		args = append(args, bound.After.ReceivedAt, bound.After.ReceivedAt, bound.After.EventID)
 	}
-	query += ` ORDER BY received_at DESC,event_id DESC LIMIT 2`
+	if newer {
+		query += ` ORDER BY received_at ASC,event_id ASC LIMIT 2`
+	} else {
+		query += ` ORDER BY received_at DESC,event_id DESC LIMIT 2`
+	}
 	rows, err := c.query(ctx, query, args...)
 	if err != nil {
 		return SyslogFindResult{}, err

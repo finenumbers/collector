@@ -50,6 +50,23 @@ func TestFindSyslogMessageRequiresQ(t *testing.T) {
 	}
 }
 
+func TestFindSyslogMessageRejectsConflictingCursors(t *testing.T) {
+	id := uuid.NewString()
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet,
+		"/?date=2026-08-03&q=x&before=2026-08-03T12:00:00Z&before_id="+id+
+			"&after=2026-08-03T11:00:00Z&after_id="+id, nil)
+
+	(&Server{}).findSyslogMessage(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "use only one of before, after, or oldest") {
+		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
+}
+
 func TestCountSyslogFindRequiresQ(t *testing.T) {
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/?date=2026-08-03", nil)

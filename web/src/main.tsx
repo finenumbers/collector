@@ -2,7 +2,7 @@ import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, 
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
-  Check, ChevronDown, ChevronsUpDown, CirclePlus, FileClock,
+  Check, ChevronDown, ChevronUp, ChevronsUpDown, CirclePlus, FileClock,
   LogOut, PhoneCall, Search, Server, Settings, ShieldCheck, X,
 } from 'lucide-react'
 import './styles.css'
@@ -1768,7 +1768,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setHasMore(more)
       setHasNewer(Boolean(newer))
       cursorGenerationRef.current = generation
-      if (tableShellRef.current) tableShellRef.current.scrollTop = 0
       return nextRows.some((row) => (row as EventRow).eventId === hit.eventId)
     } catch (reason) {
       if (findGeneration === syslogFindGenerationRef.current) {
@@ -1805,7 +1804,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     await jumpSyslogToHit(hit, findGeneration)
   }, [jumpSyslogToHit])
   const runSyslogFind = useCallback(async (opts?: {
-    after?: { eventId: string; receivedAt: string }
+    /** Navigate to older match (↓); pass current hit. */
+    olderThan?: { eventId: string; receivedAt: string }
+    /** Navigate to newer match (↑); pass current hit. */
+    newerThan?: { eventId: string; receivedAt: string }
     wrap?: boolean
     fromIndex?: number
     refreshCount?: boolean
@@ -1824,16 +1826,19 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       const params = new URLSearchParams()
       params.set('date', date)
       params.set('q', needle)
-      if (opts?.after) {
-        params.set('before', opts.after.receivedAt)
-        params.set('before_id', opts.after.eventId)
+      if (opts?.olderThan) {
+        params.set('before', opts.olderThan.receivedAt)
+        params.set('before_id', opts.olderThan.eventId)
+      } else if (opts?.newerThan) {
+        params.set('after', opts.newerThan.receivedAt)
+        params.set('after_id', opts.newerThan.eventId)
       }
       let body = await api<SyslogFindResponse>(
         `/devices/${device.id}/syslog-messages/find?${params.toString()}`,
         { timeoutMs: 10000 },
       )
       if (findGeneration !== syslogFindGenerationRef.current) return
-      if (!body.eventId && opts?.wrap && opts.after) {
+      if (!body.eventId && opts?.wrap && opts.olderThan) {
         body = await api<SyslogFindResponse>(
           `/devices/${device.id}/syslog-messages/find?date=${encodeURIComponent(date)}&q=${encodeURIComponent(needle)}`,
           { timeoutMs: 10000 },
@@ -1846,10 +1851,28 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           body.eventId ? 1 : 0,
           findGeneration,
         )
-        if (opts.refreshCount !== false) refreshSyslogFindCount(needle, findGeneration)
         return
       }
-      const nextIndex = opts?.after ? Math.max(1, opts.fromIndex || 0) + 1 : 1
+      if (!body.eventId && opts?.wrap && opts.newerThan) {
+        body = await api<SyslogFindResponse>(
+          `/devices/${device.id}/syslog-messages/find?date=${encodeURIComponent(date)}`
+            + `&q=${encodeURIComponent(needle)}&oldest=1`,
+          { timeoutMs: 10000 },
+        )
+        if (findGeneration !== syslogFindGenerationRef.current) return
+        const lastIndex = Math.max(1, syslogFindTotal || opts.fromIndex || 1)
+        await applySyslogFindHit(
+          body.eventId && body.receivedAt
+            ? { eventId: body.eventId, receivedAt: body.receivedAt }
+            : null,
+          body.eventId ? lastIndex : 0,
+          findGeneration,
+        )
+        return
+      }
+      let nextIndex = 1
+      if (opts?.olderThan) nextIndex = Math.max(1, opts.fromIndex || 0) + 1
+      else if (opts?.newerThan) nextIndex = Math.max(1, (opts.fromIndex || 1) - 1)
       await applySyslogFindHit(
         body.eventId && body.receivedAt
           ? { eventId: body.eventId, receivedAt: body.receivedAt }
@@ -1857,7 +1880,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         body.eventId ? nextIndex : 0,
         findGeneration,
       )
-      if (!opts?.after) {
+      if (!opts?.olderThan && !opts?.newerThan) {
         if (!body.eventId) setSyslogFindTotal(0)
         else if (opts?.refreshCount !== false) refreshSyslogFindCount(needle, findGeneration)
       }
@@ -1865,12 +1888,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       if (findGeneration === syslogFindGenerationRef.current) {
         setSyslogFindHit(null)
         setSyslogFindIndex(0)
-        if (!opts?.after) setSyslogFindTotal(0)
+        if (!opts?.olderThan && !opts?.newerThan) setSyslogFindTotal(0)
       }
     } finally {
       if (findGeneration === syslogFindGenerationRef.current) setSyslogFindBusy(false)
     }
-  }, [applySyslogFindHit, dataset, date, device.id, refreshSyslogFindCount, syslogFind])
+  }, [applySyslogFindHit, dataset, date, device.id, refreshSyslogFindCount, syslogFind, syslogFindTotal])
   useEffect(() => {
     if (dataset !== 'syslog') return
     const needle = syslogFindTrim
@@ -1931,18 +1954,29 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     if (dataset !== 'syslog' || !syslogActiveEventId) return
     const root = tableShellRef.current
     if (!root) return
-    const target = root.querySelector(`[data-event-id="${CSS.escape(syslogActiveEventId)}"]`)
-    if (target instanceof HTMLElement) {
-      target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    }
-  }, [dataset, syslogActiveEventId, syslogViewMode, rows.length])
+    const frame = window.requestAnimationFrame(() => {
+      const target = root.querySelector(`[data-event-id="${CSS.escape(syslogActiveEventId)}"]`)
+      if (target instanceof HTMLElement) {
+        target.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      }
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [dataset, syslogActiveEventId, syslogViewMode, rows.length, syslogFindIndex])
   const goSyslogFindNext = () => {
     if (!syslogFindTrim || syslogFindBusy) return
     if (!syslogFindHit) {
       void runSyslogFind()
       return
     }
-    void runSyslogFind({ after: syslogFindHit, wrap: true, fromIndex: syslogFindIndex, refreshCount: false })
+    void runSyslogFind({
+      olderThan: syslogFindHit, wrap: true, fromIndex: syslogFindIndex, refreshCount: false,
+    })
+  }
+  const goSyslogFindPrev = () => {
+    if (!syslogFindTrim || syslogFindBusy || !syslogFindHit) return
+    void runSyslogFind({
+      newerThan: syslogFindHit, wrap: true, fromIndex: syslogFindIndex, refreshCount: false,
+    })
   }
   const clearSyslogFind = () => {
     syslogFindGenerationRef.current += 1
@@ -2018,7 +2052,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault()
-                goSyslogFindNext()
+                if (event.shiftKey) goSyslogFindPrev()
+                else goSyslogFindNext()
               }
             }} />
           {syslogFindTrim ? <span className="syslog-find-count" aria-live="polite">
@@ -2027,6 +2062,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
                 ? `${syslogFindIndex} / ${syslogFindTotal || '…'}`
                 : '0 / 0'}
           </span> : null}
+          <button type="button" className="syslog-find-prev"
+            disabled={!syslogFindTrim || syslogFindBusy || !syslogFindHit}
+            title="Предыдущее совпадение" aria-label="Предыдущее совпадение"
+            onClick={goSyslogFindPrev}><ChevronUp size={14} /></button>
           <button type="button" className="syslog-find-next"
             disabled={!syslogFindTrim || syslogFindBusy || !syslogFindHit}
             title="Следующее совпадение" aria-label="Следующее совпадение"

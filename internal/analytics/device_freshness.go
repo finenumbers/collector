@@ -61,7 +61,10 @@ func (c *Client) DeviceProjectionFreshness(
 		item.ClassificationGap = item.SyslogLagSeconds <= 300 &&
 			item.AFAuthHeaders6h == 0 && item.XpgkHeaders6h == 0 &&
 			item.AFCallLagSeconds >= 900
-		item.ProjectionSLOMet = item.ProjectionLagSeconds <= 300 && !item.ClassificationGap
+		// CH-only freshness cannot see queue depth; final SLO is computed in
+		// httpapi diagnostics via EvaluateProjectionDeviceHealth.
+		item.ProjectionSLOMet = !item.ClassificationGap &&
+			item.ActivatedLagSeconds <= ProjectionHealthSLOSeconds
 		result[deviceID] = item
 	}
 	return result, nil

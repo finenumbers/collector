@@ -260,6 +260,7 @@ type ProjectionDeviceDiagnostics = {
   failed: number
   backfilling: number
   oldestAge: number
+  oldestBucketAge?: number
   watermarkState: string
   watermarkLagSeconds: number
   lastError?: string
@@ -269,6 +270,8 @@ type ProjectionDeviceDiagnostics = {
   afAuthHeaders6h: number
   xpgkHeaders6h: number
   classificationGap: boolean
+  healthLagSeconds?: number
+  eventTipLagSeconds?: number
   projectionLagSeconds: number
   projectionSloMet: boolean
 }
@@ -278,10 +281,13 @@ type OperationalDiagnostics = {
   projectionQueue: {
     depth: number
     oldestAge: number
+    oldestBucketAge?: number
+    discoverAge?: number
     failed: number
     backfilling: number
     lagSeconds: number
     maxDeviceLagSeconds?: number
+    maxEventTipLagSeconds?: number
     anyDeviceFailed?: boolean
     anyClassificationGap?: boolean
   }
@@ -1810,16 +1816,22 @@ function OperationalDiagnosticsPanel() {
     {error && <div className="diagnostic-facts"><span className="form-error">{error}</span></div>}
     {value && !loading && <div className="diagnostic-facts">
       <span>Custom projection: <strong>{value.customProjectionEnabled ? 'включена' : 'выключена'}</strong></span>
-      <span>Очередь projection · depth / lag: <strong>
-        {formatCount(queue?.depth)} / {formatCount(queue?.lagSeconds ?? derived?.projectionLagSeconds)} с
+      <span>Очередь projection · depth / health lag: <strong>
+        {formatCount(queue?.depth)} / {formatCount(queue?.maxDeviceLagSeconds ?? derived?.maxDeviceProjectionLagSeconds)} с
       </strong></span>
-      <span>Очередь projection · max device lag: <strong>
-        {formatCount(queue?.maxDeviceLagSeconds ?? derived?.maxDeviceProjectionLagSeconds)} с
+      <span>Очередь projection · max event tip lag: <strong>
+        {formatCount(queue?.maxEventTipLagSeconds)} с
+      </strong></span>
+      <span>Очередь projection · global activated lag: <strong>
+        {formatCount(queue?.lagSeconds ?? derived?.projectionLagSeconds)} с
       </strong></span>
       <span>Очередь projection · failed / backfill: <strong>
         {formatCount(queue?.failed)} / {formatCount(queue?.backfilling)}
       </strong></span>
-      <span>Очередь projection · oldest: <strong>{formatDurationNanos(queue?.oldestAge)}</strong></span>
+      <span>Очередь projection · oldest bucket / discover: <strong>
+        {formatDurationNanos(queue?.oldestBucketAge ?? queue?.oldestAge)} /
+        {formatDurationNanos(queue?.discoverAge)}
+      </strong></span>
       <span>SLO projection / coverage: <strong>
         {derived?.projectionSloMet ? 'ok' : 'breach'} / {derived?.coverageSloMet ? 'ok' : 'breach'}
       </strong></span>
@@ -1876,8 +1888,10 @@ function OperationalDiagnosticsPanel() {
       {devices.length > 0 && <div className="diagnostic-device-list">
         <strong>Projection по устройствам</strong>
         {devices.map((device) => <span key={device.deviceId}>
-          {device.name}: lag {formatCount(device.projectionLagSeconds)} с ·
-          AF tip lag {formatCount(device.afCallLagSeconds)} с ·
+          {device.name}: health lag {formatCount(device.healthLagSeconds ?? device.projectionLagSeconds)} с ·
+          depth {formatCount(device.depth)} ·
+          event tip {formatCount(device.eventTipLagSeconds ?? device.afCallLagSeconds)} с ·
+          AF tip {formatCount(device.afCallLagSeconds)} с ·
           activated {formatCount(device.activatedLagSeconds)} с ·
           failed {formatCount(device.failed)} ·
           SLO {device.projectionSloMet ? 'ok' : 'breach'}

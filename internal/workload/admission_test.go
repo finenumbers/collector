@@ -71,6 +71,45 @@ func TestInteractivePriorityAndHeavyLane(t *testing.T) {
 	releases.Wait()
 }
 
+func TestCustomReplayPreferredOverExportHeavyLane(t *testing.T) {
+	manager := New(Options{Capacity: 4})
+	// Hold 1 unit so neither heavy class (weight 4) can start until release.
+	_, blockerRelease, err := manager.Acquire(context.Background(), Ingest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := make(chan Class, 2)
+	var releases sync.WaitGroup
+	releases.Add(2)
+	start := func(class Class) {
+		go func() {
+			_, release, acquireErr := manager.Acquire(context.Background(), class)
+			if acquireErr != nil {
+				t.Error(acquireErr)
+				return
+			}
+			order <- class
+			release()
+			releases.Done()
+		}()
+	}
+	start(Export)
+	start(CustomReplay)
+	deadline := time.Now().Add(time.Second)
+	for (manager.Snapshot()[Export].Waiting == 0 || manager.Snapshot()[CustomReplay].Waiting == 0) &&
+		time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	blockerRelease()
+	if first := <-order; first != CustomReplay {
+		t.Fatalf("first heavy admitted = %q, want custom_replay before export", first)
+	}
+	if second := <-order; second != Export {
+		t.Fatalf("second heavy admitted = %q, want export", second)
+	}
+	releases.Wait()
+}
+
 func TestNestedAdmissionDoesNotDeadlock(t *testing.T) {
 	manager := New(Options{Capacity: 1})
 	ctx, release, err := manager.Acquire(context.Background(), Interactive)

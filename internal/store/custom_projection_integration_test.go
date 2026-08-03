@@ -238,6 +238,116 @@ func TestFailCustomProjectionJobIsOwnershipSafe(t *testing.T) {
 	}
 }
 
+func TestCustomProjectionClaimPrefersBucketOverFrozenTip(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "fair-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	quiet, err := control.CreateDevice(ctx, NewDevice{
+		Name: "quiet-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::6001", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy, err := control.CreateDevice(ctx, NewDevice{
+		Name: "busy-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::6002", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx, `DELETE FROM custom_projection_jobs
+		WHERE device_id IN ($1,$2)`, quiet.ID, busy.ID); err != nil {
+		t.Fatal(err)
+	}
+	openHour := time.Now().UTC().Truncate(time.Hour)
+	// Quiet SMG: only eternal discover + ancient watermark tip.
+	if _, err := control.DB.Exec(ctx, `INSERT INTO custom_projection_jobs
+		(device_id,kind,status,policy_revision,next_attempt_at,created_at)
+		VALUES ($1,'discover','pending',1,now(),now()-interval '56 hours')`, quiet.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO custom_projection_watermarks
+		(device_id,policy_revision,projection_seq,state,watermark_received_at,updated_at)
+		VALUES ($1,1,1,'active',now()-interval '2 hours',now())
+		ON CONFLICT (device_id) DO UPDATE SET
+			watermark_received_at=EXCLUDED.watermark_received_at,state='active',updated_at=now()`,
+		quiet.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Busy SMG: live open-hour bucket with a fresher watermark tip.
+	if err := control.EnqueueCustomProjectionBuckets(
+		ctx, busy.ID, 1, []time.Time{openHour},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO custom_projection_watermarks
+		(device_id,policy_revision,projection_seq,state,watermark_received_at,updated_at)
+		VALUES ($1,1,1,'active',now()-interval '30 seconds',now())
+		ON CONFLICT (device_id) DO UPDATE SET
+			watermark_received_at=EXCLUDED.watermark_received_at,state='active',updated_at=now()`,
+		busy.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := control.ClaimCustomProjectionJob(ctx, "fair-a", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if claimed.DeviceID != busy.ID || claimed.Kind != customprojection.JobBucket {
+		t.Fatalf("claimed=%#v, want busy open-hour bucket over quiet discover tip", claimed)
+	}
+}
+
+func TestCustomProjectionQueueOldestAgeIgnoresDiscover(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "oldest-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "oldest-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::6003", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx, `DELETE FROM custom_projection_jobs WHERE device_id=$1`,
+		device.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO custom_projection_jobs
+		(device_id,kind,status,policy_revision,next_attempt_at,created_at,bucket_start)
+		VALUES
+		($1,'discover','pending',1,now(),now()-interval '56 hours',NULL),
+		($1,'bucket','pending',1,now(),now()-interval '10 minutes',
+			date_trunc('hour', now()-interval '2 hours'))`,
+		device.ID); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := control.CustomProjectionQueueStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.OldestAge < 9*time.Minute || stats.OldestAge > 15*time.Minute {
+		t.Fatalf("oldestAge=%s, want ~10m bucket age", stats.OldestAge)
+	}
+	if stats.DiscoverAge < 55*time.Hour {
+		t.Fatalf("discoverAge=%s, want ~56h", stats.DiscoverAge)
+	}
+}
+
 func TestProjectionCutoverHoldsToggleLock(t *testing.T) {
 	control := isolatedMigrationStore(t)
 	ctx := context.Background()

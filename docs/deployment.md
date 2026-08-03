@@ -177,15 +177,37 @@ admission / **лимиты контейнеров** управляются в **
 `/data/spool/container-limits.env`).
 
 Административная панель «Диагностика» (lazy `GET /api/system/diagnostics`) показывает
-очередь Custom projection (depth/lag/failed/backfill), **per-device** watermark/AF lag,
-classification gap, coverage states и SLO, orphans/ambiguity, очередь reconciliation и
-export queued/running/oldest. Global `lagSeconds` может оставаться зелёным при stall одного
-SMG — операторский критерий: `maxDeviceLagSeconds`, `anyDeviceFailed`,
-`anyClassificationGap`, и SLO по каждому устройству в `projectionDevices`.
+очередь Custom projection (depth / **health lag** / failed / backfill), **per-device**
+health vs event-tip ages, classification gap, coverage states и SLO, orphans/ambiguity,
+очередь reconciliation и export queued/running/oldest.
+
+### Diagnostics: signal vs noise
+
+Читайте per-device метрики **в этом порядке**:
+
+1. `failed` / `lastError` / `depth` — реальная работа или отказ очереди.
+2. `healthLagSeconds` / `projectionLagSeconds` **только если** `depth > 0` (или есть
+   running bucket). Idle quiet SMG с `depth=0` не считается stall.
+3. `syslogLagSeconds` — жив ли ingest.
+4. `classificationGap` + `afAuthHeaders6h` / `xpgkHeaders6h` — диалект/логирование, не очередь.
+5. CDR freshness (`Последний CDR` vs `Последний приём`) — отдельный сигнал FTP/CDR.
+
+| Сигнал | Значение |
+|--------|----------|
+| `healthLagSeconds`, `maxDeviceLagSeconds`, `oldestBucketAge` | health очереди |
+| `failed`, `lastError`, `depth` | health очереди |
+| `eventTipLagSeconds`, `afCallLagSeconds`, `watermarkLagSeconds` | возраст последнего AF-event (на тихом SMG растёт сам) |
+| `discoverAge`, eternal discover `created_at` | не backlog work age |
+| global `lagSeconds` (max activated) | может врать при stall одного SMG |
+
+Операторский критерий SLO: `projectionSloMet` / `maxDeviceLagSeconds` (health),
+`anyDeviceFailed`, `anyClassificationGap`. Тихий SMG без backlog **не** красит флот
+из‑за большого AF tip lag.
+
 Обязательные алерты: container restart, оба local spool depth/size (`ingress.db`,
-`syslog.db`), handoff errors, NATS lag/storage, **per-device** projection lag >5 мин или
-`failed>0`, classification gap, coverage late+missing >1% после grace, CDR ingest age,
-disk >75/85%, ClickHouse insert errors, SFTPGo unavailable, backup age.
+`syslog.db`), handoff errors, NATS lag/storage, **per-device health lag** >5 мин при
+`depth>0` или `failed>0`, classification gap, coverage late+missing >1% после grace,
+CDR ingest age, disk >75/85%, ClickHouse insert errors, SFTPGo unavailable, backup age.
 
 IANA timezone выбирается из выпадающего списка в настройках конкретного SMG и применяется
 к CDR wall clock этого устройства. Сырой Syslog остаётся в `syslog_messages` с
@@ -216,13 +238,16 @@ IANA timezone выбирается из выпадающего списка в �
 
 ### Catch-up: AntiFraud projection stall на одном SMG
 
-Симптом: syslog/CDR свежие, а `custom_antifraud_calls` / coverage отстают на часы на
-одном устройстве; другие SMG в норме. Global lag в diagnostics может врать.
+Симптом: syslog/CDR свежие, а на устройстве `depth>0` / `failed>0` / health lag >5 мин;
+breach **прыгает** между SMG — смотрите health, не event tip. Global activated lag и
+AF tip на тихом SMG (мало звонков) часто **шум**.
 
-1. В «Диагностика» откройте `projectionDevices` для проблемного SMG: `failed`,
-   `lastError`, `watermarkLagSeconds`, `classificationGap`.
+1. В «Диагностика» откройте `projectionDevices`: `failed`, `lastError`, `depth`,
+   `healthLagSeconds`, `classificationGap`. Если `depth≈0`, `failed=0`, syslog свежий,
+   а AF tip огромен — это не stall очереди (тихий tip), MaxEvents не поможет.
 2. Если `lastError` содержит `exceeds … events` / `memory bound`:
-   - временно снизьте нагрузку async export (делит ClickHouse heavy lane);
+   - временно снизьте нагрузку async export (делит ClickHouse heavy lane; admission
+     предпочитает `custom_replay` над `export`);
    - в **Настройки → Параметры** поднимите `projection.maxEvents` (≥50000),
      `projection.maxMemoryBytes` (≥256MiB) и `projection.sleep=1s`
      (env `CUSTOM_PROJECTION_*` — только seed пустой БД);
@@ -235,10 +260,11 @@ IANA timezone выбирается из выпадающего списка в �
 4. Worker при overflow сам режет час на окна 5m (и при необходимости 1m) и
    активирует snapshot один раз на финальном cutover — предыдущий tip остаётся
    видимым во время rebuild, чтобы карточки AF/CDR не ломались на partial
-   snapshot. Перед CH write lease продлевается из `projection.lease`; CDR
-   reconciliation / sibling hours / `NextDeadline` выполняются на cutover.
-   Session expansion идёт через `event_id IN (session index)` (без hash JOIN
-   syslog справа) и ограничена ±48h.
+   snapshot. Пустой hour без AF events всё равно двигает watermark до конца bucket
+   (или `now` для открытого часа), чтобы тихий SMG не замораживал tip forever.
+   Перед CH write lease продлевается из `projection.lease`; CDR reconciliation /
+   sibling hours / `NextDeadline` выполняются на cutover. Session expansion идёт
+   через `event_id IN (session index)` (без hash JOIN syslog справа) и ограничена ±48h.
    Ошибки ClickHouse `memory limit exceeded` / `Query was cancelled`
    автоматически requeue’ятся и не блокируют catch-up навсегда. То же для
    временных сетевых ошибок ClickHouse (`connection refused`, `dial tcp`, …) —
@@ -248,6 +274,15 @@ IANA timezone выбирается из выпадающего списка в �
 5. Если jobs complete, syslog lag мал, но `afAuthHeaders6h=0` и
    `classificationGap=true` — это не очередь: на SMG нет classifiable AF RADIUS
    (логирование AntiFraud / диалект), поднимать MaxEvents бесполезно.
-6. Дождитесь drain: per-device lag ≤5 мин; новые CDR снова получают coverage.
+6. Дождитесь drain: per-device **health** lag ≤5 мин при `depth→0`; новые CDR снова
+   получают coverage.
 7. Toggle `antifraudEnabled` off→on — только после поднятых лимитов, если нужен
    новый discover/backfill.
+
+### Staging canary: quiet + dense SMG
+
+Перед promotion прогоните 30 минут с одним тихим и одним dense SMG:
+
+- тихий: `depth=0` → `projectionSloMet=ok` даже при большом AF tip lag;
+- dense: health lag ≤5 мин после остановки нагрузки; SLO не «прыгает» на тихий;
+- `oldestBucketAge` отражает backlog buckets; `discoverAge` отдельно и не красит oldest.

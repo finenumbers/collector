@@ -438,6 +438,9 @@ func (w *Worker) processBucketWindows(
 		// finalize so the previous complete tip stays visible during rebuild.
 	}
 	merged := materializeWindowResult(packetsByID, callsByID, nextDeadline)
+	watermarkTime, watermarkID = AdvanceEmptyBucketWatermark(
+		watermarkTime, watermarkID, to, time.Now().UTC(),
+	)
 	return w.publishBucket(ctx, cfg, job, from, merged, watermarkTime, watermarkID, affected)
 }
 
@@ -511,14 +514,14 @@ func (w *Worker) finishBucket(
 			// terminal-failing on ClickHouse memory/cancel; deadlines recompute later.
 			sessionEvents = nil
 		}
-			if len(sessionEvents) != 0 {
-				events = mergeEvents(events, sessionEvents)
-				if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
-					return w.processBucketWindows(ctx, cfg, job, from, to, events)
-				}
-				result = customradius.BuildAtCutoff(engineConfig, events, cutoff)
+		if len(sessionEvents) != 0 {
+			events = mergeEvents(events, sessionEvents)
+			if limitErr := eventsExceedLimits(events, cfg); limitErr != nil {
+				return w.processBucketWindows(ctx, cfg, job, from, to, events)
 			}
+			result = customradius.BuildAtCutoff(engineConfig, events, cutoff)
 		}
+	}
 	var watermarkTime time.Time
 	var watermarkID uuid.UUID
 	affected := make(map[time.Time]struct{})
@@ -532,6 +535,9 @@ func (w *Worker) finishBucket(
 	if cutoff.IsZero() {
 		cutoff = watermarkTime
 	}
+	watermarkTime, watermarkID = AdvanceEmptyBucketWatermark(
+		watermarkTime, watermarkID, to, time.Now().UTC(),
+	)
 	return w.publishBucket(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected)
 }
 

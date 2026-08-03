@@ -1,15 +1,16 @@
 package analytics
 
-// ProjectionHealthSLOSeconds is the per-device health lag budget for Custom
-// projection. Tip ages (last AF event / watermark) are not this budget.
+// ProjectionHealthSLOSeconds is the per-device live-tip health budget for Custom
+// projection. Historical bucket catch-up age is not this budget.
 const ProjectionHealthSLOSeconds int64 = 300
 
 // ProjectionDeviceHealthInput is the queue + tip snapshot used to separate
-// projection health from traffic tip age on quiet SMGs.
+// live projection health from traffic tip age and historical catch-up.
 type ProjectionDeviceHealthInput struct {
-	Depth               uint64
+	// BucketDepth is pending/running bucket jobs only. Eternal discover must not
+	// count as backlog, or quiet SMGs never look idle.
+	BucketDepth         uint64
 	Failed              uint64
-	OldestBucketAgeSec  int64
 	ActivatedLagSeconds int64
 	WatermarkLagSeconds int64
 	AFCallLagSeconds    int64
@@ -24,22 +25,24 @@ type ProjectionDeviceHealth struct {
 	ProjectionSLOMet     bool
 }
 
-// EvaluateProjectionDeviceHealth decides SLO from real backlog/failures, not
-// frozen tip clocks on idle quiet devices.
+// EvaluateProjectionDeviceHealth decides SLO from live tip / failures, not
+// frozen tip clocks on discover-only devices and not oldest historical
+// bucket created_at (catch-up age).
 func EvaluateProjectionDeviceHealth(in ProjectionDeviceHealthInput) ProjectionDeviceHealth {
 	tipLag := in.WatermarkLagSeconds
 	if in.AFCallLagSeconds > tipLag {
 		tipLag = in.AFCallLagSeconds
 	}
 	var healthLag int64
-	if in.Depth > 0 {
+	if in.BucketDepth > 0 {
+		// Live tip while real hour work exists: cutover + AF tip freshness.
 		healthLag = in.ActivatedLagSeconds
-		if in.OldestBucketAgeSec > healthLag {
-			healthLag = in.OldestBucketAgeSec
+		if in.AFCallLagSeconds > healthLag {
+			healthLag = in.AFCallLagSeconds
 		}
 	}
 	sloMet := in.Failed == 0 && !in.ClassificationGap &&
-		(in.Depth == 0 || healthLag <= ProjectionHealthSLOSeconds)
+		(in.BucketDepth == 0 || healthLag <= ProjectionHealthSLOSeconds)
 	return ProjectionDeviceHealth{
 		HealthLagSeconds:     healthLag,
 		EventTipLagSeconds:   tipLag,

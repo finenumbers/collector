@@ -107,7 +107,7 @@ func TestProjectionGenerationAndReconciliationLease(t *testing.T) {
 
 }
 
-func TestCustomProjectionClaimPrefersOpenHourThenDiscover(t *testing.T) {
+func TestCustomProjectionClaimPrefersOpenHourThenBacklog(t *testing.T) {
 	control := isolatedMigrationStore(t)
 	ctx := context.Background()
 	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
@@ -152,7 +152,7 @@ func TestCustomProjectionClaimPrefersOpenHourThenDiscover(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Completing may requeue the same generation as pending if arrivals bumped it;
-	// force the open-hour row out of the way so discover can surface next.
+	// force the open-hour row out of the way so backlog can surface next.
 	if _, err := control.DB.Exec(ctx, `UPDATE custom_projection_jobs
 		SET status='completed',lease_expires_at=NULL,worker_id=NULL
 		WHERE device_id=$1 AND kind='bucket' AND bucket_start=$2`,
@@ -161,10 +161,10 @@ func TestCustomProjectionClaimPrefersOpenHourThenDiscover(t *testing.T) {
 	}
 	second, ok, err := control.ClaimCustomProjectionJob(ctx, "order-b", time.Minute)
 	if err != nil || !ok {
-		t.Fatalf("discover claim: ok=%v err=%v", ok, err)
+		t.Fatalf("backlog claim: ok=%v err=%v", ok, err)
 	}
-	if second.Kind != customprojection.JobDiscover {
-		t.Fatalf("second claim kind=%s, want discover before backlog", second.Kind)
+	if second.Kind != customprojection.JobBucket || !second.BucketStart.Equal(backlog) {
+		t.Fatalf("second claim=%#v, want backlog bucket before discover", second)
 	}
 	if err := control.CompleteCustomProjectionJob(ctx, second, customprojection.Snapshot{}); err != nil {
 		t.Fatal(err)
@@ -176,10 +176,10 @@ func TestCustomProjectionClaimPrefersOpenHourThenDiscover(t *testing.T) {
 	}
 	third, ok, err := control.ClaimCustomProjectionJob(ctx, "order-c", time.Minute)
 	if err != nil || !ok {
-		t.Fatalf("backlog claim: ok=%v err=%v", ok, err)
+		t.Fatalf("discover claim: ok=%v err=%v", ok, err)
 	}
-	if third.Kind != customprojection.JobBucket || !third.BucketStart.Equal(backlog) {
-		t.Fatalf("third claim=%#v, want backlog bucket", third)
+	if third.Kind != customprojection.JobDiscover {
+		t.Fatalf("third claim kind=%s, want discover after backlog", third.Kind)
 	}
 }
 

@@ -257,6 +257,7 @@ type ProjectionDeviceDiagnostics = {
   deviceId: string
   name: string
   depth: number
+  bucketDepth?: number
   failed: number
   backfilling: number
   oldestAge: number
@@ -1816,7 +1817,7 @@ function OperationalDiagnosticsPanel() {
     {error && <div className="diagnostic-facts"><span className="form-error">{error}</span></div>}
     {value && !loading && <div className="diagnostic-facts">
       <span>Custom projection: <strong>{value.customProjectionEnabled ? 'включена' : 'выключена'}</strong></span>
-      <span>Очередь projection · depth / health lag: <strong>
+      <span>Очередь projection · depth / live health lag: <strong>
         {formatCount(queue?.depth)} / {formatCount(queue?.maxDeviceLagSeconds ?? derived?.maxDeviceProjectionLagSeconds)} с
       </strong></span>
       <span>Очередь projection · max event tip lag: <strong>
@@ -1828,7 +1829,7 @@ function OperationalDiagnosticsPanel() {
       <span>Очередь projection · failed / backfill: <strong>
         {formatCount(queue?.failed)} / {formatCount(queue?.backfilling)}
       </strong></span>
-      <span>Очередь projection · oldest bucket / discover: <strong>
+      <span>Очередь projection · catch-up oldest bucket / discover: <strong>
         {formatDurationNanos(queue?.oldestBucketAge ?? queue?.oldestAge)} /
         {formatDurationNanos(queue?.discoverAge)}
       </strong></span>
@@ -1888,11 +1889,11 @@ function OperationalDiagnosticsPanel() {
       {devices.length > 0 && <div className="diagnostic-device-list">
         <strong>Projection по устройствам</strong>
         {devices.map((device) => <span key={device.deviceId}>
-          {device.name}: health lag {formatCount(device.healthLagSeconds ?? device.projectionLagSeconds)} с ·
-          depth {formatCount(device.depth)} ·
-          event tip {formatCount(device.eventTipLagSeconds ?? device.afCallLagSeconds)} с ·
+          {device.name}: live health {formatCount(device.healthLagSeconds ?? device.projectionLagSeconds)} с ·
+          buckets {formatCount(device.bucketDepth ?? 0)}/{formatCount(device.depth)} ·
           AF tip {formatCount(device.afCallLagSeconds)} с ·
           activated {formatCount(device.activatedLagSeconds)} с ·
+          catch-up {formatDurationNanos(device.oldestBucketAge ?? device.oldestAge)} ·
           failed {formatCount(device.failed)} ·
           SLO {device.projectionSloMet ? 'ok' : 'breach'}
           {device.classificationGap ? ' · classification gap' : ''}

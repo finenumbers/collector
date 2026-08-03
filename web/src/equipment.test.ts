@@ -124,9 +124,10 @@ describe('equipment templates', () => {
     expect(main).toMatch(/operators:\s*new Set/)
     expect(main).toMatch(/geoip:\s*new Set/)
     expect(main).toMatch(/all:\s*new Set/)
-    // Column-filter surfaces hide toolbar search; syslog find uses day-scoped API q=.
+    // Column-filter surfaces hide toolbar search; syslog find scrolls full day feed.
     expect(main).toContain('dataset === \'syslog\' ? <div className="search syslog-find">')
     expect(main).toContain('Найти за сутки…')
+    expect(main).toContain('/syslog-messages/find?')
     expect(main).toContain('!columnFiltersActive && <div className="search">')
     expect(main).toContain('Поиск по данным…')
     expect(main).toContain('menuRef.current?.contains(target)')

@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
@@ -1480,7 +1480,13 @@ function ExportButton({ deviceID, dataset, query, date, filters }: {
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
   const [syslogFind, setSyslogFind] = useState('')
+  const [syslogFindHit, setSyslogFindHit] = useState<{
+    eventId: string
+    receivedAt: string
+  } | null>(null)
   const [syslogFindIndex, setSyslogFindIndex] = useState(0)
+  const [syslogFindTotal, setSyslogFindTotal] = useState(0)
+  const [syslogFindBusy, setSyslogFindBusy] = useState(false)
   const [columnFilters, setColumnFilters] = useState<SummaryColumnFilters>({})
   const [eltexColumnFilters, setEltexColumnFilters] = useState<EltexColumnFilters>({})
   const [antifraudColumnFilters, setAntifraudColumnFilters] = useState<AntifraudColumnFilters>({})
@@ -1501,12 +1507,17 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     value: DeviceStats | null
   }>({ date: '', value: null })
   const stats = statsResult.date === date ? statsResult.value : null
-  const [cursor, setCursor] = useState<PageCursor | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const tableShellRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const loadingRef = useRef(false)
   const generationRef = useRef(0)
+  const feedRef = useRef<{
+    rows: DataRow[]
+    cursor: PageCursor | null
+    hasMore: boolean
+  }>({ rows: [], cursor: null, hasMore: false })
+  const syslogFindGenerationRef = useRef(0)
   const isSatel = device.templateKey === 'satel-rtu-cdr-v1'
   const cdrVendor = isSatel ? 'satel' as const : 'eltex' as const
   const presetStorageKey = cdrPresetStorageKey(device.id)
@@ -1567,14 +1578,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
         : base
     }
-    // Syslog find filters the selected day via API q= (payload substring).
-    const find = syslogFind.trim()
+    // Full day feed — find uses /syslog-messages/find, not list q=.
     const base = `/devices/${device.id}/syslog-messages?date=${date}&limit=${PAGE_SIZE}`
-      + (find ? `&q=${encodeURIComponent(find)}` : '')
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel, syslogFind])
+  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1593,8 +1602,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     cursorGenerationRef.current = 0
     let active = true
     const timer = window.setTimeout(() => {
+      feedRef.current = { rows: [], cursor: null, hasMore: false }
       setRows([])
-      setCursor(null)
       setHasMore(false)
       setSelectedEvent(null)
       setSelectedCall(null)
@@ -1606,9 +1615,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       api<PageResponse<DataRow>>(pagePath())
         .then(({ items, hasMore: more, nextCursor }) => {
           if (!active || generation !== generationRef.current) return
-          setRows(items || [])
+          const nextRows = items || []
+          feedRef.current = { rows: nextRows, cursor: nextCursor || null, hasMore: more }
+          setRows(nextRows)
           setHasMore(more)
-          setCursor(nextCursor || null)
           cursorGenerationRef.current = generation
         })
         .catch((reason) => {
@@ -1625,51 +1635,189 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       window.clearTimeout(timer)
     }
   }, [pagePath, reload, setBusy])
-  const loadMore = useCallback(() => {
-    if (!cursor || !hasMore || loadingRef.current) return
+  const loadMore = useCallback(async (): Promise<boolean> => {
+    const feed = feedRef.current
+    if (!feed.cursor || !feed.hasMore || loadingRef.current) return false
     // Reject stale cursors left over from a filter/date change before reset fetch finishes.
     const generation = cursorGenerationRef.current
-    if (!generation || generation !== generationRef.current) return
+    if (!generation || generation !== generationRef.current) return false
     setBusy(true)
-    api<PageResponse<DataRow>>(pagePath(cursor))
-      .then(({ items, hasMore: more, nextCursor }) => {
-        if (generation !== generationRef.current) return
-        setRows((current) => [...current, ...(items || [])])
-        setHasMore(more)
-        setCursor(nextCursor || null)
-        cursorGenerationRef.current = generation
-      })
-      .catch((reason) => {
-        if (generation === generationRef.current) {
-          setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
-        }
-      })
-      .finally(() => {
-        if (generation === generationRef.current) setBusy(false)
-      })
-  }, [cursor, hasMore, pagePath, setBusy])
+    try {
+      const { items, hasMore: more, nextCursor } = await api<PageResponse<DataRow>>(
+        pagePath(feed.cursor),
+      )
+      if (generation !== generationRef.current) return false
+      const nextRows = [...feed.rows, ...(items || [])]
+      feedRef.current = { rows: nextRows, cursor: nextCursor || null, hasMore: more }
+      setRows(nextRows)
+      setHasMore(more)
+      cursorGenerationRef.current = generation
+      return Boolean(items?.length)
+    } catch (reason) {
+      if (generation === generationRef.current) {
+        setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
+      }
+      return false
+    } finally {
+      if (generation === generationRef.current) setBusy(false)
+    }
+  }, [pagePath, setBusy])
   useEffect(() => {
     const root = tableShellRef.current
     const target = sentinelRef.current
     if (!root || !target || !hasMore) return
     const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) loadMore()
+      if (entry.isIntersecting) void loadMore()
     }, { root, rootMargin: '240px 0px', threshold: 0 })
     observer.observe(target)
     return () => observer.disconnect()
   }, [hasMore, loadMore])
   const syslogFindTrim = syslogFind.trim()
-  const syslogMatchIds = useMemo(() => {
-    if (dataset !== 'syslog' || !syslogFindTrim) return [] as string[]
-    const needle = syslogFindTrim.toLowerCase()
-    return (rows as EventRow[])
-      .filter((row) => redactDisplayText(row.payload).toLowerCase().includes(needle))
-      .map((row) => row.eventId)
-  }, [dataset, rows, syslogFindTrim])
-  const syslogActiveIndex = syslogMatchIds.length
-    ? Math.min(syslogFindIndex, syslogMatchIds.length - 1)
-    : 0
-  const syslogActiveEventId = syslogMatchIds[syslogActiveIndex] || ''
+  const syslogActiveEventId = syslogFindHit?.eventId || ''
+  type SyslogFindResponse = {
+    eventId?: string | null
+    receivedAt?: string | null
+    total?: number
+    hasMore?: boolean
+  }
+  const ensureSyslogEventVisible = useCallback(async (eventId: string, findGeneration: number) => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (findGeneration !== syslogFindGenerationRef.current) return false
+      if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === eventId)) return true
+      if (!feedRef.current.hasMore) return false
+      const loaded = await loadMore()
+      if (!loaded) {
+        return (feedRef.current.rows as EventRow[]).some((row) => row.eventId === eventId)
+      }
+    }
+    return false
+  }, [loadMore])
+  const applySyslogFindHit = useCallback(async (
+    hit: { eventId: string; receivedAt: string } | null,
+    total: number | undefined,
+    index: number,
+    findGeneration: number,
+  ) => {
+    if (findGeneration !== syslogFindGenerationRef.current) return
+    if (typeof total === 'number' && total >= 0) setSyslogFindTotal(total)
+    if (!hit) {
+      setSyslogFindHit(null)
+      setSyslogFindIndex(0)
+      return
+    }
+    setSyslogFindHit(hit)
+    setSyslogFindIndex(index)
+    await ensureSyslogEventVisible(hit.eventId, findGeneration)
+  }, [ensureSyslogEventVisible])
+  const runSyslogFind = useCallback(async (opts?: {
+    after?: { eventId: string; receivedAt: string }
+    wrap?: boolean
+    fromIndex?: number
+  }) => {
+    if (dataset !== 'syslog') return
+    const needle = syslogFind.trim()
+    if (!needle) {
+      setSyslogFindHit(null)
+      setSyslogFindIndex(0)
+      setSyslogFindTotal(0)
+      return
+    }
+    const findGeneration = ++syslogFindGenerationRef.current
+    setSyslogFindBusy(true)
+    try {
+      const params = new URLSearchParams()
+      params.set('date', date)
+      params.set('q', needle)
+      if (opts?.after) {
+        params.set('before', opts.after.receivedAt)
+        params.set('before_id', opts.after.eventId)
+      }
+      let body = await api<SyslogFindResponse>(
+        `/devices/${device.id}/syslog-messages/find?${params.toString()}`,
+        { timeoutMs: 10000 },
+      )
+      if (findGeneration !== syslogFindGenerationRef.current) return
+      if (!body.eventId && opts?.wrap && opts.after) {
+        body = await api<SyslogFindResponse>(
+          `/devices/${device.id}/syslog-messages/find?date=${encodeURIComponent(date)}&q=${encodeURIComponent(needle)}`,
+          { timeoutMs: 10000 },
+        )
+        if (findGeneration !== syslogFindGenerationRef.current) return
+        await applySyslogFindHit(
+          body.eventId && body.receivedAt
+            ? { eventId: body.eventId, receivedAt: body.receivedAt }
+            : null,
+          body.total,
+          body.eventId ? 1 : 0,
+          findGeneration,
+        )
+        return
+      }
+      const nextIndex = opts?.after ? Math.max(1, opts.fromIndex || 0) + 1 : 1
+      await applySyslogFindHit(
+        body.eventId && body.receivedAt
+          ? { eventId: body.eventId, receivedAt: body.receivedAt }
+          : null,
+        opts?.after ? undefined : body.total,
+        body.eventId ? nextIndex : 0,
+        findGeneration,
+      )
+      if (!opts?.after && !body.eventId) setSyslogFindTotal(body.total || 0)
+    } catch {
+      if (findGeneration === syslogFindGenerationRef.current) {
+        setSyslogFindHit(null)
+        setSyslogFindIndex(0)
+        if (!opts?.after) setSyslogFindTotal(0)
+      }
+    } finally {
+      if (findGeneration === syslogFindGenerationRef.current) setSyslogFindBusy(false)
+    }
+  }, [applySyslogFindHit, dataset, date, device.id, syslogFind])
+  useEffect(() => {
+    if (dataset !== 'syslog') return
+    const needle = syslogFindTrim
+    const day = date
+    const deviceId = device.id
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      if (cancelled) return
+      if (!needle) {
+        setSyslogFindHit(null)
+        setSyslogFindIndex(0)
+        setSyslogFindTotal(0)
+        return
+      }
+      const findGeneration = ++syslogFindGenerationRef.current
+      setSyslogFindBusy(true)
+      api<SyslogFindResponse>(
+        `/devices/${deviceId}/syslog-messages/find?date=${encodeURIComponent(day)}&q=${encodeURIComponent(needle)}`,
+        { timeoutMs: 10000 },
+      ).then(async (body) => {
+        if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+        await applySyslogFindHit(
+          body.eventId && body.receivedAt
+            ? { eventId: body.eventId, receivedAt: body.receivedAt }
+            : null,
+          body.total || 0,
+          body.eventId ? 1 : 0,
+          findGeneration,
+        )
+      }).catch(() => {
+        if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+        setSyslogFindHit(null)
+        setSyslogFindIndex(0)
+        setSyslogFindTotal(0)
+      }).finally(() => {
+        if (!cancelled && findGeneration === syslogFindGenerationRef.current) {
+          setSyslogFindBusy(false)
+        }
+      })
+    }, 300)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [applySyslogFindHit, dataset, date, device.id, syslogFindTrim])
   useEffect(() => {
     if (dataset !== 'syslog' || !syslogActiveEventId) return
     const root = tableShellRef.current
@@ -1680,15 +1828,20 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     }
   }, [dataset, syslogActiveEventId, syslogViewMode, rows.length])
   const goSyslogFindNext = () => {
-    if (syslogMatchIds.length === 0) return
-    setSyslogFindIndex((current) => {
-      const safe = Math.min(current, syslogMatchIds.length - 1)
-      return (safe + 1) % syslogMatchIds.length
-    })
+    if (!syslogFindTrim || syslogFindBusy) return
+    if (!syslogFindHit) {
+      void runSyslogFind()
+      return
+    }
+    void runSyslogFind({ after: syslogFindHit, wrap: true, fromIndex: syslogFindIndex })
   }
   const clearSyslogFind = () => {
+    syslogFindGenerationRef.current += 1
     setSyslogFind('')
+    setSyslogFindHit(null)
     setSyslogFindIndex(0)
+    setSyslogFindTotal(0)
+    setSyslogFindBusy(false)
   }
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
   const revisionNotice = readModelNotice(device)
@@ -1706,7 +1859,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             setColumnFilters({})
             setEltexColumnFilters({})
             setAntifraudColumnFilters({})
+            setSyslogFindHit(null)
             setSyslogFindIndex(0)
+            setSyslogFindTotal(0)
             setDate(event.target.value)
           }
         }} /></label>
@@ -1757,11 +1912,13 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               }
             }} />
           {syslogFindTrim ? <span className="syslog-find-count" aria-live="polite">
-            {syslogMatchIds.length
-              ? `${syslogActiveIndex + 1} / ${syslogMatchIds.length}`
-              : '0 / 0'}
+            {syslogFindBusy && !syslogFindHit ? '…'
+              : syslogFindTotal
+                ? `${syslogFindIndex} / ${syslogFindTotal}`
+                : '0 / 0'}
           </span> : null}
-          <button type="button" className="syslog-find-next" disabled={!syslogMatchIds.length}
+          <button type="button" className="syslog-find-next"
+            disabled={!syslogFindTrim || syslogFindBusy || syslogFindTotal === 0}
             title="Следующее совпадение" aria-label="Следующее совпадение"
             onClick={goSyslogFindNext}><ChevronDown size={14} /></button>
           <button type="button" className="syslog-find-clear" disabled={!syslogFind}
@@ -1782,9 +1939,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               setSyslogViewMode('raw')
             }}>Raw</button>
         </div>}
-        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? syslogFind : query}:${filtersKeyFrom(exportColumnFilters)}`}
+        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? '' : query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
-          query={columnFiltersActive ? '' : dataset === 'syslog' ? syslogFind : query} date={date}
+          query={columnFiltersActive || dataset === 'syslog' ? '' : query} date={date}
           filters={exportColumnFilters} />
       </div>
     </div>

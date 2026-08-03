@@ -127,10 +127,13 @@ describe('equipment templates', () => {
     // Column-filter surfaces hide toolbar search; syslog find jumps within full day feed.
     expect(main).toContain('dataset === \'syslog\' ? <div className="search syslog-find">')
     expect(main).toContain('Найти за сутки…')
+    expect(main).toContain('Скрывать поток')
+    expect(main).toContain('syslogHideStream')
     expect(main).toContain('/syslog-messages/find?')
     expect(main).toContain('jumpSyslogToHit')
     expect(styles).toMatch(/\.search\.syslog-find\s*\{[^}]*width:\s*min\(300px/)
     expect(styles).toMatch(/\.toolbar-actions\s*>\s*\.view-toggle[\s\S]*?flex-shrink:\s*0/)
+    expect(styles).toMatch(/\.syslog-hide-stream\s*\{/)
     expect(styles).toMatch(/\.syslog-find-hit\s*\{[^}]*background:\s*#4ade80/s)
     expect(styles).toMatch(/\.syslog-find-row-active\s*\{[^}]*background:\s*#fef08a/s)
     expect(main).toContain('!columnFiltersActive && <div className="search">')

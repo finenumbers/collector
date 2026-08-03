@@ -44,7 +44,10 @@ type Job struct {
 	CursorEventID  uuid.UUID
 	Generation     uint64
 	CutoffAt       time.Time
-	WorkerID       string
+	// WindowStart is the next 5m cursor inside a closed-hour catch-up rebuild.
+	// Empty means start at BucketStart. Survives yield so warm catch-up drains.
+	WindowStart time.Time
+	WorkerID    string
 	// HoldsDeviceLease is set at claim time. Open UTC-hour buckets are
 	// lease-exempt; must not refresh/delete a sibling closed-hour lease.
 	HoldsDeviceLease bool
@@ -88,7 +91,10 @@ type Queue interface {
 	CutoverCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
 	EnqueueCDRReconciliationBuckets(context.Context, uuid.UUID, uint64, []time.Time) error
 	HasPendingOpenHourProjection(context.Context) (bool, error)
+	HasWaitingOpenHourProjection(context.Context) (bool, error)
 	YieldCustomProjectionJob(context.Context, Job) error
+	// ProgressCustomProjection activates a mid-rebuild tip without completing the job.
+	ProgressCustomProjection(context.Context, Job, Snapshot, func(context.Context) error) error
 }
 
 type Warehouse interface {
@@ -306,6 +312,17 @@ func (w *Worker) process(ctx context.Context, cfg Config, job Job) error {
 func (w *Worker) processBucket(
 	ctx context.Context, cfg Config, job Job, from, to time.Time,
 ) error {
+	// Closed-hour must not begin a heavy hour load while live open-hour still
+	// needs a worker. Do not treat a running open-hour as a hard block or
+	// catch-up never drains under continuous live traffic.
+	if err := w.yieldClosedHourForWaitingOpenTip(ctx, job); err != nil {
+		return err
+	}
+	// Resume mid-hour catch-up via windowed path (prefix rebuild + remaining windows).
+	if job.HoldsDeviceLease && !job.WindowStart.IsZero() &&
+		job.WindowStart.After(from) && job.WindowStart.Before(to) {
+		return w.processBucketWindows(ctx, cfg, job, from, to, nil)
+	}
 	// Prefer a single hour load. On overflow/CH memory pressure do NOT keep a giant
 	// merge — rebuild the hour as independent windows.
 	events, err := w.Warehouse.LoadCustomRadiusEvents(
@@ -337,21 +354,62 @@ func (w *Worker) processBucketWindows(
 	var watermarkID uuid.UUID
 	var nextDeadline *time.Time
 	cutoff := job.CutoffAt.UTC()
+	resumeFrom := from
+	if job.HoldsDeviceLease && !job.WindowStart.IsZero() &&
+		job.WindowStart.After(from) && job.WindowStart.Before(to) {
+		resumeFrom = job.WindowStart.UTC().Truncate(span)
+		if resumeFrom.Before(from) {
+			resumeFrom = from
+		}
+		// Rebuild already-finished prefix once so finalize keeps full-hour state.
+		if resumeFrom.After(from) {
+			if err := w.accumulateBucketWindows(
+				ctx, cfg, job, from, to, from, resumeFrom, span, preloaded, cutoff,
+				packetsByID, callsByID, affected, &watermarkTime, &watermarkID, &nextDeadline, false,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	if err := w.accumulateBucketWindows(
+		ctx, cfg, job, from, to, resumeFrom, to, span, preloaded, cutoff,
+		packetsByID, callsByID, affected, &watermarkTime, &watermarkID, &nextDeadline, true,
+	); err != nil {
+		return err
+	}
+	if err := w.yieldClosedHourForOpenTip(ctx, job); err != nil {
+		return err
+	}
+	merged := materializeWindowResult(packetsByID, callsByID, nextDeadline)
+	watermarkTime, watermarkID = AdvanceEmptyBucketWatermark(
+		watermarkTime, watermarkID, to, time.Now().UTC(),
+	)
+	return w.publishBucket(ctx, cfg, job, from, merged, watermarkTime, watermarkID, affected, true)
+}
+
+func (w *Worker) accumulateBucketWindows(
+	ctx context.Context, cfg Config, job Job, hourFrom, hourTo, from, to time.Time, span time.Duration,
+	preloaded []customradius.RawEvent, cutoff time.Time,
+	packetsByID map[uuid.UUID]customradius.Packet,
+	callsByID map[uuid.UUID]customradius.Call,
+	affected map[time.Time]struct{},
+	watermarkTime *time.Time, watermarkID *uuid.UUID, nextDeadline **time.Time,
+	allowYield bool,
+) error {
+	openHour := !job.HoldsDeviceLease
 	for cursor := from; cursor.Before(to); cursor = cursor.Add(span) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// Keep ownership alive across dense hour→5m rebuilds (lease may be
-		// shorter than wall-clock for the full hour).
 		if err := w.Queue.RefreshCustomProjectionLease(ctx, job, cfg.Lease); err != nil {
-			return err
-		}
-		if err := w.yieldClosedHourForOpenTip(ctx, job); err != nil {
 			return err
 		}
 		end := cursor.Add(span)
 		if end.After(to) {
 			end = to
+		}
+		if end.After(hourTo) {
+			end = hourTo
 		}
 		var events []customradius.RawEvent
 		var err error
@@ -385,8 +443,6 @@ func (w *Worker) processBucketWindows(
 		identities := resultIdentities(preliminary)
 		result := preliminary
 		if len(identities) != 0 {
-			// Keep session expansion inside the local pairing neighborhood for dense
-			// hours; a 7-day scan per 5m window would starve ClickHouse.
 			sessionEvents, loadErr := w.loadEventsSplit(
 				ctx, cursor.Add(-cfg.PairingHorizon), end.Add(cfg.PairingHorizon), span,
 				func(windowStart, windowEnd time.Time) ([]customradius.RawEvent, error) {
@@ -411,25 +467,24 @@ func (w *Worker) processBucketWindows(
 		}
 		for _, event := range events {
 			affected[event.ReceivedAt.UTC().Truncate(time.Hour)] = struct{}{}
-			if event.ReceivedAt.After(watermarkTime) ||
-				(event.ReceivedAt.Equal(watermarkTime) && customradius.LessEventID(watermarkID, event.EventID)) {
-				watermarkTime, watermarkID = event.ReceivedAt, event.EventID
+			if event.ReceivedAt.After(*watermarkTime) ||
+				(event.ReceivedAt.Equal(*watermarkTime) && customradius.LessEventID(*watermarkID, event.EventID)) {
+				*watermarkTime, *watermarkID = event.ReceivedAt, event.EventID
 			}
 		}
 		if windowCutoff.IsZero() {
-			windowCutoff = watermarkTime
+			windowCutoff = *watermarkTime
 		}
 		if result.NextDeadline != nil {
-			if nextDeadline == nil || result.NextDeadline.Before(*nextDeadline) {
+			if *nextDeadline == nil || result.NextDeadline.Before(**nextDeadline) {
 				deadline := *result.NextDeadline
-				nextDeadline = &deadline
+				*nextDeadline = &deadline
 			}
 		}
 		for _, packet := range result.Packets {
-			if packet.FirstSeenAt.Before(from) || !packet.FirstSeenAt.Before(to) {
+			if packet.FirstSeenAt.Before(hourFrom) || !packet.FirstSeenAt.Before(hourTo) {
 				continue
 			}
-			// Own packets by first-seen window so multi-window rebuilds stay disjoint.
 			if packet.FirstSeenAt.Before(cursor) || !packet.FirstSeenAt.Before(end) {
 				continue
 			}
@@ -439,13 +494,8 @@ func (w *Worker) processBucketWindows(
 			if len(call.Packets) == 0 {
 				continue
 			}
-			first := call.Packets[0].FirstSeenAt
-			for _, packet := range call.Packets[1:] {
-				if packet.FirstSeenAt.Before(first) {
-					first = packet.FirstSeenAt
-				}
-			}
-			if first.Before(from) || !first.Before(to) {
+			first := callFirstSeen(call)
+			if first.Before(hourFrom) || !first.Before(hourTo) {
 				continue
 			}
 			if first.Before(cursor) || !first.Before(end) {
@@ -453,21 +503,52 @@ func (w *Worker) processBucketWindows(
 			}
 			callsByID[call.ID] = call
 		}
-		// Dense hours accumulate 5m windows in-process and activate once at
-		// finalize so the previous complete tip stays visible during rebuild.
+		// Persist progress before any yield so warm catch-up advances.
+		job.WindowStart = end
+		// Live open-hour: publish merged-so-far after each window so tip cannot
+		// freeze for a full dense-hour rebuild under CustomReplay contention.
+		if openHour && allowYield {
+			merged := materializeWindowResult(packetsByID, callsByID, *nextDeadline)
+			progressWatermark, progressID := AdvanceEmptyBucketWatermark(
+				*watermarkTime, *watermarkID, end, time.Now().UTC(),
+			)
+			if err := w.publishBucket(
+				ctx, cfg, job, hourFrom, merged, progressWatermark, progressID, affected, false,
+			); err != nil {
+				return err
+			}
+		}
+		if allowYield {
+			if err := w.yieldClosedHourForOpenTip(ctx, job); err != nil {
+				return err
+			}
+		}
 	}
-	if err := w.yieldClosedHourForOpenTip(ctx, job); err != nil {
+	return nil
+}
+
+// yieldClosedHourForWaitingOpenTip soft-releases before a heavy hour load when
+// live open-hour still needs a worker (pending), not merely running elsewhere.
+func (w *Worker) yieldClosedHourForWaitingOpenTip(ctx context.Context, job Job) error {
+	if !job.HoldsDeviceLease || job.Kind != JobBucket {
+		return nil
+	}
+	waiting, err := w.Queue.HasWaitingOpenHourProjection(ctx)
+	if err != nil {
 		return err
 	}
-	merged := materializeWindowResult(packetsByID, callsByID, nextDeadline)
-	watermarkTime, watermarkID = AdvanceEmptyBucketWatermark(
-		watermarkTime, watermarkID, to, time.Now().UTC(),
-	)
-	return w.publishBucket(ctx, cfg, job, from, merged, watermarkTime, watermarkID, affected)
+	if !waiting {
+		return nil
+	}
+	if err := w.Queue.YieldCustomProjectionJob(ctx, job); err != nil {
+		return err
+	}
+	return ErrYieldedForOpenHour
 }
 
 // yieldClosedHourForOpenTip soft-releases a closed-hour catch-up job when any
-// open UTC-hour tip work is pending/running so CustomReplay is not monopolized.
+// open UTC-hour tip work is pending/running so CustomReplay is not monopolized
+// across multi-window rebuilds. Call only after window_start advanced.
 func (w *Worker) yieldClosedHourForOpenTip(ctx context.Context, job Job) error {
 	if !job.HoldsDeviceLease || job.Kind != JobBucket {
 		return nil
@@ -531,6 +612,11 @@ func callFirstSeen(call customradius.Call) time.Time {
 func (w *Worker) finishBucket(
 	ctx context.Context, cfg Config, job Job, from, to time.Time, events []customradius.RawEvent,
 ) error {
+	// After the hour payload is already in memory, still yield if live tip is
+	// waiting for a worker — prefer claiming open-hour over session expand.
+	if err := w.yieldClosedHourForWaitingOpenTip(ctx, job); err != nil {
+		return err
+	}
 	cutoff := job.CutoffAt.UTC()
 	if cutoff.IsZero() {
 		cutoff = latestEventTime(events)
@@ -579,7 +665,7 @@ func (w *Worker) finishBucket(
 	watermarkTime, watermarkID = AdvanceEmptyBucketWatermark(
 		watermarkTime, watermarkID, to, time.Now().UTC(),
 	)
-	return w.publishBucket(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected)
+	return w.publishBucket(ctx, cfg, job, from, result, watermarkTime, watermarkID, affected, true)
 }
 
 func (w *Worker) publishBucket(
@@ -591,14 +677,23 @@ func (w *Worker) publishBucket(
 	watermarkTime time.Time,
 	watermarkID uuid.UUID,
 	affected map[time.Time]struct{},
+	finalize bool,
 ) error {
+	projectionSeq := job.ProjectionSeq
+	if !finalize {
+		seq, err := w.Queue.NextCustomProjectionSeq(ctx)
+		if err != nil {
+			return err
+		}
+		projectionSeq = seq
+	}
 	snapshot := Snapshot{
 		ID: stableSnapshotID(job, resultEventIDs(result)), DeviceID: job.DeviceID, BucketStart: from,
-		PolicyRevision: job.PolicyRevision, ProjectionSeq: job.ProjectionSeq,
+		PolicyRevision: job.PolicyRevision, ProjectionSeq: projectionSeq,
 		WatermarkTime: watermarkTime, WatermarkID: watermarkID,
 		Result: result,
 	}
-	if result.NextDeadline != nil {
+	if finalize && result.NextDeadline != nil {
 		if err := w.Queue.ScheduleCustomProjectionDeadline(ctx, job, *result.NextDeadline); err != nil {
 			return err
 		}
@@ -611,10 +706,12 @@ func (w *Worker) publishBucket(
 			otherBuckets = append(otherBuckets, bucket)
 		}
 	}
-	if err := w.Queue.EnqueueCustomProjectionBuckets(
-		ctx, job.DeviceID, job.PolicyRevision, otherBuckets,
-	); err != nil {
-		return err
+	if finalize {
+		if err := w.Queue.EnqueueCustomProjectionBuckets(
+			ctx, job.DeviceID, job.PolicyRevision, otherBuckets,
+		); err != nil {
+			return err
+		}
 	}
 	// Heartbeat before slow CH write/activate so dense windowed rebuilds cannot
 	// expire the lease mid-snapshot.
@@ -624,7 +721,7 @@ func (w *Worker) publishBucket(
 	// Open-hour tip cutover is small; skip the deploy-wide PG heavy lane so a
 	// large closed-hour activate cannot block live tip publish.
 	releaseHeavy := func() {}
-	if job.HoldsDeviceLease {
+	if job.HoldsDeviceLease && finalize {
 		var err error
 		releaseHeavy, err = w.acquireHeavyLane(ctx)
 		if err != nil {
@@ -648,6 +745,9 @@ func (w *Worker) publishBucket(
 	}
 	activate := func(activateCtx context.Context) error {
 		return w.Warehouse.ActivateCustomProjectionSnapshot(activateCtx, snapshot)
+	}
+	if !finalize {
+		return w.Queue.ProgressCustomProjection(cutoverCtx, job, snapshot, activate)
 	}
 	if err := w.Queue.CutoverCustomProjection(cutoverCtx, job, snapshot, activate); err != nil {
 		return err

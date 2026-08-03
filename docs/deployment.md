@@ -246,9 +246,17 @@ breach **прыгает** между SMG — смотрите health, не event
 AF tip на тихом SMG (мало звонков) часто **шум**. Dense catch-up больше не должен
 блокировать open UTC-hour: live hour lease-exempt при `projection.threads≥2`.
 
+Типичный warm-паттерн: сразу после редеплоя tip догоняет, через часы uptime
+`contentLag` снова растёт на случайном SMG. Это не «MaxEvents» и не повод для
+регулярных редеплоев: смотрите `contentLag` при свежем `afSyslogLag`,
+`openHourStatus` / `openHourAgeSeconds`, и `workloads.custom_replay.waiting`.
+
 1. В «Диагностика» откройте `projectionDevices`: `failed`, `lastError`, `depth`,
-   `healthLagSeconds`, `classificationGap`. Если `depth≈0`, `failed=0`, syslog свежий,
-   а AF tip огромен — это не stall очереди (тихий tip), MaxEvents не поможет.
+   `healthLagSeconds`, `contentLagSeconds`, `openHourStatus`, `classificationGap`.
+   Если `depth≈0`, `failed=0`, syslog свежий, а AF tip огромен — это не stall
+   очереди (тихий tip), MaxEvents не поможет.
+   Если AF syslog свежий, а `contentLag` ≫ 300s при `openHourStatus=pending|running` —
+   live open-hour голодает на CustomReplay (не парсер).
 2. Если `lastError` содержит `exceeds … events` / `memory bound`:
    - временно снизьте нагрузку async export (делит ClickHouse heavy lane; admission
      предпочитает `custom_replay` над `export`);

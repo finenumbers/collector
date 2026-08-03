@@ -49,7 +49,9 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('Export · queued / running / oldest')
     expect(main).toContain('projection/requeue-failed')
     expect(main).toContain('Requeue failed')
-    expect(main).toContain('AF tip lag')
+    expect(main).toContain('max event tip lag')
+    expect(main).toContain('openHourStatus')
+    expect(main).toContain('open-hour')
   })
 
   it('wires CDR ingest banner to the real ingest-files API', () => {

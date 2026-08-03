@@ -75,6 +75,8 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('collector:syslog-view')
     expect(main).toContain('function EventsRawLog')
     expect(main).toContain('syslog-raw-log')
+    expect(main).toContain('syslog-raw-payload')
+    expect(main).not.toContain('syslog-raw-time')
     expect(main).toContain('view-toggle')
     expect(main).toContain('function EventDrawer')
     expect(main).toContain('onSelect={setSelectedEvent}')

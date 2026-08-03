@@ -1754,8 +1754,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             } : undefined}
             onSelect={setSelectedAntifraud} />
           : syslogViewMode === 'raw'
-            ? <EventsRawLog rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
-              onSelect={setSelectedEvent} />
+            ? <EventsRawLog rows={rows as EventRow[]} onSelect={setSelectedEvent} />
             : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
               onSelect={setSelectedEvent} />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
@@ -2930,15 +2929,13 @@ function EventsTable({ rows, timezone, onSelect }: {
       timezone={timezone} onSelect={onSelect} />)}</tbody></table>
 }
 
-function EventsRawLog({ rows, timezone, onSelect }: {
+function EventsRawLog({ rows, onSelect }: {
   rows: EventRow[]
-  timezone: string
   onSelect: (row: EventRow) => void
 }) {
   return <div className="syslog-raw-log" role="list">
     {rows.map((row) => <button type="button" key={row.eventId} className="syslog-raw-line"
       role="listitem" onClick={() => onSelect(row)}>
-      <span className="syslog-raw-time">{formatTime(row.receivedAt, timezone)}</span>
       <span className="syslog-raw-payload">{redactDisplayText(row.payload) || '—'}</span>
     </button>)}
   </div>

@@ -88,9 +88,13 @@ describe('equipment templates', () => {
     // Compact cols shrink-wrap; flex/pair take remaining width without overflowing.
     expect(styles).toMatch(/\.table-fit[\s\S]*?table-layout:\s*auto/)
     expect(styles).not.toMatch(/\.table-fit[\s\S]*?table-layout:\s*fixed/)
-    expect(styles).toMatch(/\.col-flex-pair\s*\{[^}]*width:\s*50%/s)
-    expect(styles).toMatch(/\.col-flex-pair\s*\{[^}]*max-width:\s*0/s)
+    expect(styles).toMatch(/\.col-flex-pair[^{]*\{[^}]*width:\s*50%/s)
+    expect(styles).toMatch(/\.col-flex-3[^{]*\{[^}]*width:\s*33\.333%/s)
+    expect(styles).toMatch(/\.col-flex-4[^{]*\{[^}]*width:\s*25%/s)
+    expect(styles).toMatch(/\.col-flex-pair[^{,]*,[\s\S]*?max-width:\s*0/)
     expect(styles).toMatch(/td\.col-flex\s*\{[^}]*max-width:\s*0/s)
+    expect(main).toContain('satelPresetFlexShare')
+    expect(main).toContain('eltexPresetFlexShare')
     expect(styles).toContain('.outcome-row.pstn-absent')
     expect(styles).toContain('.outcome-row.pstn-ineligible')
     expect(main).toContain('pstn-absent')
@@ -120,9 +124,9 @@ describe('equipment templates', () => {
     expect(main).toMatch(/operators:\s*new Set/)
     expect(main).toMatch(/geoip:\s*new Set/)
     expect(main).toMatch(/all:\s*new Set/)
-    // Column-filter surfaces hide toolbar search; syslog keeps client-side find.
+    // Column-filter surfaces hide toolbar search; syslog find uses day-scoped API q=.
     expect(main).toContain('dataset === \'syslog\' ? <div className="search syslog-find">')
-    expect(main).toContain('Найти в загруженных…')
+    expect(main).toContain('Найти за сутки…')
     expect(main).toContain('!columnFiltersActive && <div className="search">')
     expect(main).toContain('Поиск по данным…')
     expect(main).toContain('menuRef.current?.contains(target)')

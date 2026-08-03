@@ -9,10 +9,11 @@ import {
   SATEL_SUMMARY_KEYS,
   cdrPresetsForVendor,
   defaultCdrPresetId,
+  eltexPresetFlexShare,
   resolvePresetColumns,
   satelPresetFillWidth,
-  satelPresetFlexKey,
   satelPresetFlexPairKeys,
+  satelPresetFlexShare,
 } from './cdrColumns'
 
 describe('CDR column presets', () => {
@@ -90,19 +91,31 @@ describe('CDR column presets', () => {
       .toEqual(ELTEX_SUMMARY_KEYS)
   })
 
-  it('uses fill-width and flex-pair layout helpers for Satel presets', () => {
+  it('uses fill-width and equal-share layout helpers for Satel/Eltex presets', () => {
     expect(satelPresetFillWidth('summary')).toBe(true)
     expect(satelPresetFillWidth('geoip')).toBe(true)
     expect(satelPresetFillWidth('operators')).toBe(true)
     expect(satelPresetFillWidth('all')).toBe(false)
-    expect(satelPresetFlexKey('summary')).toBe('disconnectText')
-    expect(satelPresetFlexKey('geoip')).toBe('')
+    expect(satelPresetFlexShare('summary')).toEqual({
+      keys: ['srcName', 'dstName', 'dpName'],
+      className: 'col-flex-3',
+    })
+    expect(satelPresetFlexShare('geoip')).toEqual({
+      keys: ['remoteSrcAsnOrg', 'remoteDstAsnOrg'],
+      className: 'col-flex-pair',
+    })
+    expect(satelPresetFlexShare('operators')).toEqual({
+      keys: ['billAniOperator', 'billAniRegion', 'billDnisOperator', 'billDnisRegion'],
+      className: 'col-flex-4',
+    })
     expect(satelPresetFlexPairKeys('geoip')).toEqual([
       'remoteSrcAsnOrg', 'remoteDstAsnOrg',
     ])
-    expect(satelPresetFlexPairKeys('operators')).toEqual([
-      'billAniRegion', 'billDnisRegion',
-    ])
+    expect(satelPresetFlexPairKeys('operators')).toEqual([])
+    expect(eltexPresetFlexShare('summary')).toEqual({
+      keys: ['incomingDescription', 'outgoingDescription', 'releaseInfo'],
+      className: 'col-flex-3',
+    })
   })
 
   it('resolves eltex all-columns without rawFields or ingest keys', () => {

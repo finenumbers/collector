@@ -27,7 +27,7 @@ import {
 import { formatAntifraudTranscript } from './antifraudTranscript'
 import {
   CdrColumnDef, cdrPresetStorageKey, cdrPresetsForVendor, defaultCdrPresetId,
-  resolvePresetColumns, satelPresetFillWidth, satelPresetFlexKey, satelPresetFlexPairKeys,
+  eltexPresetFlexShare, resolvePresetColumns, satelPresetFillWidth, satelPresetFlexShare,
 } from './cdrColumns'
 import fineNumbersLogoUrl from './assets/fine-numbers-logo-transparent-v3.png'
 
@@ -1567,12 +1567,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
         : base
     }
-    // Syslog find is client-side only — never filter the API with q=.
+    // Syslog find filters the selected day via API q= (payload substring).
+    const find = syslogFind.trim()
     const base = `/devices/${device.id}/syslog-messages?date=${date}&limit=${PAGE_SIZE}`
+      + (find ? `&q=${encodeURIComponent(find)}` : '')
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel])
+  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel, syslogFind])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1742,7 +1744,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         </label>}
         {dataset === 'syslog' ? <div className="search syslog-find">
           <Search size={14} />
-          <input placeholder="Найти в загруженных…" value={syslogFind}
+          <input placeholder="Найти за сутки…" value={syslogFind}
             aria-label="Найти в Syslog"
             onChange={(event) => {
               setSyslogFind(event.target.value)
@@ -1780,9 +1782,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               setSyslogViewMode('raw')
             }}>Raw</button>
         </div>}
-        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? '' : query}:${filtersKeyFrom(exportColumnFilters)}`}
+        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? syslogFind : query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
-          query={columnFiltersActive || dataset === 'syslog' ? '' : query} date={date}
+          query={columnFiltersActive ? '' : dataset === 'syslog' ? syslogFind : query} date={date}
           filters={exportColumnFilters} />
       </div>
     </div>
@@ -1795,8 +1797,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         ? <SatelCallsTable rows={rows as SatelCdrRow[]}
           columns={resolvePresetColumns('satel', activePresetId)}
           fillWidth={satelPresetFillWidth(activePresetId)}
-          flexKey={satelPresetFlexKey(activePresetId)}
-          flexPairKeys={satelPresetFlexPairKeys(activePresetId)}
+          flexShare={satelPresetFlexShare(activePresetId)}
           columnFilter={satelColumnFiltersActive ? {
             deviceId: device.id,
             date,
@@ -1813,6 +1814,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         : <CallsTable rows={rows as CallRow[]}
           columns={resolvePresetColumns('eltex', activePresetId)}
           fillWidth={activePresetId === 'summary'}
+          flexShare={eltexPresetFlexShare(activePresetId)}
           columnFilter={eltexColumnFiltersActive ? {
             deviceId: device.id,
             date,
@@ -2134,12 +2136,13 @@ function eltexCallCell(row: CallRow, column: CdrColumnDef, timezone: string): Re
   }
 }
 
-function CallsTable({ rows, columns, timezone, onSelect, fillWidth, columnFilter }: {
+function CallsTable({ rows, columns, timezone, onSelect, fillWidth, flexShare, columnFilter }: {
   rows: CallRow[]
   columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: CallRow) => void
   fillWidth?: boolean
+  flexShare?: { keys: string[]; className: string }
   columnFilter?: {
     deviceId: string
     date: string
@@ -2147,7 +2150,9 @@ function CallsTable({ rows, columns, timezone, onSelect, fillWidth, columnFilter
     onChange: (key: EltexFilterKey, value: string) => void
   }
 }) {
-  const flexKey = fillWidth ? 'releaseInfo' : ''
+  const shareKeys = new Set(fillWidth ? flexShare?.keys || [] : [])
+  const shareClass = fillWidth ? flexShare?.className || '' : ''
+  const columnClass = (key: string) => shareKeys.has(key) ? shareClass : undefined
   const peerQuery = columnFilter ? eltexFiltersToQuery(columnFilter.filters) : {}
   return <table className={['eltex-cdr-table', fillWidth ? 'table-fit' : ''].filter(Boolean).join(' ')}>
     <thead><tr>
@@ -2165,10 +2170,11 @@ function CallsTable({ rows, columns, timezone, onSelect, fillWidth, columnFilter
           label={filterDef.header}
           value={columnFilter.filters[filterDef.key] || ''}
           peerFilters={peerQuery}
+          className={columnClass(column.key)}
           onChange={(value) => columnFilter.onChange(filterDef.key, value)} />
       }
       return <th key={column.key} title={column.header}
-        className={column.key === flexKey ? 'col-flex' : undefined}>{column.header}</th>
+        className={columnClass(column.key)}>{column.header}</th>
     })}
   </tr></thead><tbody>{rows.map((row) => <tr key={row.recordId}
     className={`outcome-row outcome-${cdrOutcome(row.releaseCause)}`}
@@ -2177,7 +2183,7 @@ function CallsTable({ rows, columns, timezone, onSelect, fillWidth, columnFilter
       className={[
         column.mono ? 'mono' : '',
         column.align === 'right' ? 'right' : '',
-        column.key === flexKey ? 'col-flex' : '',
+        columnClass(column.key) || '',
       ].filter(Boolean).join(' ') || undefined}>
       {eltexCallCell(row, column, timezone)}
     </td>)}
@@ -2407,6 +2413,7 @@ type SummaryColumnFilterProps = {
   onChange: (value: string) => void
   valuesPath?: string
   formatOptionLabel?: (value: string) => string
+  className?: string
 }
 
 type ColumnValueItem = { value: string; count: number }
@@ -2415,6 +2422,7 @@ function SummaryColumnHeaderFilter({
   deviceId, date, column, label, value, peerFilters, onChange,
   valuesPath = 'calls/column-values',
   formatOptionLabel,
+  className,
 }: SummaryColumnFilterProps) {
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
@@ -2569,7 +2577,9 @@ function SummaryColumnHeaderFilter({
     document.body,
   ) : null
 
-  return <th ref={thRef} className="bill-ani-filter col-filter-cell" title={label}
+  return <th ref={thRef}
+    className={['bill-ani-filter', 'col-filter-cell', className].filter(Boolean).join(' ')}
+    title={label}
     onClick={(event) => event.stopPropagation()}>
     <div className={['col-filter-trigger-wrap', hasSelection ? 'has-value' : ''].filter(Boolean).join(' ')}>
       <button ref={triggerRef} type="button"
@@ -2600,15 +2610,13 @@ function SummaryColumnHeaderFilter({
   </th>
 }
 
-function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey = '', flexPairKeys = [],
-  columnFilter }: {
+function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexShare, columnFilter }: {
   rows: SatelCdrRow[]
   columns: CdrColumnDef[]
   timezone: string
   onSelect: (row: SatelCdrRow) => void
   fillWidth?: boolean
-  flexKey?: string
-  flexPairKeys?: string[]
+  flexShare?: { keys: string[]; className: string }
   columnFilter?: {
     deviceId: string
     date: string
@@ -2617,13 +2625,9 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
     onChange: (key: SatelFilterKey, value: string) => void
   }
 }) {
-  const pairKeys = new Set(fillWidth ? flexPairKeys : [])
-  const growKey = fillWidth ? flexKey : ''
-  const columnClass = (key: string) => {
-    if (pairKeys.has(key)) return 'col-flex-pair'
-    if (key === growKey) return 'col-flex'
-    return undefined
-  }
+  const shareKeys = new Set(fillWidth ? flexShare?.keys || [] : [])
+  const shareClass = fillWidth ? flexShare?.className || '' : ''
+  const columnClass = (key: string) => shareKeys.has(key) ? shareClass : undefined
   const presetKeys = columnFilter
     ? satelFilterKeysForPreset(columnFilter.presetId)
     : null
@@ -2644,6 +2648,7 @@ function SatelCallsTable({ rows, columns, timezone, onSelect, fillWidth, flexKey
           label={filterDef.header}
           value={columnFilter.filters[filterDef.key] || ''}
           peerFilters={peerQuery}
+          className={columnClass(column.key)}
           onChange={(value) => columnFilter.onChange(filterDef.key, value)} />
       }
       return <th key={column.key} title={column.header}

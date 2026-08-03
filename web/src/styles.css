@@ -189,7 +189,11 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .toolbar-actions { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .toolbar-actions > .view-toggle,
 .toolbar-actions > .export-button-wrap,
-.toolbar-actions > .secondary { flex-shrink: 0; }
+.toolbar-actions > .secondary,
+.toolbar-actions > .syslog-hide-stream { flex-shrink: 0; }
+.syslog-hide-stream { display: inline-flex; align-items: center; gap: 5px; margin: 0;
+  color: var(--muted); font-size: 11px; white-space: nowrap; user-select: none; cursor: pointer; }
+.syslog-hide-stream input { margin: 0; }
 .view-toggle { display: inline-flex; align-items: stretch; border: 1px solid var(--line);
   border-radius: var(--control-radius); background: var(--panel-2); overflow: hidden; }
 .view-toggle button { min-height: var(--control-height); padding: 0 10px; border: 0; border-radius: 0;

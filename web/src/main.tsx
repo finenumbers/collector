@@ -682,9 +682,14 @@ type Dataset = ExportNavigationDataset
 type SyslogViewMode = 'table' | 'raw'
 
 const SYSLOG_VIEW_STORAGE_KEY = 'collector:syslog-view'
+const SYSLOG_HIDE_STREAM_STORAGE_KEY = 'collector:syslog-hide-stream'
 
 function readSyslogViewMode(): SyslogViewMode {
   return window.sessionStorage.getItem(SYSLOG_VIEW_STORAGE_KEY) === 'table' ? 'table' : 'raw'
+}
+
+function readSyslogHideStream(): boolean {
+  return window.sessionStorage.getItem(SYSLOG_HIDE_STREAM_STORAGE_KEY) === '1'
 }
 
 /** Case-insensitive find highlight for Syslog find-in-list (not API filter). */
@@ -1528,6 +1533,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const [columnPresetId, setColumnPresetId] = useState(() =>
     window.sessionStorage.getItem(presetStorageKey) || defaultCdrPresetId())
   const [syslogViewMode, setSyslogViewMode] = useState<SyslogViewMode>(readSyslogViewMode)
+  const [syslogHideStream, setSyslogHideStream] = useState(readSyslogHideStream)
   const vendorPresets = cdrPresetsForVendor(cdrVendor)
   const activePresetId = vendorPresets.some((preset) => preset.id === columnPresetId)
     ? columnPresetId
@@ -1582,12 +1588,18 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
         : base
     }
-    // Full day feed — find uses /syslog-messages/find + list jump (from/from_id).
+    // Full day feed by default; hide-stream + find uses list q= (matches only).
+    // Find navigation uses /syslog-messages/find + jump (from/from_id) when stream is shown.
+    const hideFind = dataset === 'syslog' && syslogHideStream ? syslogFind.trim() : ''
     const base = `/devices/${device.id}/syslog-messages?date=${date}&limit=${PAGE_SIZE}`
+      + (hideFind ? `&q=${encodeURIComponent(hideFind)}` : '')
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel])
+  }, [
+    antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel,
+    syslogFind, syslogHideStream,
+  ])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1683,9 +1695,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     const prevTop = shell?.scrollTop || 0
     setBusy(true)
     try {
+      const hideFind = syslogHideStream ? syslogFind.trim() : ''
       const path = `/devices/${device.id}/syslog-messages?date=${encodeURIComponent(date)}`
         + `&limit=${PAGE_SIZE}&after=${encodeURIComponent(top.receivedAt)}`
         + `&after_id=${encodeURIComponent(top.eventId)}`
+        + (hideFind ? `&q=${encodeURIComponent(hideFind)}` : '')
       const { items, hasNewer: moreNewer } = await api<PageResponse<DataRow>>(path)
       if (generation !== generationRef.current) return false
       const prepend = items || []
@@ -1716,7 +1730,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     } finally {
       if (generation === generationRef.current) setBusy(false)
     }
-  }, [dataset, date, device.id, setBusy])
+  }, [dataset, date, device.id, setBusy, syslogFind, syslogHideStream])
   useEffect(() => {
     const root = tableShellRef.current
     const target = sentinelRef.current
@@ -1738,6 +1752,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     return () => observer.disconnect()
   }, [dataset, hasNewer, loadNewer])
   const syslogFindTrim = syslogFind.trim()
+  const syslogHideFind = syslogHideStream && Boolean(syslogFindTrim)
   const syslogActiveEventId = syslogFindHit?.eventId || ''
   type SyslogFindResponse = {
     eventId?: string | null
@@ -1778,6 +1793,45 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       if (findGeneration === syslogFindGenerationRef.current) setBusy(false)
     }
   }, [date, device.id, setBusy])
+  const ensureSyslogHitInFilteredFeed = useCallback(async (
+    hit: { eventId: string; receivedAt: string },
+    findGeneration: number,
+  ) => {
+    const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
+    // Wait for pagePath reload (hide+q) to finish before paginating matches.
+    for (let wait = 0; wait < 40; wait++) {
+      if (findGeneration !== syslogFindGenerationRef.current) return
+      if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) return
+      if (loadingRef.current || !cursorGenerationRef.current) {
+        await sleep(50)
+        continue
+      }
+      break
+    }
+    for (let i = 0; i < 40; i++) {
+      if (findGeneration !== syslogFindGenerationRef.current) return
+      if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) return
+      if (feedRef.current.hasMore) {
+        const advanced = await loadMore()
+        if (!advanced) {
+          await sleep(50)
+          if (loadingRef.current) continue
+          break
+        }
+        continue
+      }
+      if (feedRef.current.hasNewer) {
+        const advanced = await loadNewer()
+        if (!advanced) {
+          await sleep(50)
+          if (loadingRef.current) continue
+          break
+        }
+        continue
+      }
+      break
+    }
+  }, [loadMore, loadNewer])
   const refreshSyslogFindCount = useCallback((needle: string, findGeneration: number) => {
     api<{ total?: number }>(
       `/devices/${device.id}/syslog-messages/find-count?date=${encodeURIComponent(date)}`
@@ -1801,8 +1855,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     }
     setSyslogFindHit(hit)
     setSyslogFindIndex(index)
+    if (syslogHideFind) {
+      await ensureSyslogHitInFilteredFeed(hit, findGeneration)
+      return
+    }
     await jumpSyslogToHit(hit, findGeneration)
-  }, [jumpSyslogToHit])
+  }, [ensureSyslogHitInFilteredFeed, jumpSyslogToHit, syslogHideFind])
   const runSyslogFind = useCallback(async (opts?: {
     /** Navigate to older match (↓); pass current hit. */
     olderThan?: { eventId: string; receivedAt: string }
@@ -1949,7 +2007,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [applySyslogFindHit, dataset, date, device.id, syslogFindTrim])
+  }, [applySyslogFindHit, dataset, date, device.id, syslogFindTrim, syslogHideStream])
   useEffect(() => {
     if (dataset !== 'syslog' || !syslogActiveEventId) return
     const root = tableShellRef.current
@@ -2076,6 +2134,15 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         </div> : !columnFiltersActive && <div className="search"><Search size={14} />
           <input placeholder="Поиск по данным…" value={query}
             onChange={(event) => setQuery(event.target.value)} /></div>}
+        {dataset === 'syslog' && <label className="syslog-hide-stream">
+          <input type="checkbox" checked={syslogHideStream}
+            onChange={(event) => {
+              const next = event.target.checked
+              window.sessionStorage.setItem(SYSLOG_HIDE_STREAM_STORAGE_KEY, next ? '1' : '0')
+              setSyslogHideStream(next)
+            }} />
+          Скрывать поток
+        </label>}
         {dataset === 'syslog' && <div className="view-toggle" role="group" aria-label="Вид Syslog">
           <button type="button" className={syslogViewMode === 'table' ? 'active' : ''}
             onClick={() => {
@@ -2088,9 +2155,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               setSyslogViewMode('raw')
             }}>Raw</button>
         </div>}
-        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? '' : query}:${filtersKeyFrom(exportColumnFilters)}`}
+        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? (syslogHideStream ? syslogFind : '') : query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
-          query={columnFiltersActive || dataset === 'syslog' ? '' : query} date={date}
+          query={columnFiltersActive ? ''
+            : dataset === 'syslog' ? (syslogHideStream ? syslogFind : '')
+              : query}
+          date={date}
           filters={exportColumnFilters} />
       </div>
     </div>

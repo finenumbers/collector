@@ -211,14 +211,15 @@ func (s *Store) ClaimCustomProjectionJob(
 					WHEN kind='bucket'
 						AND bucket_start=date_trunc('hour', timezone('UTC', now()))
 					THEN 0
-					WHEN kind='discover' THEN 1
-					WHEN kind='bucket' THEN 2
+					WHEN kind='bucket' THEN 1
+					WHEN kind='discover' THEN 2
 					ELSE 3
 				END,
+				COALESCE(bucket_start, 'infinity'::timestamptz) ASC,
 				updated_at,created_at
 		), picked AS (
-			-- Prefer real bucket backlog / live hour over frozen event-tip watermarks
-			-- so quiet SMGs cannot monopolize claims (whack-a-mole across devices).
+			-- Prefer live hour and real bucket backlog over eternal discover and
+			-- frozen event-tip watermarks (whack-a-mole across quiet SMGs).
 			SELECT job.id FROM custom_projection_jobs job
 			JOIN eligible USING (id)
 			ORDER BY
@@ -637,6 +638,7 @@ type CustomProjectionDeviceStats struct {
 	DeviceID            uuid.UUID     `json:"deviceId"`
 	Name                string        `json:"name"`
 	Depth               uint64        `json:"depth"`
+	BucketDepth         uint64        `json:"bucketDepth"`
 	Failed              uint64        `json:"failed"`
 	Backfilling         uint64        `json:"backfilling"`
 	OldestAge           time.Duration `json:"oldestAge"`
@@ -676,6 +678,7 @@ func (s *Store) CustomProjectionDeviceStats(
 ) ([]CustomProjectionDeviceStats, error) {
 	rows, err := s.DB.Query(ctx, `SELECT device.id,device.name,
 		count(job.id) FILTER (WHERE job.status IN ('pending','running')),
+		count(job.id) FILTER (WHERE job.status IN ('pending','running') AND job.kind='bucket'),
 		count(job.id) FILTER (WHERE job.status='failed'),
 		count(job.id) FILTER (WHERE job.kind='discover' AND job.status IN ('pending','running')),
 		COALESCE(EXTRACT(epoch FROM now()-min(job.created_at)
@@ -705,8 +708,9 @@ func (s *Store) CustomProjectionDeviceStats(
 		var item CustomProjectionDeviceStats
 		var oldestBucketSeconds float64
 		if err := rows.Scan(
-			&item.DeviceID, &item.Name, &item.Depth, &item.Failed, &item.Backfilling,
-			&oldestBucketSeconds, &item.WatermarkState, &item.WatermarkLagSeconds, &item.LastError,
+			&item.DeviceID, &item.Name, &item.Depth, &item.BucketDepth, &item.Failed,
+			&item.Backfilling, &oldestBucketSeconds, &item.WatermarkState,
+			&item.WatermarkLagSeconds, &item.LastError,
 		); err != nil {
 			return nil, err
 		}

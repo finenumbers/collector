@@ -98,9 +98,8 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 	for _, item := range deviceStats {
 		tip := freshness[item.DeviceID]
 		health := analytics.EvaluateProjectionDeviceHealth(analytics.ProjectionDeviceHealthInput{
-			Depth:               item.Depth,
+			BucketDepth:         item.BucketDepth,
 			Failed:              item.Failed,
-			OldestBucketAgeSec:  int64(item.OldestBucketAge / time.Second),
 			ActivatedLagSeconds: tip.ActivatedLagSeconds,
 			WatermarkLagSeconds: item.WatermarkLagSeconds,
 			AFCallLagSeconds:    tip.AFCallLagSeconds,
@@ -125,6 +124,7 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 			"deviceId":             item.DeviceID,
 			"name":                 item.Name,
 			"depth":                item.Depth,
+			"bucketDepth":          item.BucketDepth,
 			"failed":               item.Failed,
 			"backfilling":          item.Backfilling,
 			"oldestAge":            item.OldestAge,

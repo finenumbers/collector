@@ -185,24 +185,25 @@ health vs event-tip ages, classification gap, coverage states и SLO, orphans/am
 
 Читайте per-device метрики **в этом порядке**:
 
-1. `failed` / `lastError` / `depth` — реальная работа или отказ очереди.
-2. `healthLagSeconds` / `projectionLagSeconds` **только если** `depth > 0` (или есть
-   running bucket). Idle quiet SMG с `depth=0` не считается stall.
+1. `failed` / `lastError` / `bucketDepth` — реальные hour jobs или отказ.
+2. `healthLagSeconds` (**live** = `max(activated, AF tip)` только при `bucketDepth>0`).
+   Eternal discover не считается backlog; idle/discover-only не stall.
 3. `syslogLagSeconds` — жив ли ingest.
 4. `classificationGap` + `afAuthHeaders6h` / `xpgkHeaders6h` — диалект/логирование, не очередь.
 5. CDR freshness (`Последний CDR` vs `Последний приём`) — отдельный сигнал FTP/CDR.
 
 | Сигнал | Значение |
 |--------|----------|
-| `healthLagSeconds`, `maxDeviceLagSeconds`, `oldestBucketAge` | health очереди |
-| `failed`, `lastError`, `depth` | health очереди |
-| `eventTipLagSeconds`, `afCallLagSeconds`, `watermarkLagSeconds` | возраст последнего AF-event (на тихом SMG растёт сам) |
-| `discoverAge`, eternal discover `created_at` | не backlog work age |
+| `healthLagSeconds`, `maxDeviceLagSeconds` при `bucketDepth>0` | live tip health |
+| `failed`, `lastError`, `bucketDepth` | health очереди |
+| `oldestBucketAge` | catch-up (возраст старого hour job), **не** SLO tip |
+| `eventTipLagSeconds`, `afCallLagSeconds`, `watermarkLagSeconds` | tip ages (на тихом SMG растут сами) |
+| `discoverAge`, eternal discover | не backlog work age |
 | global `lagSeconds` (max activated) | может врать при stall одного SMG |
 
-Операторский критерий SLO: `projectionSloMet` / `maxDeviceLagSeconds` (health),
-`anyDeviceFailed`, `anyClassificationGap`. Тихий SMG без backlog **не** красит флот
-из‑за большого AF tip lag.
+Операторский критерий SLO: `projectionSloMet` / live `maxDeviceLagSeconds`,
+`anyDeviceFailed`, `anyClassificationGap`. Catch-up `oldestBucketAge=25ч` при свежем
+AF tip **не** должен один красить флот.
 
 Обязательные алерты: container restart, оба local spool depth/size (`ingress.db`,
 `syslog.db`), handoff errors, NATS lag/storage, **per-device health lag** >5 мин при

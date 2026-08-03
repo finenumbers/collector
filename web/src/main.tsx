@@ -1,8 +1,8 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import {
-  Check, ChevronsUpDown, CirclePlus, FileClock,
+  Check, ChevronDown, ChevronsUpDown, CirclePlus, FileClock,
   LogOut, PhoneCall, Search, Server, Settings, ShieldCheck, X,
 } from 'lucide-react'
 import './styles.css'
@@ -684,6 +684,31 @@ const SYSLOG_VIEW_STORAGE_KEY = 'collector:syslog-view'
 
 function readSyslogViewMode(): SyslogViewMode {
   return window.sessionStorage.getItem(SYSLOG_VIEW_STORAGE_KEY) === 'table' ? 'table' : 'raw'
+}
+
+/** Case-insensitive find highlight for Syslog find-in-list (not API filter). */
+function highlightFind(text: string, find: string, active: boolean): ReactNode {
+  const source = text || '—'
+  const needle = find.trim()
+  if (!needle) return source
+  const lower = source.toLowerCase()
+  const needleLower = needle.toLowerCase()
+  const parts: ReactNode[] = []
+  let start = 0
+  let key = 0
+  while (start < source.length) {
+    const index = lower.indexOf(needleLower, start)
+    if (index < 0) {
+      parts.push(source.slice(start))
+      break
+    }
+    if (index > start) parts.push(source.slice(start, index))
+    parts.push(<mark key={key++}
+      className={active ? 'syslog-find-hit syslog-find-hit-active' : 'syslog-find-hit'}>
+      {source.slice(index, index + needle.length)}</mark>)
+    start = index + needle.length
+  }
+  return parts.length ? <>{parts}</> : source
 }
 
 let csrfToken = ''
@@ -1454,6 +1479,8 @@ function ExportButton({ deviceID, dataset, query, date, filters }: {
 
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
+  const [syslogFind, setSyslogFind] = useState('')
+  const [syslogFindIndex, setSyslogFindIndex] = useState(0)
   const [columnFilters, setColumnFilters] = useState<SummaryColumnFilters>({})
   const [eltexColumnFilters, setEltexColumnFilters] = useState<EltexColumnFilters>({})
   const [antifraudColumnFilters, setAntifraudColumnFilters] = useState<AntifraudColumnFilters>({})
@@ -1540,11 +1567,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
         : base
     }
-    const base = `/devices/${device.id}/syslog-messages?q=${encodeURIComponent(query)}&date=${date}&limit=${PAGE_SIZE}`
+    // Syslog find is client-side only — never filter the API with q=.
+    const base = `/devices/${device.id}/syslog-messages?date=${date}&limit=${PAGE_SIZE}`
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
-  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel, query])
+  }, [antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
     setLoading(value)
@@ -1628,6 +1656,38 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     observer.observe(target)
     return () => observer.disconnect()
   }, [hasMore, loadMore])
+  const syslogFindTrim = syslogFind.trim()
+  const syslogMatchIds = useMemo(() => {
+    if (dataset !== 'syslog' || !syslogFindTrim) return [] as string[]
+    const needle = syslogFindTrim.toLowerCase()
+    return (rows as EventRow[])
+      .filter((row) => redactDisplayText(row.payload).toLowerCase().includes(needle))
+      .map((row) => row.eventId)
+  }, [dataset, rows, syslogFindTrim])
+  const syslogActiveIndex = syslogMatchIds.length
+    ? Math.min(syslogFindIndex, syslogMatchIds.length - 1)
+    : 0
+  const syslogActiveEventId = syslogMatchIds[syslogActiveIndex] || ''
+  useEffect(() => {
+    if (dataset !== 'syslog' || !syslogActiveEventId) return
+    const root = tableShellRef.current
+    if (!root) return
+    const target = root.querySelector(`[data-event-id="${CSS.escape(syslogActiveEventId)}"]`)
+    if (target instanceof HTMLElement) {
+      target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  }, [dataset, syslogActiveEventId, syslogViewMode, rows.length])
+  const goSyslogFindNext = () => {
+    if (syslogMatchIds.length === 0) return
+    setSyslogFindIndex((current) => {
+      const safe = Math.min(current, syslogMatchIds.length - 1)
+      return (safe + 1) % syslogMatchIds.length
+    })
+  }
+  const clearSyslogFind = () => {
+    setSyslogFind('')
+    setSyslogFindIndex(0)
+  }
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
   const revisionNotice = readModelNotice(device)
   return <section className="data-view">
@@ -1644,6 +1704,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             setColumnFilters({})
             setEltexColumnFilters({})
             setAntifraudColumnFilters({})
+            setSyslogFindIndex(0)
             setDate(event.target.value)
           }
         }} /></label>
@@ -1679,7 +1740,32 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               <option key={preset.id} value={preset.id}>{preset.label}</option>)}
           </select>
         </label>}
-        {!columnFiltersActive && <div className="search"><Search size={14} />
+        {dataset === 'syslog' ? <div className="search syslog-find">
+          <Search size={14} />
+          <input placeholder="Найти в загруженных…" value={syslogFind}
+            aria-label="Найти в Syslog"
+            onChange={(event) => {
+              setSyslogFind(event.target.value)
+              setSyslogFindIndex(0)
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                goSyslogFindNext()
+              }
+            }} />
+          {syslogFindTrim ? <span className="syslog-find-count" aria-live="polite">
+            {syslogMatchIds.length
+              ? `${syslogActiveIndex + 1} / ${syslogMatchIds.length}`
+              : '0 / 0'}
+          </span> : null}
+          <button type="button" className="syslog-find-next" disabled={!syslogMatchIds.length}
+            title="Следующее совпадение" aria-label="Следующее совпадение"
+            onClick={goSyslogFindNext}><ChevronDown size={14} /></button>
+          <button type="button" className="syslog-find-clear" disabled={!syslogFind}
+            title="Сбросить поиск" aria-label="Сбросить поиск"
+            onClick={clearSyslogFind}><X size={14} /></button>
+        </div> : !columnFiltersActive && <div className="search"><Search size={14} />
           <input placeholder="Поиск по данным…" value={query}
             onChange={(event) => setQuery(event.target.value)} /></div>}
         {dataset === 'syslog' && <div className="view-toggle" role="group" aria-label="Вид Syslog">
@@ -1694,9 +1780,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               setSyslogViewMode('raw')
             }}>Raw</button>
         </div>}
-        <ExportButton key={`${dataset}:${date}:${query}:${filtersKeyFrom(exportColumnFilters)}`}
+        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? '' : query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
-          query={columnFiltersActive ? '' : query} date={date}
+          query={columnFiltersActive || dataset === 'syslog' ? '' : query} date={date}
           filters={exportColumnFilters} />
       </div>
     </div>
@@ -1754,8 +1840,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             } : undefined}
             onSelect={setSelectedAntifraud} />
           : syslogViewMode === 'raw'
-            ? <EventsRawLog rows={rows as EventRow[]} onSelect={setSelectedEvent} />
+            ? <EventsRawLog rows={rows as EventRow[]} find={syslogFindTrim}
+              activeEventId={syslogActiveEventId} onSelect={setSelectedEvent} />
             : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
+              find={syslogFindTrim} activeEventId={syslogActiveEventId}
               onSelect={setSelectedEvent} />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>
@@ -2917,41 +3005,55 @@ function AntiFraudCallBody({ value, cdr }: { value: AntifraudCallDetail; cdr?: C
   </section>
 }
 
-function EventsTable({ rows, timezone, onSelect }: {
+function EventsTable({ rows, timezone, find, activeEventId, onSelect }: {
   rows: EventRow[]
   timezone: string
+  find?: string
+  activeEventId?: string
   onSelect: (row: EventRow) => void
 }) {
   return <table className="syslog-table"><thead><tr>
     <th>Получено</th><th>Источник</th><th>Transport</th>
     <th className="col-flex">Payload</th><th>SHA-256</th></tr></thead>
     <tbody>{rows.map((row) => <EventTableRow key={row.eventId} row={row}
-      timezone={timezone} onSelect={onSelect} />)}</tbody></table>
+      timezone={timezone} find={find} active={row.eventId === activeEventId}
+      onSelect={onSelect} />)}</tbody></table>
 }
 
-function EventsRawLog({ rows, onSelect }: {
+function EventsRawLog({ rows, find, activeEventId, onSelect }: {
   rows: EventRow[]
+  find?: string
+  activeEventId?: string
   onSelect: (row: EventRow) => void
 }) {
   return <div className="syslog-raw-log" role="list">
-    {rows.map((row) => <button type="button" key={row.eventId} className="syslog-raw-line"
-      role="listitem" onClick={() => onSelect(row)}>
-      <span className="syslog-raw-payload">{redactDisplayText(row.payload) || '—'}</span>
-    </button>)}
+    {rows.map((row) => {
+      const active = row.eventId === activeEventId
+      return <button type="button" key={row.eventId} className={
+        active ? 'syslog-raw-line syslog-find-row-active' : 'syslog-raw-line'}
+        data-event-id={row.eventId} role="listitem" onClick={() => onSelect(row)}>
+        <span className="syslog-raw-payload">
+          {highlightFind(redactDisplayText(row.payload), find || '', active)}</span>
+      </button>
+    })}
   </div>
 }
 
-function EventTableRow({ row, timezone, onSelect }: {
+function EventTableRow({ row, timezone, find, active, onSelect }: {
   row: EventRow
   timezone: string
+  find?: string
+  active?: boolean
   onSelect: (row: EventRow) => void
 }) {
-  return <tr onClick={() => onSelect(row)}>
+  return <tr data-event-id={row.eventId}
+    className={active ? 'syslog-find-row-active' : undefined}
+    onClick={() => onSelect(row)}>
     <td className="mono">{formatTime(row.receivedAt, timezone)}</td>
     <td className="mono">{row.sourceIp}:{row.sourcePort}</td>
     <td><span className="tag">{row.transport}</span></td>
     <td className="message-cell col-flex">
-      {redactDisplayText(row.payload) || '—'}</td>
+      {highlightFind(redactDisplayText(row.payload), find || '', Boolean(active))}</td>
     <td className="mono">{row.payloadSha256}</td>
   </tr>
 }

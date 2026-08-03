@@ -1941,7 +1941,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     setSyslogFindIndexState, syslogHideFind,
   ])
   const applySyslogFindHitRef = useRef(applySyslogFindHit)
-  applySyslogFindHitRef.current = applySyslogFindHit
+  useEffect(() => {
+    applySyslogFindHitRef.current = applySyslogFindHit
+  }, [applySyslogFindHit])
   const runSyslogFind = useCallback(async (opts?: {
     /** Navigate to older match (↓); pass current hit. */
     olderThan?: { eventId: string; receivedAt: string }
@@ -2045,7 +2047,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   useEffect(() => {
     if (dataset !== 'syslog') {
       syslogFindGenerationRef.current += 1
-      setSyslogFindBusyState(false)
       return
     }
     const needle = syslogFindTrim
@@ -2053,15 +2054,21 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     const deviceId = device.id
     syslogFindNeedleRef.current = needle
     const findGeneration = ++syslogFindGenerationRef.current
-    setSyslogFindHitState(null)
-    setSyslogFindIndexState(0)
-    setSyslogFindTotalState(0)
-    if (!needle) {
-      setSyslogFindBusyState(false)
-      return
-    }
-    setSyslogFindBusyState(true)
     let cancelled = false
+    // Defer session reset so we do not sync-setState inside the effect body.
+    const resetTimer = window.setTimeout(() => {
+      if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+      setSyslogFindHitState(null)
+      setSyslogFindIndexState(0)
+      setSyslogFindTotalState(0)
+      setSyslogFindBusyState(Boolean(needle))
+    }, 0)
+    if (!needle) {
+      return () => {
+        cancelled = true
+        window.clearTimeout(resetTimer)
+      }
+    }
     const timer = window.setTimeout(() => {
       if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
       api<SyslogFindResponse>(
@@ -2102,6 +2109,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     }, 300)
     return () => {
       cancelled = true
+      window.clearTimeout(resetTimer)
       window.clearTimeout(timer)
     }
   }, [
@@ -2198,7 +2206,18 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           <Search size={14} />
           <input placeholder="Найти за сутки…" value={syslogFind}
             aria-label="Найти в Syslog"
-            onChange={(event) => setSyslogFind(event.target.value)}
+            onChange={(event) => {
+              const next = event.target.value
+              const trim = next.trim()
+              // Invalidate immediately so ↑↓/Enter cannot mix a new needle with a stale hit.
+              syslogFindGenerationRef.current += 1
+              syslogFindNeedleRef.current = trim
+              setSyslogFind(next)
+              setSyslogFindHitState(null)
+              setSyslogFindIndexState(0)
+              setSyslogFindTotalState(0)
+              setSyslogFindBusyState(Boolean(trim))
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault()

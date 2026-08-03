@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -420,8 +421,129 @@ func TestRefreshLeaseOpenHourWithoutDeviceLease(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
+	if job.HoldsDeviceLease {
+		t.Fatal("open-hour claim must set HoldsDeviceLease=false")
+	}
 	if err := control.RefreshCustomProjectionLease(ctx, job, time.Minute); err != nil {
 		t.Fatalf("open-hour refresh without device lease: %v", err)
+	}
+}
+
+func TestOpenHourCompleteDoesNotDropClosedDeviceLease(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "open-complete-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "open-complete-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::7005", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx,
+		`DELETE FROM custom_projection_jobs WHERE device_id=$1`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	openHour := time.Now().UTC().Truncate(time.Hour)
+	closed := openHour.Add(-5 * time.Hour)
+	if err := control.EnqueueCustomProjectionBuckets(
+		ctx, device.ID, 1, []time.Time{closed, openHour},
+	); err != nil {
+		t.Fatal(err)
+	}
+	openJob, ok, err := control.ClaimCustomProjectionJob(ctx, "live-complete", time.Minute)
+	if err != nil || !ok || openJob.HoldsDeviceLease || !openJob.BucketStart.Equal(openHour) {
+		t.Fatalf("open claim=%#v ok=%v err=%v", openJob, ok, err)
+	}
+	closedJob, ok, err := control.ClaimCustomProjectionJob(ctx, "catchup-complete", time.Minute)
+	if err != nil || !ok || !closedJob.HoldsDeviceLease {
+		t.Fatalf("closed claim=%#v ok=%v err=%v", closedJob, ok, err)
+	}
+	if err := control.CompleteCustomProjectionJob(ctx, openJob, customprojection.Snapshot{}); err != nil {
+		t.Fatalf("open-hour complete: %v", err)
+	}
+	var leaseOwner string
+	if err := control.DB.QueryRow(ctx, `SELECT worker_id FROM custom_projection_device_leases
+		WHERE device_id=$1`, device.ID).Scan(&leaseOwner); err != nil {
+		t.Fatal(err)
+	}
+	if leaseOwner != "catchup-complete" {
+		t.Fatalf("closed device lease dropped by open-hour complete: owner=%q", leaseOwner)
+	}
+	if err := control.FailCustomProjectionJob(
+		ctx, openJob, errors.New("should already be completed"), time.Minute,
+	); err != nil {
+		t.Fatalf("fail after complete should be no-op: %v", err)
+	}
+	if err := control.DB.QueryRow(ctx, `SELECT worker_id FROM custom_projection_device_leases
+		WHERE device_id=$1`, device.ID).Scan(&leaseOwner); err != nil {
+		t.Fatal(err)
+	}
+	if leaseOwner != "catchup-complete" {
+		t.Fatalf("closed device lease dropped by open-hour fail: owner=%q", leaseOwner)
+	}
+}
+
+func TestRefreshLeaseUsesClaimTimeFlagAfterHourRollover(t *testing.T) {
+	control := isolatedMigrationStore(t)
+	ctx := context.Background()
+	if err := control.Migrate(ctx, "../../migrations/postgres"); err != nil {
+		t.Fatal(err)
+	}
+	actor := User{ID: uuid.New(), Username: "rollover-" + uuid.NewString(), Role: "admin"}
+	if _, err := control.DB.Exec(ctx, `INSERT INTO users(id,username,password_hash,role)
+		VALUES($1,$2,'test-only','admin')`, actor.ID, actor.Username); err != nil {
+		t.Fatal(err)
+	}
+	device, err := control.CreateDevice(ctx, NewDevice{
+		Name: "rollover-" + uuid.NewString(), Firmware: FirmwareScheme3410,
+		Timezone: "UTC", SyslogSourceIP: "2001:db8::7006", AntifraudEnabled: true,
+	}, actor, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DB.Exec(ctx,
+		`DELETE FROM custom_projection_jobs WHERE device_id=$1`, device.ID); err != nil {
+		t.Fatal(err)
+	}
+	openHour := time.Now().UTC().Truncate(time.Hour)
+	if err := control.EnqueueCustomProjectionBuckets(
+		ctx, device.ID, 1, []time.Time{openHour},
+	); err != nil {
+		t.Fatal(err)
+	}
+	job, ok, err := control.ClaimCustomProjectionJob(ctx, "rollover-live", time.Minute)
+	if err != nil || !ok || job.HoldsDeviceLease {
+		t.Fatalf("claim=%#v ok=%v err=%v", job, ok, err)
+	}
+	// Sibling closed-hour catch-up owns the device lease under a different worker.
+	if _, err := control.DB.Exec(ctx, `INSERT INTO custom_projection_device_leases
+		(device_id,worker_id,lease_expires_at) VALUES ($1,'catchup-sibling',now()+interval '1 minute')
+		ON CONFLICT (device_id) DO UPDATE SET
+			worker_id=EXCLUDED.worker_id,lease_expires_at=EXCLUDED.lease_expires_at,updated_at=now()`,
+		device.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Wall-clock helper would now treat this bucket as closed after hour rollover;
+	// claim-time HoldsDeviceLease=false must still skip device-lease refresh.
+	job.BucketStart = openHour.Add(-time.Hour)
+	if err := control.RefreshCustomProjectionLease(ctx, job, time.Minute); err != nil {
+		t.Fatalf("refresh after hour rollover with HoldsDeviceLease=false: %v", err)
+	}
+	var leaseOwner string
+	if err := control.DB.QueryRow(ctx, `SELECT worker_id FROM custom_projection_device_leases
+		WHERE device_id=$1`, device.ID).Scan(&leaseOwner); err != nil {
+		t.Fatal(err)
+	}
+	if leaseOwner != "catchup-sibling" {
+		t.Fatalf("refresh must not steal sibling lease: owner=%q", leaseOwner)
 	}
 }
 

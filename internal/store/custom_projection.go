@@ -197,6 +197,7 @@ func (s *Store) ClaimCustomProjectionJob(
 	var job customprojection.Job
 	var bucket, cursorTime, cutoff *time.Time
 	var cursorID *uuid.UUID
+	var openHour bool
 	// Open UTC-hour buckets are exempt from the per-device lease so dense
 	// closed-hour windowed rebuild cannot starve live tip cutover. Closed-hour
 	// and discover jobs still take an exclusive device lease.
@@ -266,11 +267,11 @@ func (s *Store) ClaimCustomProjectionJob(
 			OR EXISTS (SELECT 1 FROM leased WHERE leased.device_id=job.device_id))
 		RETURNING job.id,job.device_id,job.policy_revision,job.projection_seq,job.kind,
 			job.bucket_start,job.cursor_received_at,job.cursor_event_id,
-			job.generation,job.cutoff_at`,
+			job.generation,job.cutoff_at,picked.open_hour`,
 		workerID, lease.String(),
 	).Scan(
 		&job.ID, &job.DeviceID, &job.PolicyRevision, &job.ProjectionSeq, &job.Kind,
-		&bucket, &cursorTime, &cursorID, &job.Generation, &cutoff,
+		&bucket, &cursorTime, &cursorID, &job.Generation, &cutoff, &openHour,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return customprojection.Job{}, false, nil
@@ -291,14 +292,18 @@ func (s *Store) ClaimCustomProjectionJob(
 		job.CutoffAt = *cutoff
 	}
 	job.WorkerID = workerID
+	// Open-hour claims never insert a device lease; remember that for the full
+	// job lifetime so hour rollover / Complete cannot steal a sibling lease.
+	job.HoldsDeviceLease = !openHour
 	return job, true, nil
 }
 
-func (s *Store) releaseCustomProjectionDeviceLease(
-	ctx context.Context, deviceID uuid.UUID, workerID string,
-) error {
+func (s *Store) releaseCustomProjectionDeviceLease(ctx context.Context, job customprojection.Job) error {
+	if !job.HoldsDeviceLease {
+		return nil
+	}
 	_, err := s.DB.Exec(ctx, `DELETE FROM custom_projection_device_leases
-		WHERE device_id=$1 AND worker_id=$2`, deviceID, workerID)
+		WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID)
 	return err
 }
 
@@ -320,7 +325,7 @@ func (s *Store) AdvanceCustomProjectionDiscovery(
 		WHERE id=$1 AND policy_revision=$5`,
 		job.ID, nextTime, nextID, nextAttempt, job.PolicyRevision)
 	if err == nil {
-		err = s.releaseCustomProjectionDeviceLease(ctx, job.DeviceID, job.WorkerID)
+		err = s.releaseCustomProjectionDeviceLease(ctx, job)
 	}
 	return err
 }
@@ -361,9 +366,11 @@ func (s *Store) CompleteCustomProjectionJob(
 		WHERE id=$1`, job.ID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
-		WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
-		return err
+	if job.HoldsDeviceLease {
+		if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
+			WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -400,7 +407,7 @@ func (s *Store) CutoverCustomProjection(
 
 // RefreshCustomProjectionLease extends job + device leases while a windowed
 // rebuild is still writing ClickHouse snapshots outside the cutover tx.
-// Open UTC-hour jobs do not hold a device lease; 0 device-lease rows is OK for them.
+// Open UTC-hour jobs never hold a device lease (HoldsDeviceLease=false).
 func (s *Store) RefreshCustomProjectionLease(
 	ctx context.Context, job customprojection.Job, lease time.Duration,
 ) error {
@@ -418,6 +425,9 @@ func (s *Store) RefreshCustomProjectionLease(
 	if tag.RowsAffected() != 1 {
 		return errors.New("projection lease changed before refresh")
 	}
+	if !job.HoldsDeviceLease {
+		return nil
+	}
 	tag, err = s.DB.Exec(ctx, `UPDATE custom_projection_device_leases
 		SET lease_expires_at=now()+$3::interval,updated_at=now()
 		WHERE device_id=$1 AND worker_id=$2`,
@@ -425,21 +435,10 @@ func (s *Store) RefreshCustomProjectionLease(
 	if err != nil {
 		return err
 	}
-	if isOpenUTCHourBucket(job) {
-		return nil
-	}
 	if tag.RowsAffected() != 1 {
 		return errors.New("projection device lease changed before refresh")
 	}
 	return nil
-}
-
-func isOpenUTCHourBucket(job customprojection.Job) bool {
-	if job.Kind != customprojection.JobBucket {
-		return false
-	}
-	openHour := time.Now().UTC().Truncate(time.Hour)
-	return job.BucketStart.UTC().Equal(openHour)
 }
 
 func (s *Store) applyCustomProjectionCutover(
@@ -532,9 +531,11 @@ func (s *Store) applyCustomProjectionCutover(
 		WHERE id=$1 AND claimed_generation=$2`, job.ID, job.Generation); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
-		WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
-		return err
+	if job.HoldsDeviceLease {
+		if _, err := tx.Exec(ctx, `DELETE FROM custom_projection_device_leases
+			WHERE device_id=$1 AND worker_id=$2`, job.DeviceID, job.WorkerID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -559,7 +560,7 @@ func (s *Store) FailCustomProjectionJob(
 		// Another worker already owns the job; do not touch its lease.
 		return nil
 	}
-	return s.releaseCustomProjectionDeviceLease(ctx, job.DeviceID, job.WorkerID)
+	return s.releaseCustomProjectionDeviceLease(ctx, job)
 }
 
 func (s *Store) RequeueFailedProjectionJobs(

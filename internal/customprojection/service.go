@@ -45,6 +45,9 @@ type Job struct {
 	Generation     uint64
 	CutoffAt       time.Time
 	WorkerID       string
+	// HoldsDeviceLease is set at claim time. Open UTC-hour buckets are
+	// lease-exempt; must not refresh/delete a sibling closed-hour lease.
+	HoldsDeviceLease bool
 }
 
 type Discovery struct {
@@ -181,12 +184,13 @@ func (w *Worker) Run(ctx context.Context) error {
 	errs := make(chan error, cfg.Threads)
 	for index := 0; index < cfg.Threads; index++ {
 		workers.Add(1)
-		go func() {
+		threadID := fmt.Sprintf("%s-t%d", cfg.WorkerID, index)
+		go func(workerID string) {
 			defer workers.Done()
-			if err := w.runLoop(runCtx); err != nil {
+			if err := w.runLoop(runCtx, workerID); err != nil {
 				errs <- err
 			}
-		}()
+		}(threadID)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -206,19 +210,22 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) runLoop(ctx context.Context) error {
+func (w *Worker) runLoop(ctx context.Context, workerID string) error {
 	// Discover jobs stay pending every ~2s, so the claim queue is almost never
 	// idle. Sweep overflow failures on a cadence instead of only when claim misses.
 	var lastOverflowSweep time.Time
 	for ctx.Err() == nil {
 		cfg := w.activeConfig()
+		if workerID == "" {
+			workerID = cfg.WorkerID
+		}
 		if time.Since(lastOverflowSweep) >= 30*time.Second {
 			if requeuer, has := w.Queue.(overflowRequeuer); has {
 				_, _ = requeuer.RequeueFailedOverflowProjectionJobs(ctx)
 			}
 			lastOverflowSweep = time.Now()
 		}
-		job, ok, err := w.Queue.ClaimCustomProjectionJob(ctx, cfg.WorkerID, cfg.Lease)
+		job, ok, err := w.Queue.ClaimCustomProjectionJob(ctx, workerID, cfg.Lease)
 		if err != nil {
 			return err
 		}

@@ -67,6 +67,17 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).not.toContain("category: string\n  component: string")
   })
 
+  it('supports syslog Table / Raw view toggle with shared EventDrawer', () => {
+    expect(main).toContain("type SyslogViewMode = 'table' | 'raw'")
+    expect(main).toContain('syslogViewMode')
+    expect(main).toContain('collector:syslog-view')
+    expect(main).toContain('function EventsRawLog')
+    expect(main).toContain('syslog-raw-log')
+    expect(main).toContain('view-toggle')
+    expect(main).toContain('function EventDrawer')
+    expect(main).toContain('onSelect={setSelectedEvent}')
+  })
+
   it('hides antifraud tab when antifraudEnabled is false', () => {
     const template = fallbackTemplates[0]
     expect(deviceSurfaces({ ...template, antifraudEnabled: false }))

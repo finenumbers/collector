@@ -563,6 +563,41 @@ func (s *Store) FailCustomProjectionJob(
 	return s.releaseCustomProjectionDeviceLease(ctx, job)
 }
 
+// HasPendingOpenHourProjection reports whether any open UTC-hour bucket is
+// waiting or already running so closed-hour windowed rebuild can yield CH.
+func (s *Store) HasPendingOpenHourProjection(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM custom_projection_jobs
+		WHERE kind='bucket'
+		  AND bucket_start=date_trunc('hour', timezone('UTC', now()))
+		  AND (
+			(status='pending' AND next_attempt_at<=now())
+			OR status='running'
+		  )
+	)`).Scan(&exists)
+	return exists, err
+}
+
+// YieldCustomProjectionJob soft-releases a running closed-hour job so a worker
+// can claim the live open hour. Undoes the claim attempt bump; never marks failed.
+func (s *Store) YieldCustomProjectionJob(ctx context.Context, job customprojection.Job) error {
+	tag, err := s.DB.Exec(ctx, `UPDATE custom_projection_jobs
+		SET status='pending',next_attempt_at=now(),
+			attempts=GREATEST(attempts-1,0),
+			lease_expires_at=NULL,worker_id=NULL,updated_at=now()
+		WHERE id=$1 AND status='running' AND COALESCE(worker_id,'')=$2
+			AND claimed_generation=$3`,
+		job.ID, job.WorkerID, job.Generation)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return nil
+	}
+	return s.releaseCustomProjectionDeviceLease(ctx, job)
+}
+
 func (s *Store) RequeueFailedProjectionJobs(
 	ctx context.Context, deviceID uuid.UUID,
 ) (int64, error) {

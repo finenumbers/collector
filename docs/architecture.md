@@ -54,6 +54,10 @@ lock for snapshot write/cutover, and watermarks. Open-hour exemption is a
 DELETE or require a device lease by wall-clock hour, or they steal the sibling
 closed-hour lease after UTC rollover. Each projection thread uses a unique
 `worker_id` (`…-tN`) so concurrent jobs on one process do not share lease rows.
+Closed-hour windowed rebuild **yields** between 5m windows (and before finalize)
+when any open UTC-hour job is pending/running: soft-requeue without `failed` so
+the singleton CustomReplay lane can serve live tip cutover. Open-hour tip
+publish skips the deploy-wide PG ClickHouse heavy lane.
 Claim prefers **real bucket backlog** across devices and per device
 (`open UTC-hour → older buckets → discover`), not frozen event-tip watermarks
 and not eternal discover ahead of hour catch-up. With `projection.threads≥2`,

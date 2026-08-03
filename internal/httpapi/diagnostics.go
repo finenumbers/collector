@@ -91,18 +91,26 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		}
 	}
 	devices := make([]map[string]any, 0, len(deviceStats))
-	var maxDeviceLag int64
+	var maxDeviceLag, maxEventTipLag int64
 	anyFailed := projection.Failed > 0
 	anyGap := false
 	allDeviceSLO := true
 	for _, item := range deviceStats {
 		tip := freshness[item.DeviceID]
-		lag := item.WatermarkLagSeconds
-		if tip.ActivatedLagSeconds > lag {
-			lag = tip.ActivatedLagSeconds
+		health := analytics.EvaluateProjectionDeviceHealth(analytics.ProjectionDeviceHealthInput{
+			Depth:               item.Depth,
+			Failed:              item.Failed,
+			OldestBucketAgeSec:  int64(item.OldestBucketAge / time.Second),
+			ActivatedLagSeconds: tip.ActivatedLagSeconds,
+			WatermarkLagSeconds: item.WatermarkLagSeconds,
+			AFCallLagSeconds:    tip.AFCallLagSeconds,
+			ClassificationGap:   tip.ClassificationGap,
+		})
+		if health.HealthLagSeconds > maxDeviceLag {
+			maxDeviceLag = health.HealthLagSeconds
 		}
-		if lag > maxDeviceLag {
-			maxDeviceLag = lag
+		if health.EventTipLagSeconds > maxEventTipLag {
+			maxEventTipLag = health.EventTipLagSeconds
 		}
 		if item.Failed > 0 {
 			anyFailed = true
@@ -110,8 +118,7 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		if tip.ClassificationGap {
 			anyGap = true
 		}
-		sloMet := lag <= 300 && item.Failed == 0 && !tip.ClassificationGap
-		if !sloMet {
+		if !health.ProjectionSLOMet {
 			allDeviceSLO = false
 		}
 		devices = append(devices, map[string]any{
@@ -121,6 +128,7 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 			"failed":               item.Failed,
 			"backfilling":          item.Backfilling,
 			"oldestAge":            item.OldestAge,
+			"oldestBucketAge":      item.OldestBucketAge,
 			"watermarkState":       item.WatermarkState,
 			"watermarkLagSeconds":  item.WatermarkLagSeconds,
 			"lastError":            item.LastError,
@@ -130,15 +138,19 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 			"afAuthHeaders6h":      tip.AFAuthHeaders6h,
 			"xpgkHeaders6h":        tip.XpgkHeaders6h,
 			"classificationGap":    tip.ClassificationGap,
-			"projectionLagSeconds": lag,
-			"projectionSloMet":     sloMet,
+			"healthLagSeconds":     health.HealthLagSeconds,
+			"eventTipLagSeconds":   health.EventTipLagSeconds,
+			"projectionLagSeconds": health.ProjectionLagSeconds,
+			"projectionSloMet":     health.ProjectionSLOMet,
 		})
 	}
 	if len(deviceStats) > 0 {
 		warehouse.MaxDeviceProjectionLagSeconds = maxDeviceLag
 		warehouse.AnyDeviceFailed = anyFailed
 		warehouse.AnyClassificationGap = anyGap
-		warehouse.ProjectionSLOMet = allDeviceSLO && warehouse.ProjectionLagSeconds <= 300
+		// Fleet projection SLO is per-device health, not global activated tip
+		// or quiet-SMG event tip ages.
+		warehouse.ProjectionSLOMet = allDeviceSLO
 	}
 	var rawIngest any
 	if s.Metrics != nil {
@@ -167,11 +179,14 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		"enrichmentCatchUp":       enrichmentCatchUp,
 		"projectionQueue": map[string]any{
 			"depth": projection.Depth, "oldestAge": projection.OldestAge,
-			"failed": projection.Failed, "backfilling": projection.Backfilling,
-			"lagSeconds":           warehouse.ProjectionLagSeconds,
-			"maxDeviceLagSeconds":  maxDeviceLag,
-			"anyDeviceFailed":      anyFailed,
-			"anyClassificationGap": anyGap,
+			"oldestBucketAge": projection.OldestBucketAge,
+			"discoverAge":     projection.DiscoverAge,
+			"failed":          projection.Failed, "backfilling": projection.Backfilling,
+			"lagSeconds":            warehouse.ProjectionLagSeconds,
+			"maxDeviceLagSeconds":   maxDeviceLag,
+			"maxEventTipLagSeconds": maxEventTipLag,
+			"anyDeviceFailed":       anyFailed,
+			"anyClassificationGap":  anyGap,
 		},
 		"projectionDevices":   devices,
 		"reconciliationQueue": reconciliation,

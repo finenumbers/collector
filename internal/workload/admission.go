@@ -215,12 +215,22 @@ func (m *Manager) scheduleLocked() {
 }
 
 func (m *Manager) firstFittingLocked(queue []*waiter) int {
+	best := -1
 	for index, item := range queue {
-		if m.used+item.weight <= m.capacity && (!item.heavy || !m.heavyActive) {
-			return index
+		if m.used+item.weight > m.capacity || (item.heavy && m.heavyActive) {
+			continue
+		}
+		if best < 0 {
+			best = index
+			continue
+		}
+		// Live AntiFraud cutover must not wait forever behind admin exports
+		// that share the single heavy lane.
+		if item.class == CustomReplay && queue[best].class == Export {
+			best = index
 		}
 	}
-	return -1
+	return best
 }
 
 func (m *Manager) removeLocked(target *waiter) bool {

@@ -93,9 +93,11 @@ fixed anonymized capture at expected peak plus 50% for 30 minutes and record:
 
 - interactive p95 under 2 seconds and p99 under 5 seconds;
 - zero admission leaks/deadlocks and bounded cancellation under 1 second;
-- projection lag under 5 minutes after load stops;
+- projection **health** lag under 5 minutes after load stops (`depth→0`); quiet
+  SMGs must not false-breach on AF tip / watermark age alone;
 - coverage late+missing at or below 1% after the configured grace;
-- export/replay never overlap in the heavy lane;
+- export/replay never overlap in the heavy lane; when both wait, custom_replay
+  is preferred over export;
 - no container OOM, ClickHouse overcommit, or unbounded response.
 
 Run the same capture and configuration for baseline and candidate, preserve

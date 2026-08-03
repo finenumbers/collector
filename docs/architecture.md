@@ -48,10 +48,16 @@ and CDR time interpretations. MinIO stores immutable source CDR files.
 engine. PostgreSQL owns policy revisions, durable discovery/bucket jobs,
 generation counters, deadline cursors, per-device projection leases (≤1 running
 job per SMG), deployment-wide ClickHouse heavy-lane lock for snapshot
-write/cutover, and watermarks. Claim prefers devices with the oldest watermark
-and, per device, `open UTC-hour bucket → discover → older backlog buckets`
-so live tip stays fresh without starving lookback discovery behind every
-historical hour. Discover scans use the non-heavy `custom_reconcile`
+write/cutover, and watermarks. Claim prefers **real bucket backlog** across
+devices (`open UTC-hour → older buckets → discover`), not frozen event-tip
+watermarks on quiet SMGs. Per device the same order applies so live tip stays
+fresh without starving lookback discovery behind every historical hour.
+Empty-hour cutovers still advance the watermark to the bucket end (clamped to
+`now` for the open hour) so tip clocks do not freeze on the last AF call.
+Projection SLO uses queue **health lag** (backlog age / activated while
+`depth>0`, plus failures and classification gap); AF tip / watermark ages are
+informational traffic tips. Workload admission prefers `custom_replay` over
+`export` when both wait on the shared heavy lane. Discover scans use the non-heavy `custom_reconcile`
 admission class so tiny cursor pages are not serialized behind hour payload
 loads or exports. Hour buckets that exceed runtime `projection.maxEvents`
 (Настройки → Параметры; env `CUSTOM_PROJECTION_MAX_EVENTS` only seeds an empty

@@ -217,12 +217,22 @@ func (s *Store) ClaimCustomProjectionJob(
 				END,
 				updated_at,created_at
 		), picked AS (
+			-- Prefer real bucket backlog / live hour over frozen event-tip watermarks
+			-- so quiet SMGs cannot monopolize claims (whack-a-mole across devices).
 			SELECT job.id FROM custom_projection_jobs job
 			JOIN eligible USING (id)
-			LEFT JOIN custom_projection_watermarks watermark
-				ON watermark.device_id=job.device_id
-			ORDER BY COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at), 1e12) DESC,
-				job.updated_at,job.created_at
+			ORDER BY
+				CASE
+					WHEN job.kind='bucket'
+						AND job.bucket_start=date_trunc('hour', timezone('UTC', now()))
+					THEN 0
+					WHEN job.kind='bucket' THEN 1
+					WHEN job.kind='discover' THEN 2
+					ELSE 3
+				END,
+				COALESCE(job.bucket_start, 'infinity'::timestamptz) ASC,
+				job.created_at ASC,
+				job.updated_at ASC
 			FOR UPDATE OF job SKIP LOCKED LIMIT 1
 		), leased AS (
 			INSERT INTO custom_projection_device_leases
@@ -615,10 +625,12 @@ func IsTransientProjectionLastError(lastError string) bool {
 }
 
 type CustomProjectionQueueStats struct {
-	Depth       uint64        `json:"depth"`
-	OldestAge   time.Duration `json:"oldestAge"`
-	Failed      uint64        `json:"failed"`
-	Backfilling uint64        `json:"backfilling"`
+	Depth           uint64        `json:"depth"`
+	OldestAge       time.Duration `json:"oldestAge"`
+	OldestBucketAge time.Duration `json:"oldestBucketAge"`
+	DiscoverAge     time.Duration `json:"discoverAge"`
+	Failed          uint64        `json:"failed"`
+	Backfilling     uint64        `json:"backfilling"`
 }
 
 type CustomProjectionDeviceStats struct {
@@ -628,6 +640,7 @@ type CustomProjectionDeviceStats struct {
 	Failed              uint64        `json:"failed"`
 	Backfilling         uint64        `json:"backfilling"`
 	OldestAge           time.Duration `json:"oldestAge"`
+	OldestBucketAge     time.Duration `json:"oldestBucketAge"`
 	WatermarkState      string        `json:"watermarkState"`
 	WatermarkLagSeconds int64         `json:"watermarkLagSeconds"`
 	LastError           string        `json:"lastError,omitempty"`
@@ -637,16 +650,24 @@ func (s *Store) CustomProjectionQueueStats(
 	ctx context.Context,
 ) (CustomProjectionQueueStats, error) {
 	var stats CustomProjectionQueueStats
-	var oldestSeconds float64
+	var oldestBucketSeconds, discoverSeconds float64
 	err := s.DB.QueryRow(ctx, `SELECT
 		count(*) FILTER (WHERE status IN ('pending','running')),
 		COALESCE(EXTRACT(epoch FROM now()-min(created_at)
-			FILTER (WHERE status IN ('pending','running'))),0),
+			FILTER (WHERE status IN ('pending','running') AND kind='bucket')),0),
+		COALESCE(EXTRACT(epoch FROM now()-min(created_at)
+			FILTER (WHERE status IN ('pending','running') AND kind='discover')),0),
 		count(*) FILTER (WHERE status='failed'),
 		count(*) FILTER (WHERE kind='discover' AND status IN ('pending','running'))
 		FROM custom_projection_jobs`).
-		Scan(&stats.Depth, &oldestSeconds, &stats.Failed, &stats.Backfilling)
-	stats.OldestAge = time.Duration(oldestSeconds * float64(time.Second))
+		Scan(
+			&stats.Depth, &oldestBucketSeconds, &discoverSeconds,
+			&stats.Failed, &stats.Backfilling,
+		)
+	stats.OldestBucketAge = time.Duration(oldestBucketSeconds * float64(time.Second))
+	stats.DiscoverAge = time.Duration(discoverSeconds * float64(time.Second))
+	// oldestAge is real backlog work age (buckets), not eternal discover rows.
+	stats.OldestAge = stats.OldestBucketAge
 	return stats, err
 }
 
@@ -658,7 +679,7 @@ func (s *Store) CustomProjectionDeviceStats(
 		count(job.id) FILTER (WHERE job.status='failed'),
 		count(job.id) FILTER (WHERE job.kind='discover' AND job.status IN ('pending','running')),
 		COALESCE(EXTRACT(epoch FROM now()-min(job.created_at)
-			FILTER (WHERE job.status IN ('pending','running'))),0),
+			FILTER (WHERE job.status IN ('pending','running') AND job.kind='bucket')),0),
 		COALESCE(watermark.state,'disabled'),
 		GREATEST(0,COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at),0))::bigint,
 		COALESCE((
@@ -672,7 +693,8 @@ func (s *Store) CustomProjectionDeviceStats(
 		LEFT JOIN custom_projection_watermarks watermark ON watermark.device_id=device.id
 		WHERE device.antifraud_enabled AND device.enabled AND device.purge_state='active'
 		GROUP BY device.id,device.name,watermark.state,watermark.watermark_received_at
-		ORDER BY GREATEST(0,COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at),0)) DESC,
+		ORDER BY count(job.id) FILTER (WHERE job.status IN ('pending','running') AND job.kind='bucket') DESC,
+			GREATEST(0,COALESCE(EXTRACT(epoch FROM now()-watermark.watermark_received_at),0)) DESC,
 			device.name`)
 	if err != nil {
 		return nil, err
@@ -681,14 +703,15 @@ func (s *Store) CustomProjectionDeviceStats(
 	result := make([]CustomProjectionDeviceStats, 0)
 	for rows.Next() {
 		var item CustomProjectionDeviceStats
-		var oldestSeconds float64
+		var oldestBucketSeconds float64
 		if err := rows.Scan(
 			&item.DeviceID, &item.Name, &item.Depth, &item.Failed, &item.Backfilling,
-			&oldestSeconds, &item.WatermarkState, &item.WatermarkLagSeconds, &item.LastError,
+			&oldestBucketSeconds, &item.WatermarkState, &item.WatermarkLagSeconds, &item.LastError,
 		); err != nil {
 			return nil, err
 		}
-		item.OldestAge = time.Duration(oldestSeconds * float64(time.Second))
+		item.OldestBucketAge = time.Duration(oldestBucketSeconds * float64(time.Second))
+		item.OldestAge = item.OldestBucketAge
 		result = append(result, item)
 	}
 	return result, rows.Err()

@@ -92,7 +92,10 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('syslog-find-clear')
     expect(main).toContain('syslog-find-prev')
     expect(main).toContain('goSyslogFindPrev')
-    expect(main).toContain("block: 'center'")
+    expect(main).toContain('centerSyslogHit')
+    expect(main).toContain('feedEpochRef')
+    expect(main).toContain('syslogFindBusyRef')
+    expect(main).toContain("!syslogFindBusyRef.current")
     expect(main).toContain('Найти за сутки')
     expect(main).toContain('/syslog-messages?date=')
     expect(main).toContain('/syslog-messages/find?')
@@ -104,8 +107,10 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('after_id=')
     expect(main).toContain('loadNewer')
     expect(main).not.toContain('ensureSyslogEventVisible')
+    expect(main).not.toContain("behavior: 'smooth'")
     expect(main).toContain("syslogHideStream ? syslogFind : ''")
-    expect(main).toContain('&q=${encodeURIComponent(hideFind)}')
+    expect(main).toContain('&q=${encodeURIComponent(syslogListQ)}')
+    expect(main).toContain('Keep current hit on nav errors')
   })
 
   it('hides antifraud tab when antifraudEnabled is false', () => {

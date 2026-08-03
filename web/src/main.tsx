@@ -1526,7 +1526,13 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     hasMore: boolean
     hasNewer: boolean
   }>({ rows: [], cursor: null, hasMore: false, hasNewer: false })
+  const feedEpochRef = useRef(0)
   const syslogFindGenerationRef = useRef(0)
+  const syslogFindBusyRef = useRef(false)
+  const syslogFindHitRef = useRef<{ eventId: string; receivedAt: string } | null>(null)
+  const syslogFindIndexRef = useRef(0)
+  const syslogFindTotalRef = useRef(0)
+  const syslogFindNeedleRef = useRef('')
   const isSatel = device.templateKey === 'satel-rtu-cdr-v1'
   const cdrVendor = isSatel ? 'satel' as const : 'eltex' as const
   const presetStorageKey = cdrPresetStorageKey(device.id)
@@ -1557,6 +1563,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         ? antifraudFiltersToQuery(antifraudColumnFilters)
         : undefined
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
+  // Only hide-stream + non-empty find puts q= on the list path (avoids churn when hide is off).
+  const syslogListQ = dataset === 'syslog' && syslogHideStream ? syslogFind.trim() : ''
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     if (dataset === 'calls') {
       const params = new URLSearchParams()
@@ -1590,15 +1598,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     }
     // Full day feed by default; hide-stream + find uses list q= (matches only).
     // Find navigation uses /syslog-messages/find + jump (from/from_id) when stream is shown.
-    const hideFind = dataset === 'syslog' && syslogHideStream ? syslogFind.trim() : ''
     const base = `/devices/${device.id}/syslog-messages?date=${date}&limit=${PAGE_SIZE}`
-      + (hideFind ? `&q=${encodeURIComponent(hideFind)}` : '')
+      + (syslogListQ ? `&q=${encodeURIComponent(syslogListQ)}` : '')
     return pageCursor
       ? `${base}&before=${encodeURIComponent(pageCursor.before)}&before_id=${encodeURIComponent(pageCursor.beforeId)}`
       : base
   }, [
     antifraudColumnFilters, columnFilters, dataset, date, device.id, eltexColumnFilters, isSatel,
-    syslogFind, syslogHideStream,
+    syslogListQ,
   ])
   const setBusy = useCallback((value: boolean) => {
     loadingRef.current = value
@@ -1612,12 +1619,32 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     return () => { active = false }
   }, [date, device.id])
   const cursorGenerationRef = useRef(0)
+  const setSyslogFindBusyState = useCallback((value: boolean) => {
+    syslogFindBusyRef.current = value
+    setSyslogFindBusy(value)
+  }, [])
+  const setSyslogFindHitState = useCallback((
+    hit: { eventId: string; receivedAt: string } | null,
+  ) => {
+    syslogFindHitRef.current = hit
+    setSyslogFindHit(hit)
+  }, [])
+  const setSyslogFindIndexState = useCallback((index: number) => {
+    syslogFindIndexRef.current = index
+    setSyslogFindIndex(index)
+  }, [])
+  const setSyslogFindTotalState = useCallback((total: number) => {
+    syslogFindTotalRef.current = total
+    setSyslogFindTotal(total)
+  }, [])
   useEffect(() => {
     const generation = ++generationRef.current
     // Invalidate any in-flight pagination cursor for the previous filter set.
     cursorGenerationRef.current = 0
+    feedEpochRef.current += 1
     let active = true
     const timer = window.setTimeout(() => {
+      feedEpochRef.current += 1
       feedRef.current = { rows: [], cursor: null, hasMore: false, hasNewer: false }
       setRows([])
       setHasMore(false)
@@ -1647,7 +1674,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           }
         })
         .finally(() => {
-          if (active) setBusy(false)
+          if (active && generation === generationRef.current) setBusy(false)
         })
     }, 250)
     return () => {
@@ -1660,22 +1687,31 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     if (!feed.cursor || !feed.hasMore || loadingRef.current) return false
     const generation = cursorGenerationRef.current
     if (!generation || generation !== generationRef.current) return false
+    const epoch = feedEpochRef.current
+    const cursorBefore = feed.cursor.before
+    const cursorBeforeId = feed.cursor.beforeId
     setBusy(true)
     try {
       const { items, hasMore: more, nextCursor } = await api<PageResponse<DataRow>>(
         pagePath(feed.cursor),
       )
-      if (generation !== generationRef.current) return false
-      const nextRows = [...feed.rows, ...(items || [])]
+      if (generation !== generationRef.current || epoch !== feedEpochRef.current) return false
+      const live = feedRef.current
+      if (!live.cursor
+        || live.cursor.before !== cursorBefore
+        || live.cursor.beforeId !== cursorBeforeId) {
+        return false
+      }
+      const nextRows = [...live.rows, ...(items || [])]
       feedRef.current = {
-        rows: nextRows, cursor: nextCursor || null, hasMore: more, hasNewer: feed.hasNewer,
+        rows: nextRows, cursor: nextCursor || null, hasMore: more, hasNewer: live.hasNewer,
       }
       setRows(nextRows)
       setHasMore(more)
       cursorGenerationRef.current = generation
       return Boolean(items?.length)
     } catch (reason) {
-      if (generation === generationRef.current) {
+      if (generation === generationRef.current && epoch === feedEpochRef.current) {
         setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
       }
       return false
@@ -1690,53 +1726,59 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     if (!top || !feed.hasNewer || loadingRef.current) return false
     const generation = cursorGenerationRef.current
     if (!generation || generation !== generationRef.current) return false
+    const epoch = feedEpochRef.current
+    const topEventId = top.eventId
+    const topReceivedAt = top.receivedAt
     const shell = tableShellRef.current
     const prevHeight = shell?.scrollHeight || 0
     const prevTop = shell?.scrollTop || 0
     setBusy(true)
     try {
-      const hideFind = syslogHideStream ? syslogFind.trim() : ''
       const path = `/devices/${device.id}/syslog-messages?date=${encodeURIComponent(date)}`
-        + `&limit=${PAGE_SIZE}&after=${encodeURIComponent(top.receivedAt)}`
-        + `&after_id=${encodeURIComponent(top.eventId)}`
-        + (hideFind ? `&q=${encodeURIComponent(hideFind)}` : '')
+        + `&limit=${PAGE_SIZE}&after=${encodeURIComponent(topReceivedAt)}`
+        + `&after_id=${encodeURIComponent(topEventId)}`
+        + (syslogListQ ? `&q=${encodeURIComponent(syslogListQ)}` : '')
       const { items, hasNewer: moreNewer } = await api<PageResponse<DataRow>>(path)
-      if (generation !== generationRef.current) return false
+      if (generation !== generationRef.current || epoch !== feedEpochRef.current) return false
+      const live = feedRef.current
+      const liveTop = (live.rows as EventRow[])[0]
+      if (!liveTop || liveTop.eventId !== topEventId) return false
       const prepend = items || []
       if (!prepend.length) {
-        feedRef.current = { ...feed, hasNewer: false }
+        feedRef.current = { ...live, hasNewer: false }
         setHasNewer(false)
         return false
       }
-      const nextRows = [...prepend, ...feed.rows]
+      const nextRows = [...prepend, ...live.rows]
       feedRef.current = {
-        rows: nextRows, cursor: feed.cursor, hasMore: feed.hasMore,
+        rows: nextRows, cursor: live.cursor, hasMore: live.hasMore,
         hasNewer: Boolean(moreNewer),
       }
       setRows(nextRows)
       setHasNewer(Boolean(moreNewer))
       cursorGenerationRef.current = generation
       requestAnimationFrame(() => {
+        if (syslogFindBusyRef.current) return
         const el = tableShellRef.current
         if (!el) return
         el.scrollTop = prevTop + (el.scrollHeight - prevHeight)
       })
       return true
     } catch (reason) {
-      if (generation === generationRef.current) {
+      if (generation === generationRef.current && epoch === feedEpochRef.current) {
         setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
       }
       return false
     } finally {
       if (generation === generationRef.current) setBusy(false)
     }
-  }, [dataset, date, device.id, setBusy, syslogFind, syslogHideStream])
+  }, [dataset, date, device.id, setBusy, syslogListQ])
   useEffect(() => {
     const root = tableShellRef.current
     const target = sentinelRef.current
     if (!root || !target || !hasMore) return
     const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) void loadMore()
+      if (entry.isIntersecting && !syslogFindBusyRef.current) void loadMore()
     }, { root, rootMargin: '240px 0px', threshold: 0 })
     observer.observe(target)
     return () => observer.disconnect()
@@ -1746,7 +1788,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     const target = topSentinelRef.current
     if (!root || !target || !hasNewer || dataset !== 'syslog') return
     const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) void loadNewer()
+      if (entry.isIntersecting && !syslogFindBusyRef.current) void loadNewer()
     }, { root, rootMargin: '120px 0px', threshold: 0 })
     observer.observe(target)
     return () => observer.disconnect()
@@ -1759,6 +1801,32 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     receivedAt?: string | null
     hasMore?: boolean
   }
+  const centerSyslogHit = useCallback(async (
+    eventId: string,
+    findGeneration: number,
+  ): Promise<boolean> => {
+    const root = tableShellRef.current
+    if (!root) return false
+    for (let i = 0; i < 45; i++) {
+      if (findGeneration !== syslogFindGenerationRef.current) return false
+      const target = root.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`)
+      if (target instanceof HTMLElement) {
+        const rootRect = root.getBoundingClientRect()
+        const targetRect = target.getBoundingClientRect()
+        root.scrollTop += (targetRect.top + targetRect.height / 2)
+          - (rootRect.top + rootRect.height / 2)
+        const rootRect2 = root.getBoundingClientRect()
+        const targetRect2 = target.getBoundingClientRect()
+        root.scrollTop += (targetRect2.top + targetRect2.height / 2)
+          - (rootRect2.top + rootRect2.height / 2)
+        return true
+      }
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve())
+      })
+    }
+    return false
+  }, [])
   const jumpSyslogToHit = useCallback(async (
     hit: { eventId: string; receivedAt: string },
     findGeneration: number,
@@ -1767,14 +1835,18 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) {
       return true
     }
+    const epoch = ++feedEpochRef.current
     const generation = cursorGenerationRef.current || generationRef.current
-    setBusy(true)
+    const tookBusy = !loadingRef.current
+    if (tookBusy) setBusy(true)
     try {
       const path = `/devices/${device.id}/syslog-messages?date=${encodeURIComponent(date)}`
         + `&limit=${PAGE_SIZE}&from=${encodeURIComponent(hit.receivedAt)}`
         + `&from_id=${encodeURIComponent(hit.eventId)}`
       const { items, hasMore: more, hasNewer: newer, nextCursor } = await api<PageResponse<DataRow>>(path)
-      if (findGeneration !== syslogFindGenerationRef.current) return false
+      if (findGeneration !== syslogFindGenerationRef.current || epoch !== feedEpochRef.current) {
+        return false
+      }
       const nextRows = items || []
       feedRef.current = {
         rows: nextRows, cursor: nextCursor || null, hasMore: more, hasNewer: Boolean(newer),
@@ -1782,7 +1854,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setRows(nextRows)
       setHasMore(more)
       setHasNewer(Boolean(newer))
-      cursorGenerationRef.current = generation
+      cursorGenerationRef.current = generation || generationRef.current
       return nextRows.some((row) => (row as EventRow).eventId === hit.eventId)
     } catch (reason) {
       if (findGeneration === syslogFindGenerationRef.current) {
@@ -1790,18 +1862,19 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       }
       return false
     } finally {
-      if (findGeneration === syslogFindGenerationRef.current) setBusy(false)
+      if (tookBusy && findGeneration === syslogFindGenerationRef.current) setBusy(false)
     }
   }, [date, device.id, setBusy])
   const ensureSyslogHitInFilteredFeed = useCallback(async (
     hit: { eventId: string; receivedAt: string },
     findGeneration: number,
-  ) => {
+  ): Promise<boolean> => {
     const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
+    const hasHit = () => (feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)
     // Wait for pagePath reload (hide+q) to finish before paginating matches.
-    for (let wait = 0; wait < 40; wait++) {
-      if (findGeneration !== syslogFindGenerationRef.current) return
-      if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) return
+    for (let wait = 0; wait < 80; wait++) {
+      if (findGeneration !== syslogFindGenerationRef.current) return false
+      if (hasHit()) return true
       if (loadingRef.current || !cursorGenerationRef.current) {
         await sleep(50)
         continue
@@ -1809,8 +1882,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       break
     }
     for (let i = 0; i < 40; i++) {
-      if (findGeneration !== syslogFindGenerationRef.current) return
-      if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) return
+      if (findGeneration !== syslogFindGenerationRef.current) return false
+      if (hasHit()) return true
       if (feedRef.current.hasMore) {
         const advanced = await loadMore()
         if (!advanced) {
@@ -1831,6 +1904,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       }
       break
     }
+    return hasHit()
   }, [loadMore, loadNewer])
   const refreshSyslogFindCount = useCallback((needle: string, findGeneration: number) => {
     api<{ total?: number }>(
@@ -1839,28 +1913,37 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       { timeoutMs: 10000 },
     ).then((body) => {
       if (findGeneration !== syslogFindGenerationRef.current) return
-      setSyslogFindTotal(Number(body.total) || 0)
+      setSyslogFindTotalState(Number(body.total) || 0)
     }).catch(() => { /* keep prior total */ })
-  }, [date, device.id])
+  }, [date, device.id, setSyslogFindTotalState])
   const applySyslogFindHit = useCallback(async (
     hit: { eventId: string; receivedAt: string } | null,
     index: number,
     findGeneration: number,
-  ) => {
-    if (findGeneration !== syslogFindGenerationRef.current) return
+  ): Promise<boolean> => {
+    if (findGeneration !== syslogFindGenerationRef.current) return false
     if (!hit) {
-      setSyslogFindHit(null)
-      setSyslogFindIndex(0)
-      return
+      setSyslogFindHitState(null)
+      setSyslogFindIndexState(0)
+      return false
     }
-    setSyslogFindHit(hit)
-    setSyslogFindIndex(index)
-    if (syslogHideFind) {
-      await ensureSyslogHitInFilteredFeed(hit, findGeneration)
-      return
-    }
-    await jumpSyslogToHit(hit, findGeneration)
-  }, [ensureSyslogHitInFilteredFeed, jumpSyslogToHit, syslogHideFind])
+    const located = syslogHideFind
+      ? await ensureSyslogHitInFilteredFeed(hit, findGeneration)
+      : await jumpSyslogToHit(hit, findGeneration)
+    if (findGeneration !== syslogFindGenerationRef.current) return false
+    if (!located) return false
+    setSyslogFindHitState(hit)
+    setSyslogFindIndexState(index)
+    await centerSyslogHit(hit.eventId, findGeneration)
+    return findGeneration === syslogFindGenerationRef.current
+  }, [
+    centerSyslogHit, ensureSyslogHitInFilteredFeed, jumpSyslogToHit, setSyslogFindHitState,
+    setSyslogFindIndexState, syslogHideFind,
+  ])
+  const applySyslogFindHitRef = useRef(applySyslogFindHit)
+  useEffect(() => {
+    applySyslogFindHitRef.current = applySyslogFindHit
+  }, [applySyslogFindHit])
   const runSyslogFind = useCallback(async (opts?: {
     /** Navigate to older match (↓); pass current hit. */
     olderThan?: { eventId: string; receivedAt: string }
@@ -1871,15 +1954,15 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     refreshCount?: boolean
   }) => {
     if (dataset !== 'syslog') return
-    const needle = syslogFind.trim()
+    const needle = syslogFindNeedleRef.current || syslogFind.trim()
     if (!needle) {
-      setSyslogFindHit(null)
-      setSyslogFindIndex(0)
-      setSyslogFindTotal(0)
+      setSyslogFindHitState(null)
+      setSyslogFindIndexState(0)
+      setSyslogFindTotalState(0)
       return
     }
     const findGeneration = ++syslogFindGenerationRef.current
-    setSyslogFindBusy(true)
+    setSyslogFindBusyState(true)
     try {
       const params = new URLSearchParams()
       params.set('date', date)
@@ -1902,7 +1985,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           { timeoutMs: 10000 },
         )
         if (findGeneration !== syslogFindGenerationRef.current) return
-        await applySyslogFindHit(
+        await applySyslogFindHitRef.current(
           body.eventId && body.receivedAt
             ? { eventId: body.eventId, receivedAt: body.receivedAt }
             : null,
@@ -1918,8 +2001,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           { timeoutMs: 10000 },
         )
         if (findGeneration !== syslogFindGenerationRef.current) return
-        const lastIndex = Math.max(1, syslogFindTotal || opts.fromIndex || 1)
-        await applySyslogFindHit(
+        const lastIndex = Math.max(
+          1, syslogFindTotalRef.current || opts.fromIndex || 1,
+        )
+        await applySyslogFindHitRef.current(
           body.eventId && body.receivedAt
             ? { eventId: body.eventId, receivedAt: body.receivedAt }
             : null,
@@ -1931,7 +2016,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       let nextIndex = 1
       if (opts?.olderThan) nextIndex = Math.max(1, opts.fromIndex || 0) + 1
       else if (opts?.newerThan) nextIndex = Math.max(1, (opts.fromIndex || 1) - 1)
-      await applySyslogFindHit(
+      const applied = await applySyslogFindHitRef.current(
         body.eventId && body.receivedAt
           ? { eventId: body.eventId, receivedAt: body.receivedAt }
           : null,
@@ -1939,47 +2024,66 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         findGeneration,
       )
       if (!opts?.olderThan && !opts?.newerThan) {
-        if (!body.eventId) setSyslogFindTotal(0)
-        else if (opts?.refreshCount !== false) refreshSyslogFindCount(needle, findGeneration)
+        if (!body.eventId) setSyslogFindTotalState(0)
+        else if (opts?.refreshCount !== false && applied) {
+          refreshSyslogFindCount(needle, findGeneration)
+        }
       }
     } catch {
-      if (findGeneration === syslogFindGenerationRef.current) {
-        setSyslogFindHit(null)
-        setSyslogFindIndex(0)
-        if (!opts?.olderThan && !opts?.newerThan) setSyslogFindTotal(0)
+      // Keep current hit on nav errors (timeout/429); only wipe on fresh search failure.
+      if (findGeneration === syslogFindGenerationRef.current
+        && !opts?.olderThan && !opts?.newerThan) {
+        setSyslogFindHitState(null)
+        setSyslogFindIndexState(0)
+        setSyslogFindTotalState(0)
       }
     } finally {
-      if (findGeneration === syslogFindGenerationRef.current) setSyslogFindBusy(false)
+      if (findGeneration === syslogFindGenerationRef.current) setSyslogFindBusyState(false)
     }
-  }, [applySyslogFindHit, dataset, date, device.id, refreshSyslogFindCount, syslogFind, syslogFindTotal])
+  }, [
+    dataset, date, device.id, refreshSyslogFindCount, setSyslogFindBusyState,
+    setSyslogFindHitState, setSyslogFindIndexState, setSyslogFindTotalState, syslogFind,
+  ])
   useEffect(() => {
-    if (dataset !== 'syslog') return
+    if (dataset !== 'syslog') {
+      syslogFindGenerationRef.current += 1
+      return
+    }
     const needle = syslogFindTrim
     const day = date
     const deviceId = device.id
+    syslogFindNeedleRef.current = needle
+    const findGeneration = ++syslogFindGenerationRef.current
     let cancelled = false
-    const timer = window.setTimeout(() => {
-      if (cancelled) return
-      if (!needle) {
-        setSyslogFindHit(null)
-        setSyslogFindIndex(0)
-        setSyslogFindTotal(0)
-        return
+    // Defer session reset so we do not sync-setState inside the effect body.
+    const resetTimer = window.setTimeout(() => {
+      if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+      setSyslogFindHitState(null)
+      setSyslogFindIndexState(0)
+      setSyslogFindTotalState(0)
+      setSyslogFindBusyState(Boolean(needle))
+    }, 0)
+    if (!needle) {
+      return () => {
+        cancelled = true
+        window.clearTimeout(resetTimer)
       }
-      const findGeneration = ++syslogFindGenerationRef.current
-      setSyslogFindBusy(true)
+    }
+    const timer = window.setTimeout(() => {
+      if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
       api<SyslogFindResponse>(
         `/devices/${deviceId}/syslog-messages/find?date=${encodeURIComponent(day)}&q=${encodeURIComponent(needle)}`,
         { timeoutMs: 10000 },
       ).then(async (body) => {
         if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
-        await applySyslogFindHit(
+        const applied = await applySyslogFindHitRef.current(
           body.eventId && body.receivedAt
             ? { eventId: body.eventId, receivedAt: body.receivedAt }
             : null,
           body.eventId ? 1 : 0,
           findGeneration,
         )
+        if (!applied || findGeneration !== syslogFindGenerationRef.current) return
         if (body.eventId) {
           api<{ total?: number }>(
             `/devices/${deviceId}/syslog-messages/find-count?date=${encodeURIComponent(day)}`
@@ -1987,62 +2091,61 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             { timeoutMs: 10000 },
           ).then((countBody) => {
             if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
-            setSyslogFindTotal(Number(countBody.total) || 0)
+            setSyslogFindTotalState(Number(countBody.total) || 0)
           }).catch(() => { /* ignore */ })
         } else {
-          setSyslogFindTotal(0)
+          setSyslogFindTotalState(0)
         }
       }).catch(() => {
         if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
-        setSyslogFindHit(null)
-        setSyslogFindIndex(0)
-        setSyslogFindTotal(0)
+        setSyslogFindHitState(null)
+        setSyslogFindIndexState(0)
+        setSyslogFindTotalState(0)
       }).finally(() => {
-        if (!cancelled && findGeneration === syslogFindGenerationRef.current) {
-          setSyslogFindBusy(false)
+        if (findGeneration === syslogFindGenerationRef.current) {
+          setSyslogFindBusyState(false)
         }
       })
     }, 300)
     return () => {
       cancelled = true
+      window.clearTimeout(resetTimer)
       window.clearTimeout(timer)
     }
-  }, [applySyslogFindHit, dataset, date, device.id, syslogFindTrim, syslogHideStream])
-  useEffect(() => {
-    if (dataset !== 'syslog' || !syslogActiveEventId) return
-    const root = tableShellRef.current
-    if (!root) return
-    const frame = window.requestAnimationFrame(() => {
-      const target = root.querySelector(`[data-event-id="${CSS.escape(syslogActiveEventId)}"]`)
-      if (target instanceof HTMLElement) {
-        target.scrollIntoView({ block: 'center', behavior: 'smooth' })
-      }
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [dataset, syslogActiveEventId, syslogViewMode, rows.length, syslogFindIndex])
+  }, [
+    dataset, date, device.id, setSyslogFindBusyState, setSyslogFindHitState,
+    setSyslogFindIndexState, setSyslogFindTotalState, syslogFindTrim, syslogHideStream,
+  ])
   const goSyslogFindNext = () => {
-    if (!syslogFindTrim || syslogFindBusy) return
-    if (!syslogFindHit) {
+    if (!syslogFindTrim || syslogFindBusyRef.current) return
+    if (syslogFindNeedleRef.current !== syslogFindTrim) return
+    const hit = syslogFindHitRef.current
+    if (!hit) {
       void runSyslogFind()
       return
     }
     void runSyslogFind({
-      olderThan: syslogFindHit, wrap: true, fromIndex: syslogFindIndex, refreshCount: false,
+      olderThan: hit, wrap: true, fromIndex: syslogFindIndexRef.current, refreshCount: false,
     })
   }
   const goSyslogFindPrev = () => {
-    if (!syslogFindTrim || syslogFindBusy || !syslogFindHit) return
+    if (!syslogFindTrim || syslogFindBusyRef.current || !syslogFindHitRef.current) return
+    if (syslogFindNeedleRef.current !== syslogFindTrim) return
+    const hit = syslogFindHitRef.current
+    if (!hit) return
     void runSyslogFind({
-      newerThan: syslogFindHit, wrap: true, fromIndex: syslogFindIndex, refreshCount: false,
+      newerThan: hit, wrap: true, fromIndex: syslogFindIndexRef.current, refreshCount: false,
     })
   }
   const clearSyslogFind = () => {
     syslogFindGenerationRef.current += 1
+    feedEpochRef.current += 1
+    syslogFindNeedleRef.current = ''
     setSyslogFind('')
-    setSyslogFindHit(null)
-    setSyslogFindIndex(0)
-    setSyslogFindTotal(0)
-    setSyslogFindBusy(false)
+    setSyslogFindHitState(null)
+    setSyslogFindIndexState(0)
+    setSyslogFindTotalState(0)
+    setSyslogFindBusyState(false)
     setReload((value) => value + 1)
   }
   const showAntifraudEmpty = !loading && rows.length === 0 && dataset === 'antifraud'
@@ -2104,8 +2207,16 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           <input placeholder="Найти за сутки…" value={syslogFind}
             aria-label="Найти в Syslog"
             onChange={(event) => {
-              setSyslogFind(event.target.value)
-              setSyslogFindIndex(0)
+              const next = event.target.value
+              const trim = next.trim()
+              // Invalidate immediately so ↑↓/Enter cannot mix a new needle with a stale hit.
+              syslogFindGenerationRef.current += 1
+              syslogFindNeedleRef.current = trim
+              setSyslogFind(next)
+              setSyslogFindHitState(null)
+              setSyslogFindIndexState(0)
+              setSyslogFindTotalState(0)
+              setSyslogFindBusyState(Boolean(trim))
             }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {

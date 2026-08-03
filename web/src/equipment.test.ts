@@ -131,6 +131,8 @@ describe('equipment templates', () => {
     expect(main).toContain('syslogHideStream')
     expect(main).toContain('/syslog-messages/find?')
     expect(main).toContain('jumpSyslogToHit')
+    expect(main).toContain('centerSyslogHit')
+    expect(main).toContain('feedEpochRef')
     expect(styles).toMatch(/\.search\.syslog-find\s*\{[^}]*width:\s*min\(300px/)
     expect(styles).toMatch(/\.toolbar-actions\s*>\s*\.view-toggle[\s\S]*?flex-shrink:\s*0/)
     expect(styles).toMatch(/\.syslog-hide-stream\s*\{/)

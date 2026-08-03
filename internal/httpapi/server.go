@@ -88,6 +88,7 @@ type Server struct {
 	diagnosticsLoad          func(context.Context) (map[string]any, error)
 	rateMu                   sync.Mutex
 	costlyRates              map[uuid.UUID]costlyRate
+	findRates                map[uuid.UUID]costlyRate
 }
 
 type contextKey string
@@ -1062,7 +1063,7 @@ func (s *Server) findSyslogMessage(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "payload search requires date=YYYY-MM-DD")
 		return
 	}
-	if !s.allowCostlyRequest(currentSession(request).User.ID) {
+	if !s.allowFindRequest(currentSession(request).User.ID) {
 		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
 		return
 	}
@@ -1141,7 +1142,7 @@ func (s *Server) countSyslogFind(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "payload search requires date=YYYY-MM-DD")
 		return
 	}
-	if !s.allowCostlyRequest(currentSession(request).User.ID) {
+	if !s.allowFindRequest(currentSession(request).User.ID) {
 		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
 		return
 	}
@@ -1819,21 +1820,31 @@ func parsePageLimit(request *http.Request) uint64 {
 }
 
 func (s *Server) allowCostlyRequest(userID uuid.UUID) bool {
+	return s.allowRate(userID, &s.costlyRates, 10)
+}
+
+// allowFindRequest budgets Syslog find/find-count separately so ↑/↓ navigation
+// is not starved by the global costly limit of 10/min.
+func (s *Server) allowFindRequest(userID uuid.UUID) bool {
+	return s.allowRate(userID, &s.findRates, 120)
+}
+
+func (s *Server) allowRate(userID uuid.UUID, rates *map[uuid.UUID]costlyRate, limit int) bool {
 	now := time.Now()
 	s.rateMu.Lock()
 	defer s.rateMu.Unlock()
-	if s.costlyRates == nil {
-		s.costlyRates = make(map[uuid.UUID]costlyRate)
+	if *rates == nil {
+		*rates = make(map[uuid.UUID]costlyRate)
 	}
-	rate := s.costlyRates[userID]
+	rate := (*rates)[userID]
 	if rate.window.IsZero() || now.Sub(rate.window) >= time.Minute {
 		rate = costlyRate{window: now}
 	}
-	if rate.count >= 10 {
+	if rate.count >= limit {
 		return false
 	}
 	rate.count++
-	s.costlyRates[userID] = rate
+	(*rates)[userID] = rate
 	return true
 }
 

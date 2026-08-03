@@ -81,6 +81,24 @@ func TestCountSyslogFindRequiresQ(t *testing.T) {
 	}
 }
 
+func TestFindRateLimitIndependentOfCostlyLimit(t *testing.T) {
+	server := &Server{}
+	userID := uuid.New()
+	for i := 0; i < 10; i++ {
+		if !server.allowCostlyRequest(userID) {
+			t.Fatalf("costly request %d unexpectedly denied", i+1)
+		}
+	}
+	if server.allowCostlyRequest(userID) {
+		t.Fatal("11th costly request should be denied")
+	}
+	for i := 0; i < 11; i++ {
+		if !server.allowFindRequest(userID) {
+			t.Fatalf("find request %d unexpectedly denied after costly exhaustion", i+1)
+		}
+	}
+}
+
 func TestListEventsRejectsConflictingCursors(t *testing.T) {
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet,

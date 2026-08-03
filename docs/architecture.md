@@ -49,11 +49,16 @@ engine. PostgreSQL owns policy revisions, durable discovery/bucket jobs,
 generation counters, deadline cursors, per-device projection leases (≤1
 **closed-hour/discover** job per SMG; the open UTC-hour bucket is lease-exempt
 so dense catch-up cannot starve live tip), deployment-wide ClickHouse heavy-lane
-lock for snapshot write/cutover, and watermarks. Claim prefers **real bucket
-backlog** across devices and per device (`open UTC-hour → older buckets →
-discover`), not frozen event-tip watermarks and not eternal discover ahead of
-hour catch-up. With `projection.threads≥2`, one worker can drain closed hours
-while another cutovers the live hour on the same SMG.
+lock for snapshot write/cutover, and watermarks. Open-hour exemption is a
+**claim-time** flag (`HoldsDeviceLease=false`): refresh/complete/fail must not
+DELETE or require a device lease by wall-clock hour, or they steal the sibling
+closed-hour lease after UTC rollover. Each projection thread uses a unique
+`worker_id` (`…-tN`) so concurrent jobs on one process do not share lease rows.
+Claim prefers **real bucket backlog** across devices and per device
+(`open UTC-hour → older buckets → discover`), not frozen event-tip watermarks
+and not eternal discover ahead of hour catch-up. With `projection.threads≥2`,
+one worker can drain closed hours while another cutovers the live hour on the
+same SMG.
 Empty-hour cutovers still advance the watermark to the bucket end (clamped to
 `now` for the open hour) so tip clocks do not freeze on the last AF call.
 Projection SLO uses **live health lag** while `bucketDepth>0`:

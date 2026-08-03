@@ -257,6 +257,10 @@ AF tip на тихом SMG (мало звонков) часто **шум**. Dens
      (env `CUSTOM_PROJECTION_*` — только seed пустой БД);
    - `projection.threads≥2` рекомендуется для dense catch-up: open UTC-hour
      lease-exempt и может cutover’иться параллельно с одним closed-hour job.
+   - Если `lastError` = `projection device lease changed before refresh`: это
+     регрессия lease-exempt (open-hour Complete/Refresh трогал чужой device
+     lease). После фикса open-hour помнит `HoldsDeviceLease=false` с claim и
+     не DELETE’ит sibling lease; нажмите Requeue failed на устройстве.
 3. Requeue failed jobs: admin
    `POST /api/devices/{deviceID}/projection/requeue-failed`
    (сбрасывает `failed`→`pending` для устройства и overflow-failed глобально).

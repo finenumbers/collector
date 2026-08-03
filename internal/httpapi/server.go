@@ -1033,6 +1033,17 @@ func (s *Server) findSyslogMessage(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "q is required")
 		return
 	}
+	before := request.URL.Query().Get("before")
+	beforeID := request.URL.Query().Get("before_id")
+	after := request.URL.Query().Get("after")
+	afterID := request.URL.Query().Get("after_id")
+	oldest := request.URL.Query().Get("oldest") == "1" || request.URL.Query().Get("oldest") == "true"
+	hasBefore := before != "" || beforeID != ""
+	hasAfter := after != "" || afterID != ""
+	if (hasBefore && hasAfter) || (oldest && (hasBefore || hasAfter)) {
+		writeError(writer, http.StatusBadRequest, "use only one of before, after, or oldest")
+		return
+	}
 	deviceID, ok := parseDeviceID(writer, request)
 	if !ok {
 		return
@@ -1055,21 +1066,35 @@ func (s *Server) findSyslogMessage(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusTooManyRequests, "search rate limit exceeded")
 		return
 	}
-	var cursor *analytics.SyslogMessageCursor
-	before := request.URL.Query().Get("before")
-	beforeID := request.URL.Query().Get("before_id")
-	if before != "" || beforeID != "" {
-		receivedAt, timeErr := time.Parse(time.RFC3339Nano, before)
-		eventID, idErr := uuid.Parse(beforeID)
+	var bound analytics.SyslogFindBound
+	parseCursor := func(ts, id string) (*analytics.SyslogMessageCursor, bool) {
+		receivedAt, timeErr := time.Parse(time.RFC3339Nano, ts)
+		eventID, idErr := uuid.Parse(id)
 		if timeErr != nil || idErr != nil {
 			writeError(writer, http.StatusBadRequest, "invalid event cursor")
+			return nil, false
+		}
+		return &analytics.SyslogMessageCursor{ReceivedAt: receivedAt, EventID: eventID}, true
+	}
+	switch {
+	case oldest:
+		bound.Oldest = true
+	case hasBefore:
+		cursor, ok := parseCursor(before, beforeID)
+		if !ok {
 			return
 		}
-		cursor = &analytics.SyslogMessageCursor{ReceivedAt: receivedAt, EventID: eventID}
+		bound.Before = cursor
+	case hasAfter:
+		cursor, ok := parseCursor(after, afterID)
+		if !ok {
+			return
+		}
+		bound.After = cursor
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 8*time.Second)
 	defer cancel()
-	match, err := s.Analytics.FindSyslogMessage(ctx, deviceID, search, cursor, timeRange)
+	match, err := s.Analytics.FindSyslogMessageBound(ctx, deviceID, search, bound, timeRange)
 	if err != nil {
 		if errors.Is(err, analytics.ErrSearchRequiresRange) {
 			writeError(writer, http.StatusBadRequest, "payload search requires date=YYYY-MM-DD")

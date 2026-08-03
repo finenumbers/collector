@@ -219,19 +219,23 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .search:focus-within { border-color: var(--accent); }
 .search svg { color: var(--muted); }
 .search input { flex: 1; height: calc(var(--control-height) - 2px); border: 0; padding: 0 7px 0 0; }
-.search.syslog-find { width: min(260px, 100%); flex: 0 1 260px; min-width: 0; padding-right: 4px; gap: 4px; }
+.search.syslog-find { width: min(300px, 100%); flex: 0 1 300px; min-width: 0; padding-right: 4px; gap: 4px; }
 .syslog-find-count { flex: none; color: var(--muted); font-size: 10px; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
-.syslog-find-next, .syslog-find-clear { flex: none; width: 26px; min-height: 26px; height: 26px;
-  padding: 0; display: inline-flex; align-items: center; justify-content: center;
+.syslog-find-prev, .syslog-find-next, .syslog-find-clear { flex: none; width: 26px; min-height: 26px;
+  height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   color: var(--muted); border-radius: var(--control-radius); }
-.syslog-find-next:hover:not(:disabled), .syslog-find-clear:hover:not(:disabled) {
+.syslog-find-prev:hover:not(:disabled), .syslog-find-next:hover:not(:disabled),
+.syslog-find-clear:hover:not(:disabled) {
   color: var(--text); background: #eef2f7; }
-.syslog-find-next:disabled, .syslog-find-clear:disabled { opacity: .35; cursor: default; }
-.syslog-find-hit { background: #bbf7d0; color: inherit; padding: 0 1px; border-radius: 2px; }
-.syslog-find-hit-active { background: #4ade80; outline: 1px solid #16a34a; }
-.syslog-find-row-active { background: #f0fdf4; }
-tr.syslog-find-row-active:hover { background: #dcfce7; }
+.syslog-find-prev:disabled, .syslog-find-next:disabled, .syslog-find-clear:disabled {
+  opacity: .35; cursor: default; }
+.syslog-find-hit { background: #4ade80; color: #14532d; padding: 0 1px; border-radius: 2px; }
+.syslog-find-hit-active { background: #22c55e; color: #052e16; outline: 1px solid #15803d; }
+.syslog-find-row-active { background: #fef08a; }
+tr.syslog-find-row-active:hover { background: #fde047; }
+.syslog-raw-line.syslog-find-row-active { background: #fef08a; }
+.syslog-raw-line.syslog-find-row-active:hover { background: #fde047; }
 .table-shell { position: relative; min-height: 0; height: 0; flex: 1 1 0; overflow-x: auto; overflow-y: scroll;
   scrollbar-gutter: stable; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--panel); }
 .table-loading { position: sticky; top: 0; z-index: 5; height: 2px; background: var(--accent); animation: pulse 1s ease-in-out infinite; }

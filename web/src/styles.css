@@ -226,6 +226,7 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .search.syslog-find { width: min(300px, 100%); flex: 0 1 300px; min-width: 0; padding-right: 4px; gap: 4px; }
 .syslog-find-count { flex: none; color: var(--muted); font-size: 10px; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
+.syslog-find-error { margin: -4px 0 8px; color: var(--warn); font-size: 11px; }
 .syslog-find-prev, .syslog-find-next, .syslog-find-clear { flex: none; width: 26px; min-height: 26px;
   height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   color: var(--muted); border-radius: var(--control-radius); }

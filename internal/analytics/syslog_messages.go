@@ -54,6 +54,18 @@ type SyslogMessagePage struct {
 	HasMore bool               `json:"hasMore"`
 }
 
+// syslogTime matches ClickHouse DateTime64(6) so JSON round-trips cannot skip rows.
+func syslogTime(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Microsecond)
+}
+
+func normalizeSyslogCursor(cursor *SyslogMessageCursor) *SyslogMessageCursor {
+	if cursor == nil {
+		return nil
+	}
+	return &SyslogMessageCursor{ReceivedAt: syslogTime(cursor.ReceivedAt), EventID: cursor.EventID}
+}
+
 func (c *Client) InsertSyslogMessagesBatch(
 	ctx context.Context, messages []SyslogMessage,
 ) error {
@@ -141,6 +153,20 @@ func (c *Client) ListSyslogMessagesBound(
 	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
 		return SyslogMessagePage{}, ErrSearchRequiresRange
 	}
+	// From seeks: resolve event_id → exact received_at in CH. JSON/RFC3339 round-trips
+	// can drift past DateTime64(6) equality and skip the target row while still returning
+	// a nearby window that happens to contain the same payload substring.
+	if bound.From != nil {
+		if exact, found, lookErr := c.lookupSyslogCursor(ctx, deviceID, bound.From.EventID, timeRange); lookErr != nil {
+			return SyslogMessagePage{}, lookErr
+		} else if found {
+			bound.From = &exact
+		} else {
+			bound.From = normalizeSyslogCursor(bound.From)
+		}
+	}
+	bound.Before = normalizeSyslogCursor(bound.Before)
+	bound.After = normalizeSyslogCursor(bound.After)
 	// No FINAL: event_id is unique per insert (see custom_projection syslog discovery).
 	query := `SELECT event_id,device_id,received_at,toString(source_ip),source_port,
 		transport,payload,payload_sha256
@@ -206,6 +232,33 @@ func (c *Client) ListSyslogMessagesBound(
 		}
 	}
 	return SyslogMessagePage{Items: items, HasMore: hasMore}, nil
+}
+
+func (c *Client) lookupSyslogCursor(
+	ctx context.Context, deviceID, eventID uuid.UUID, timeRange *TimeRange,
+) (SyslogMessageCursor, bool, error) {
+	query := `SELECT event_id,received_at FROM collector.syslog_messages
+		WHERE device_id=? AND event_id=?`
+	args := []any{deviceID, eventID}
+	if timeRange != nil {
+		query += ` AND received_at>=? AND received_at<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
+	query += ` LIMIT 1`
+	rows, err := c.query(ctx, query, args...)
+	if err != nil {
+		return SyslogMessageCursor{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return SyslogMessageCursor{}, false, rows.Err()
+	}
+	var cursor SyslogMessageCursor
+	if err := rows.Scan(&cursor.EventID, &cursor.ReceivedAt); err != nil {
+		return SyslogMessageCursor{}, false, err
+	}
+	cursor.ReceivedAt = syslogTime(cursor.ReceivedAt)
+	return cursor, true, rows.Err()
 }
 
 // SyslogFindResult is one payload match within a device day.
@@ -361,6 +414,7 @@ func (c *Client) ListSyslogFindMatches(
 		if err := rows.Scan(&item.EventID, &item.ReceivedAt); err != nil {
 			return SyslogFindMatchPage{}, err
 		}
+		item.ReceivedAt = syslogTime(item.ReceivedAt)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {

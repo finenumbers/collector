@@ -1653,7 +1653,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     feedEpochRef.current += 1
     let active = true
     const timer = window.setTimeout(() => {
-      feedEpochRef.current += 1
+      const epoch = ++feedEpochRef.current
       feedRef.current = { rows: [], cursor: null, hasMore: false, hasNewer: false }
       setRows([])
       setHasMore(false)
@@ -1667,7 +1667,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setBusy(true)
       api<PageResponse<DataRow>>(pagePath())
         .then(({ items, hasMore: more, nextCursor }) => {
-          if (!active || generation !== generationRef.current) return
+          // Honor feedEpoch so a Find jump cannot be overwritten by a stale day page.
+          if (!active || generation !== generationRef.current || epoch !== feedEpochRef.current) {
+            return
+          }
           const nextRows = items || []
           feedRef.current = {
             rows: nextRows, cursor: nextCursor || null, hasMore: more, hasNewer: false,
@@ -1678,12 +1681,18 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           cursorGenerationRef.current = generation
         })
         .catch((reason) => {
-          if (active && generation === generationRef.current) {
+          if (
+            active && generation === generationRef.current && epoch === feedEpochRef.current
+          ) {
             setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
           }
         })
         .finally(() => {
-          if (active && generation === generationRef.current) setBusy(false)
+          if (
+            active && generation === generationRef.current && epoch === feedEpochRef.current
+          ) {
+            setBusy(false)
+          }
         })
     }, 250)
     return () => {
@@ -1851,6 +1860,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   const jumpSyslogToHit = useCallback(async (
     hit: SyslogMatchCursor,
     findGeneration: number,
+    needle = '',
   ) => {
     if (findGeneration !== syslogFindGenerationRef.current) return false
     if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) {
@@ -1860,17 +1870,31 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     const generation = cursorGenerationRef.current || generationRef.current
     const tookBusy = !loadingRef.current
     if (tookBusy) setBusy(true)
-    try {
+    const loadFrom = async (withQ: boolean) => {
       const path = `/devices/${device.id}/syslog-messages?date=${encodeURIComponent(date)}`
         + `&limit=${PAGE_SIZE}&from=${encodeURIComponent(hit.receivedAt)}`
         + `&from_id=${encodeURIComponent(hit.eventId)}`
-      const { items, hasMore: more, hasNewer: newer, nextCursor } = await api<PageResponse<DataRow>>(
-        path, { timeoutMs: 35000 },
-      )
+        + (withQ && needle ? `&q=${encodeURIComponent(needle)}` : '')
+      return api<PageResponse<DataRow>>(path, { timeoutMs: 35000 })
+    }
+    try {
+      let page = await loadFrom(false)
       if (findGeneration !== syslogFindGenerationRef.current || epoch !== feedEpochRef.current) {
         return false
       }
-      const nextRows = items || []
+      let nextRows = page.items || []
+      // Fallback: seek within q-matches if the full-day from-window missed the hit
+      // (timestamp precision / replica lag) — still opens a scrollable window.
+      if (!nextRows.some((row) => (row as EventRow).eventId === hit.eventId) && needle) {
+        page = await loadFrom(true)
+        if (findGeneration !== syslogFindGenerationRef.current || epoch !== feedEpochRef.current) {
+          return false
+        }
+        nextRows = page.items || []
+      }
+      const more = page.hasMore
+      const newer = page.hasNewer
+      const nextCursor = page.nextCursor
       feedRef.current = {
         rows: nextRows, cursor: nextCursor || null, hasMore: more, hasNewer: Boolean(newer),
       }
@@ -1941,15 +1965,27 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     hideMode: boolean,
   ): Promise<boolean> => {
     if (findGeneration !== syslogFindGenerationRef.current) return false
-    const located = hideMode
+    const needle = syslogFindNeedleRef.current
+    let located = hideMode
       ? await ensureSyslogHitInFilteredFeed(hit, findGeneration)
-      : await jumpSyslogToHit(hit, findGeneration)
+      : await jumpSyslogToHit(hit, findGeneration, needle)
     if (findGeneration !== syslogFindGenerationRef.current) return false
     if (!located) return false
     setSyslogFindHitState(hit)
     setSyslogFindIndexState(index)
-    await centerSyslogHit(hit.eventId, findGeneration)
-    return findGeneration === syslogFindGenerationRef.current
+    setSyslogFindError('')
+    let centered = await centerSyslogHit(hit.eventId, findGeneration)
+    if (findGeneration !== syslogFindGenerationRef.current) return false
+    // Stale day-page responses used to steal the jump window; re-seek once if the
+    // hit vanished from the feed before we could center it.
+    if (!centered || !(feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) {
+      located = hideMode
+        ? await ensureSyslogHitInFilteredFeed(hit, findGeneration)
+        : await jumpSyslogToHit(hit, findGeneration, needle)
+      if (findGeneration !== syslogFindGenerationRef.current || !located) return false
+      centered = await centerSyslogHit(hit.eventId, findGeneration)
+    }
+    return findGeneration === syslogFindGenerationRef.current && Boolean(centered || located)
   }, [
     centerSyslogHit, ensureSyslogHitInFilteredFeed, jumpSyslogToHit,
     setSyslogFindHitState, setSyslogFindIndexState,
@@ -2119,8 +2155,6 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         )
         if (!ok && findGeneration === syslogFindGenerationRef.current) {
           setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
-        } else if (ok) {
-          setSyslogFindError('')
         }
       } finally {
         if (findGeneration === syslogFindGenerationRef.current) setSyslogFindBusyState(false)
@@ -2152,7 +2186,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             )
             if (!ok && findGeneration === syslogFindGenerationRef.current) {
               setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
-            } else if (ok) setSyslogFindError('')
+            }
           }
         } finally {
           if (findGeneration === syslogFindGenerationRef.current) setSyslogFindBusyState(false)
@@ -2187,7 +2221,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         )
         if (!ok && findGeneration === syslogFindGenerationRef.current) {
           setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
-        } else if (ok) setSyslogFindError('')
+        }
       }
     } catch (reason) {
       if (findGeneration === syslogFindGenerationRef.current) {

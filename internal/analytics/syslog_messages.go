@@ -119,12 +119,13 @@ func (c *Client) ListSyslogMessagesBound(
 	if modes > 1 {
 		return SyslogMessagePage{}, errors.New("conflicting syslog list cursors")
 	}
-	// Payload substring scans need a longer budget than default Interactive (10s).
+	// Payload scans and From/After seeks on dense device-days need more than
+	// default Interactive (10s); plain top-of-day / before pages stay short.
 	var (
 		release func()
 		err     error
 	)
-	if search != "" {
+	if search != "" || bound.From != nil || bound.After != nil {
 		ctx, release, err = c.queryContextFindScan(ctx)
 	} else {
 		ctx, release, err = c.queryContext(ctx, workload.Interactive)

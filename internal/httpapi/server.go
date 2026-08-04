@@ -1315,8 +1315,9 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 		}
 		bound.After = cursor
 	}
+	// Payload search and seek cursors need a longer budget than plain top-of-day pages.
 	listTimeout := 8 * time.Second
-	if searchQ != "" {
+	if searchQ != "" || hasFrom || hasAfter || hasBefore {
 		listTimeout = 35 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), listTimeout)
@@ -1340,14 +1341,20 @@ func (s *Server) listEvents(writer http.ResponseWriter, request *http.Request) {
 	hasOlder := page.HasMore
 	if hasFrom && len(page.Items) > 0 {
 		first := page.Items[0]
+		// Soft probe: never fail the page if newer-check is slow/errors; assume there
+		// may be newer rows so Find jump windows stay scrollable upward.
+		probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
 		probe, probeErr := s.Analytics.ListSyslogMessagesBound(
-			ctx, deviceID, request.URL.Query().Get("q"), 1,
+			probeCtx, deviceID, searchQ, 1,
 			analytics.SyslogListBound{After: &analytics.SyslogMessageCursor{
 				ReceivedAt: first.ReceivedAt, EventID: first.EventID,
 			}}, timeRange,
 		)
+		probeCancel()
 		if probeErr == nil {
 			hasNewer = len(probe.Items) > 0
+		} else {
+			hasNewer = true
 		}
 	}
 	if hasAfter {

@@ -1864,11 +1864,14 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     hit: SyslogMatchCursor,
     findGeneration: number,
     needle = '',
-  ) => {
-    if (findGeneration !== syslogFindGenerationRef.current) return false
-    if ((feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) {
-      return true
-    }
+  ): Promise<SyslogMatchCursor | null> => {
+    if (findGeneration !== syslogFindGenerationRef.current) return null
+    const rowsNow = () => feedRef.current.rows as EventRow[]
+    if (rowsNow().some((row) => row.eventId === hit.eventId)) return hit
+    const needleLower = needle.trim().toLowerCase()
+    const payloadHit = (row: EventRow) => Boolean(
+      needleLower && row.payload.toLowerCase().includes(needleLower),
+    )
     const epoch = ++feedEpochRef.current
     const generation = cursorGenerationRef.current || generationRef.current
     const tookBusy = !loadingRef.current
@@ -1880,21 +1883,28 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         + (withQ && needle ? `&q=${encodeURIComponent(needle)}` : '')
       return api<PageResponse<DataRow>>(path, { timeoutMs: 35000 })
     }
+    const resolveIn = (nextRows: EventRow[]): SyslogMatchCursor | null => {
+      if (nextRows.some((row) => row.eventId === hit.eventId)) return hit
+      // Nearby window often has the same call's other lines with the needle.
+      const fuzzy = nextRows.find(payloadHit)
+      return fuzzy ? { eventId: fuzzy.eventId, receivedAt: fuzzy.receivedAt } : null
+    }
     try {
       let page = await loadFrom(false)
       if (findGeneration !== syslogFindGenerationRef.current || epoch !== feedEpochRef.current) {
-        return false
+        return null
       }
-      let nextRows = page.items || []
-      // Fallback: seek within q-matches if the full-day from-window missed the hit
-      // (timestamp precision / replica lag) — still opens a scrollable window.
-      if (!nextRows.some((row) => (row as EventRow).eventId === hit.eventId) && needle) {
+      let nextRows = (page.items || []) as EventRow[]
+      let resolved = resolveIn(nextRows)
+      if (!resolved && needle) {
         page = await loadFrom(true)
         if (findGeneration !== syslogFindGenerationRef.current || epoch !== feedEpochRef.current) {
-          return false
+          return null
         }
-        nextRows = page.items || []
+        nextRows = (page.items || []) as EventRow[]
+        resolved = resolveIn(nextRows)
       }
+      if (!resolved) return null
       const more = page.hasMore
       const newer = page.hasNewer
       const nextCursor = page.nextCursor
@@ -1905,7 +1915,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       setHasMore(more)
       setHasNewer(Boolean(newer))
       cursorGenerationRef.current = generation || generationRef.current
-      return nextRows.some((row) => (row as EventRow).eventId === hit.eventId)
+      return resolved
     } catch (reason) {
       if (findGeneration === syslogFindGenerationRef.current) {
         const message = reason instanceof Error ? reason.message : 'Не удалось загрузить данные'
@@ -1915,7 +1925,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             : message,
         )
       }
-      return false
+      return null
     } finally {
       if (tookBusy && findGeneration === syslogFindGenerationRef.current) setBusy(false)
     }
@@ -1969,28 +1979,30 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   ): Promise<boolean> => {
     if (findGeneration !== syslogFindGenerationRef.current) return false
     const needle = syslogFindNeedleRef.current
-    const inFeed = () => (feedRef.current.rows as EventRow[]).some(
-      (row) => row.eventId === hit.eventId,
-    )
-    let located = hideMode
-      ? await ensureSyslogHitInFilteredFeed(hit, findGeneration)
-      : await jumpSyslogToHit(hit, findGeneration, needle)
-    if (findGeneration !== syslogFindGenerationRef.current) return false
-    if (!located && !inFeed()) {
-      // One retry if a concurrent day-page stole the window.
-      located = hideMode
-        ? await ensureSyslogHitInFilteredFeed(hit, findGeneration)
-        : await jumpSyslogToHit(hit, findGeneration, needle)
+    let resolved: SyslogMatchCursor | null = null
+    if (hideMode) {
+      const ok = await ensureSyslogHitInFilteredFeed(hit, findGeneration)
+      if (ok) resolved = hit
+    } else {
+      resolved = await jumpSyslogToHit(hit, findGeneration, needle)
+      if (!resolved) {
+        resolved = await jumpSyslogToHit(hit, findGeneration, needle)
+      }
     }
-    if (findGeneration !== syslogFindGenerationRef.current) return false
-    if (!located && !inFeed()) return false
-    // Success = match rows are in the feed. Centering is best-effort only —
-    // failing to scroll must not surface «Не удалось открыть совпадение».
-    setSyslogFindHitState(hit)
+    if (findGeneration !== syslogFindGenerationRef.current || !resolved) return false
+    // Keep match-index cursor aligned when jump remapped to a nearby payload hit.
+    if (
+      syslogMatchItemsRef.current[index - 1]
+      && syslogMatchItemsRef.current[index - 1].eventId !== resolved.eventId
+    ) {
+      syslogMatchItemsRef.current[index - 1] = resolved
+    }
+    setSyslogFindHitState(resolved)
     setSyslogFindIndexState(index)
     setSyslogFindError('')
-    await centerSyslogHit(hit.eventId, findGeneration)
-    return findGeneration === syslogFindGenerationRef.current && inFeed()
+    // Centering is best-effort; never fail locate after the feed already has the hit.
+    void centerSyslogHit(resolved.eventId, findGeneration)
+    return true
   }, [
     centerSyslogHit, ensureSyslogHitInFilteredFeed, jumpSyslogToHit,
     setSyslogFindHitState, setSyslogFindIndexState,
@@ -2115,6 +2127,19 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         )
         if (findGeneration !== syslogFindGenerationRef.current) return
         if (!ok) {
+          // Last resort: jump window already shows needle highlights — adopt first row.
+          const needleLower = needle.toLowerCase()
+          const fuzzy = (feedRef.current.rows as EventRow[]).find((row) =>
+            row.payload.toLowerCase().includes(needleLower))
+          if (fuzzy) {
+            const adopted = { eventId: fuzzy.eventId, receivedAt: fuzzy.receivedAt }
+            syslogMatchItemsRef.current[0] = adopted
+            setSyslogFindHitState(adopted)
+            setSyslogFindIndexState(1)
+            setSyslogFindError('')
+            finishCount()
+            return
+          }
           setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
           return
         }

@@ -1837,9 +1837,11 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   ): Promise<boolean> => {
     const root = tableShellRef.current
     if (!root) return false
-    for (let i = 0; i < 45; i++) {
+    // UUID is safe in CSS attr selectors; avoid CSS.escape dependency edge cases.
+    const selector = `[data-event-id="${eventId}"]`
+    for (let i = 0; i < 40; i++) {
       if (findGeneration !== syslogFindGenerationRef.current) return false
-      const target = root.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`)
+      const target = root.querySelector(selector)
       if (target instanceof HTMLElement) {
         const rootRect = root.getBoundingClientRect()
         const targetRect = target.getBoundingClientRect()
@@ -1851,8 +1853,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           - (rootRect2.top + rootRect2.height / 2)
         return true
       }
+      // Wait for React commit of setRows — rAF alone is not enough under load.
       await new Promise<void>((resolve) => {
-        window.requestAnimationFrame(() => resolve())
+        window.setTimeout(resolve, 50)
       })
     }
     return false
@@ -1966,26 +1969,28 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
   ): Promise<boolean> => {
     if (findGeneration !== syslogFindGenerationRef.current) return false
     const needle = syslogFindNeedleRef.current
+    const inFeed = () => (feedRef.current.rows as EventRow[]).some(
+      (row) => row.eventId === hit.eventId,
+    )
     let located = hideMode
       ? await ensureSyslogHitInFilteredFeed(hit, findGeneration)
       : await jumpSyslogToHit(hit, findGeneration, needle)
     if (findGeneration !== syslogFindGenerationRef.current) return false
-    if (!located) return false
-    setSyslogFindHitState(hit)
-    setSyslogFindIndexState(index)
-    setSyslogFindError('')
-    let centered = await centerSyslogHit(hit.eventId, findGeneration)
-    if (findGeneration !== syslogFindGenerationRef.current) return false
-    // Stale day-page responses used to steal the jump window; re-seek once if the
-    // hit vanished from the feed before we could center it.
-    if (!centered || !(feedRef.current.rows as EventRow[]).some((row) => row.eventId === hit.eventId)) {
+    if (!located && !inFeed()) {
+      // One retry if a concurrent day-page stole the window.
       located = hideMode
         ? await ensureSyslogHitInFilteredFeed(hit, findGeneration)
         : await jumpSyslogToHit(hit, findGeneration, needle)
-      if (findGeneration !== syslogFindGenerationRef.current || !located) return false
-      centered = await centerSyslogHit(hit.eventId, findGeneration)
     }
-    return findGeneration === syslogFindGenerationRef.current && Boolean(centered || located)
+    if (findGeneration !== syslogFindGenerationRef.current) return false
+    if (!located && !inFeed()) return false
+    // Success = match rows are in the feed. Centering is best-effort only —
+    // failing to scroll must not surface «Не удалось открыть совпадение».
+    setSyslogFindHitState(hit)
+    setSyslogFindIndexState(index)
+    setSyslogFindError('')
+    await centerSyslogHit(hit.eventId, findGeneration)
+    return findGeneration === syslogFindGenerationRef.current && inFeed()
   }, [
     centerSyslogHit, ensureSyslogHitInFilteredFeed, jumpSyslogToHit,
     setSyslogFindHitState, setSyslogFindIndexState,

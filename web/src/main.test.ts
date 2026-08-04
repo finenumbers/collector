@@ -113,6 +113,7 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('from_id=')
     expect(main).toContain('loadNewer')
     expect(main).toContain('epoch !== feedEpochRef.current')
+    expect(main).toContain('Centering is best-effort only')
     expect(main).not.toContain('ensureSyslogEventVisible')
     expect(main).not.toContain("behavior: 'smooth'")
     expect(main).toContain("syslogHideStream ? syslogCommittedFind : ''")

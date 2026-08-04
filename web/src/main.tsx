@@ -2000,97 +2000,105 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     const findGeneration = ++syslogFindGenerationRef.current
     resetSyslogMatchIndex()
     let cancelled = false
-    setSyslogFindHitState(null)
-    setSyslogFindIndexState(0)
-    setSyslogFindTotalState(0)
-    setSyslogFindError('')
-    setSyslogFindBusyState(Boolean(needle))
-    if (!needle) {
-      return () => {
-        cancelled = true
-      }
-    }
-    const finishCount = () => {
-      refreshSyslogFindCount(needle, findGeneration)
-    }
-    if (hideMode) {
-      const waitFeed = async () => {
-        for (let i = 0; i < 100; i++) {
-          if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
-          if (!loadingRef.current && cursorGenerationRef.current) break
-          await new Promise((resolve) => window.setTimeout(resolve, 50))
-        }
-        if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
-        const items = (feedRef.current.rows as EventRow[]).map((row) => ({
-          eventId: row.eventId, receivedAt: row.receivedAt,
-        }))
-        syslogMatchItemsRef.current = items
-        syslogMatchHasMoreRef.current = feedRef.current.hasMore
-        const last = items[items.length - 1]
-        syslogMatchCursorRef.current = last
-          ? { before: last.receivedAt, beforeId: last.eventId }
-          : null
-        if (!items[0]) {
-          setSyslogFindHitState(null)
-          setSyslogFindIndexState(0)
-          setSyslogFindTotalState(0)
-          setSyslogFindBusyState(false)
-          return
-        }
-        const ok = await locateSyslogMatchRef.current(
-          items[0], 1, findGeneration, true,
-        )
-        if (findGeneration === syslogFindGenerationRef.current) {
-          setSyslogFindBusyState(false)
-          if (ok) finishCount()
-          else setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
-        }
-      }
-      void waitFeed()
-      return () => {
-        cancelled = true
-      }
-    }
-    fetchSyslogMatchPage(needle).then(async (body) => {
-      if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
-      const items = body.items || []
-      syslogMatchItemsRef.current = items
-      syslogMatchHasMoreRef.current = Boolean(body.hasMore)
-      syslogMatchCursorRef.current = body.nextCursor || null
-      if (!items[0]) {
-        setSyslogFindHitState(null)
-        setSyslogFindIndexState(0)
-        setSyslogFindTotalState(0)
-        setSyslogFindError('')
-        return
-      }
-      const ok = await locateSyslogMatchRef.current(
-        items[0], 1, findGeneration, false,
-      )
-      if (findGeneration !== syslogFindGenerationRef.current) return
-      if (!ok) {
-        setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
-        return
-      }
-      finishCount()
-    }).catch((reason) => {
+    // Defer setState out of the effect body (eslint react-hooks/set-state-in-effect).
+    const resetTimer = window.setTimeout(() => {
       if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
       setSyslogFindHitState(null)
       setSyslogFindIndexState(0)
       setSyslogFindTotalState(0)
-      const message = reason instanceof Error ? reason.message : 'Ошибка поиска'
-      setSyslogFindError(
-        /abort|timeout|timed out/i.test(message)
-          ? 'Поиск не уложился во время. Уточните запрос или включите «Скрывать поток».'
-          : message,
-      )
-    }).finally(() => {
-      if (findGeneration === syslogFindGenerationRef.current) {
-        setSyslogFindBusyState(false)
+      setSyslogFindError('')
+      setSyslogFindBusyState(Boolean(needle))
+    }, 0)
+    if (!needle) {
+      return () => {
+        cancelled = true
+        window.clearTimeout(resetTimer)
       }
-    })
+    }
+    const runTimer = window.setTimeout(() => {
+      if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+      const finishCount = () => {
+        refreshSyslogFindCount(needle, findGeneration)
+      }
+      if (hideMode) {
+        const waitFeed = async () => {
+          for (let i = 0; i < 100; i++) {
+            if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+            if (!loadingRef.current && cursorGenerationRef.current) break
+            await new Promise((resolve) => window.setTimeout(resolve, 50))
+          }
+          if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+          const items = (feedRef.current.rows as EventRow[]).map((row) => ({
+            eventId: row.eventId, receivedAt: row.receivedAt,
+          }))
+          syslogMatchItemsRef.current = items
+          syslogMatchHasMoreRef.current = feedRef.current.hasMore
+          const last = items[items.length - 1]
+          syslogMatchCursorRef.current = last
+            ? { before: last.receivedAt, beforeId: last.eventId }
+            : null
+          if (!items[0]) {
+            setSyslogFindHitState(null)
+            setSyslogFindIndexState(0)
+            setSyslogFindTotalState(0)
+            setSyslogFindBusyState(false)
+            return
+          }
+          const ok = await locateSyslogMatchRef.current(
+            items[0], 1, findGeneration, true,
+          )
+          if (findGeneration === syslogFindGenerationRef.current) {
+            setSyslogFindBusyState(false)
+            if (ok) finishCount()
+            else setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
+          }
+        }
+        void waitFeed()
+        return
+      }
+      fetchSyslogMatchPage(needle).then(async (body) => {
+        if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+        const items = body.items || []
+        syslogMatchItemsRef.current = items
+        syslogMatchHasMoreRef.current = Boolean(body.hasMore)
+        syslogMatchCursorRef.current = body.nextCursor || null
+        if (!items[0]) {
+          setSyslogFindHitState(null)
+          setSyslogFindIndexState(0)
+          setSyslogFindTotalState(0)
+          setSyslogFindError('')
+          return
+        }
+        const ok = await locateSyslogMatchRef.current(
+          items[0], 1, findGeneration, false,
+        )
+        if (findGeneration !== syslogFindGenerationRef.current) return
+        if (!ok) {
+          setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
+          return
+        }
+        finishCount()
+      }).catch((reason) => {
+        if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
+        setSyslogFindHitState(null)
+        setSyslogFindIndexState(0)
+        setSyslogFindTotalState(0)
+        const message = reason instanceof Error ? reason.message : 'Ошибка поиска'
+        setSyslogFindError(
+          /abort|timeout|timed out/i.test(message)
+            ? 'Поиск не уложился во время. Уточните запрос или включите «Скрывать поток».'
+            : message,
+        )
+      }).finally(() => {
+        if (findGeneration === syslogFindGenerationRef.current) {
+          setSyslogFindBusyState(false)
+        }
+      })
+    }, 0)
     return () => {
       cancelled = true
+      window.clearTimeout(resetTimer)
+      window.clearTimeout(runTimer)
     }
   }, [
     dataset, date, device.id, fetchSyslogMatchPage, refreshSyslogFindCount,

@@ -223,10 +223,15 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .search:focus-within { border-color: var(--accent); }
 .search svg { color: var(--muted); }
 .search input { flex: 1; height: calc(var(--control-height) - 2px); border: 0; padding: 0 7px 0 0; }
-.search.syslog-find { width: min(300px, 100%); flex: 0 1 300px; min-width: 0; padding-right: 4px; gap: 4px; }
+.search.syslog-find { width: min(420px, 100%); flex: 0 1 420px; min-width: 0; padding-right: 4px; gap: 4px; }
 .syslog-find-count { flex: none; color: var(--muted); font-size: 10px; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
 .syslog-find-error { margin: -4px 0 8px; color: var(--warn); font-size: 11px; }
+.syslog-find-submit { flex: none; height: 26px; min-height: 26px; padding: 0 8px;
+  font-size: 11px; color: #174ea6; background: var(--accent-soft);
+  border-radius: var(--control-radius); }
+.syslog-find-submit:hover:not(:disabled) { background: #d9e8ff; }
+.syslog-find-submit:disabled { opacity: .35; cursor: default; }
 .syslog-find-prev, .syslog-find-next, .syslog-find-clear { flex: none; width: 26px; min-height: 26px;
   height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
   color: var(--muted); border-radius: var(--control-radius); }

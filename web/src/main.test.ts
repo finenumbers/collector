@@ -85,6 +85,9 @@ describe('custom antifraud UI cleanup', () => {
   it('uses Syslog find jump without filtering the day feed', () => {
     expect(main).toContain('function highlightFind')
     expect(main).toContain('syslogFind')
+    expect(main).toContain('syslogCommittedFind')
+    expect(main).toContain('submitSyslogFind')
+    expect(main).toContain('syslog-find-submit')
     expect(main).toContain('syslogHideStream')
     expect(main).toContain('Скрывать поток')
     expect(main).toContain('collector:syslog-hide-stream')
@@ -105,14 +108,16 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).toContain('/syslog-messages/find-count?')
     expect(main).toContain('oldest=1')
     expect(main).toContain('jumpSyslogToHit')
+    expect(main).toContain('timeoutMs: 35000')
     expect(main).toContain('ensureSyslogHitInFilteredFeed')
     expect(main).toContain('from_id=')
     expect(main).toContain('loadNewer')
     expect(main).not.toContain('ensureSyslogEventVisible')
     expect(main).not.toContain("behavior: 'smooth'")
-    expect(main).toContain("syslogHideStream ? syslogFind : ''")
+    expect(main).toContain("syslogHideStream ? syslogCommittedFind : ''")
     expect(main).toContain('&q=${encodeURIComponent(syslogListQ)}')
     expect(main).toContain('Поиск не уложился во время')
+    expect(main).toContain('Не удалось открыть совпадение в ленте')
   })
 
   it('hides antifraud tab when antifraudEnabled is false', () => {

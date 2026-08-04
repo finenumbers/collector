@@ -719,6 +719,7 @@ function highlightFind(text: string, find: string, active: boolean): ReactNode {
 
 let csrfToken = ''
 const PAGE_SIZE = 100
+const SYSLOG_FIND_LOCATE_ERROR = 'Не удалось открыть совпадение в ленте. Повторите поиск или включите «Скрывать поток».'
 
 async function restoreCSRF(): Promise<boolean> {
   try {
@@ -1486,6 +1487,10 @@ function ExportButton({ deviceID, dataset, query, date, filters }: {
 function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset; admin: boolean }) {
   const [query, setQuery] = useState('')
   const [syslogFind, setSyslogFind] = useState('')
+  /** Committed Find needle (Submit only). Drives hide-stream q= and active search session. */
+  const [syslogCommittedFind, setSyslogCommittedFind] = useState('')
+  /** Bumps on each Найти so the same needle can re-run. */
+  const [syslogSearchToken, setSyslogSearchToken] = useState(0)
   const [syslogFindHit, setSyslogFindHit] = useState<{
     eventId: string
     receivedAt: string
@@ -1567,8 +1572,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         ? antifraudFiltersToQuery(antifraudColumnFilters)
         : undefined
   const title = navigation.find((item) => item.id === dataset)?.label || dataset
-  // Only hide-stream + non-empty find puts q= on the list path (avoids churn when hide is off).
-  const syslogListQ = dataset === 'syslog' && syslogHideStream ? syslogFind.trim() : ''
+  // Only hide-stream + committed find puts q= on the list path (typing alone must not reload).
+  const syslogListQ = dataset === 'syslog' && syslogHideStream ? syslogCommittedFind.trim() : ''
   const pagePath = useCallback((pageCursor?: PageCursor) => {
     if (dataset === 'calls') {
       const params = new URLSearchParams()
@@ -1798,7 +1803,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     return () => observer.disconnect()
   }, [dataset, hasNewer, loadNewer])
   const syslogFindTrim = syslogFind.trim()
-  const syslogHideFind = syslogHideStream && Boolean(syslogFindTrim)
+  const syslogCommittedTrim = syslogCommittedFind.trim()
+  const syslogHideFind = syslogHideStream && Boolean(syslogCommittedTrim)
   const syslogActiveEventId = syslogFindHit?.eventId || ''
   type SyslogMatchCursor = { eventId: string; receivedAt: string }
   type SyslogFindMatchesResponse = {
@@ -1858,7 +1864,9 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       const path = `/devices/${device.id}/syslog-messages?date=${encodeURIComponent(date)}`
         + `&limit=${PAGE_SIZE}&from=${encodeURIComponent(hit.receivedAt)}`
         + `&from_id=${encodeURIComponent(hit.eventId)}`
-      const { items, hasMore: more, hasNewer: newer, nextCursor } = await api<PageResponse<DataRow>>(path)
+      const { items, hasMore: more, hasNewer: newer, nextCursor } = await api<PageResponse<DataRow>>(
+        path, { timeoutMs: 35000 },
+      )
       if (findGeneration !== syslogFindGenerationRef.current || epoch !== feedEpochRef.current) {
         return false
       }
@@ -1873,7 +1881,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       return nextRows.some((row) => (row as EventRow).eventId === hit.eventId)
     } catch (reason) {
       if (findGeneration === syslogFindGenerationRef.current) {
-        setLoadError(reason instanceof Error ? reason.message : 'Не удалось загрузить данные')
+        const message = reason instanceof Error ? reason.message : 'Не удалось загрузить данные'
+        setLoadError(
+          /abort|timeout|timed out/i.test(message)
+            ? 'Не удалось открыть совпадение: таймаут загрузки окна ленты.'
+            : message,
+        )
       }
       return false
     } finally {
@@ -1975,18 +1988,19 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       ? { before: last.receivedAt, beforeId: last.eventId }
       : null
   }, [hasMore, rows, syslogHideFind])
-  // Single invalidation + search session (no generation bump in onChange).
+  // Search runs only on committed needle (Найти / Enter), not while typing.
   useEffect(() => {
     if (dataset !== 'syslog') {
       syslogFindGenerationRef.current += 1
       return
     }
-    const needle = syslogFindTrim
+    const needle = syslogCommittedTrim
     const hideMode = syslogHideStream && Boolean(needle)
     syslogFindNeedleRef.current = needle
     const findGeneration = ++syslogFindGenerationRef.current
     resetSyslogMatchIndex()
     let cancelled = false
+    // Defer setState out of the effect body (eslint react-hooks/set-state-in-effect).
     const resetTimer = window.setTimeout(() => {
       if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
       setSyslogFindHitState(null)
@@ -2001,13 +2015,12 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         window.clearTimeout(resetTimer)
       }
     }
-    const timer = window.setTimeout(() => {
+    const runTimer = window.setTimeout(() => {
       if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
       const finishCount = () => {
         refreshSyslogFindCount(needle, findGeneration)
       }
       if (hideMode) {
-        // Wait for q-feed, then locate first loaded match.
         const waitFeed = async () => {
           for (let i = 0; i < 100; i++) {
             if (cancelled || findGeneration !== syslogFindGenerationRef.current) return
@@ -2037,7 +2050,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           if (findGeneration === syslogFindGenerationRef.current) {
             setSyslogFindBusyState(false)
             if (ok) finishCount()
-            else setSyslogFindError('Не удалось показать совпадение')
+            else setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
           }
         }
         void waitFeed()
@@ -2061,7 +2074,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         )
         if (findGeneration !== syslogFindGenerationRef.current) return
         if (!ok) {
-          setSyslogFindError('Не удалось показать совпадение')
+          setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
           return
         }
         finishCount()
@@ -2081,21 +2094,22 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           setSyslogFindBusyState(false)
         }
       })
-    }, 300)
+    }, 0)
     return () => {
       cancelled = true
       window.clearTimeout(resetTimer)
-      window.clearTimeout(timer)
+      window.clearTimeout(runTimer)
     }
   }, [
     dataset, date, device.id, fetchSyslogMatchPage, refreshSyslogFindCount,
     resetSyslogMatchIndex, setSyslogFindBusyState, setSyslogFindHitState,
-    setSyslogFindIndexState, setSyslogFindTotalState, syslogFindTrim, syslogHideStream,
+    setSyslogFindIndexState, setSyslogFindTotalState, syslogCommittedTrim,
+    syslogHideStream, syslogSearchToken,
   ])
   const goSyslogFindAtIndex = useCallback(async (nextIndex: number) => {
     const findGeneration = syslogFindGenerationRef.current
     const items = syslogMatchItemsRef.current
-    const hideMode = syslogHideStream && Boolean(syslogFindTrim)
+    const hideMode = syslogHideStream && Boolean(syslogCommittedTrim)
     if (nextIndex < 1) return
     if (nextIndex <= items.length) {
       setSyslogFindBusyState(true)
@@ -2104,7 +2118,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           items[nextIndex - 1], nextIndex, findGeneration, hideMode,
         )
         if (!ok && findGeneration === syslogFindGenerationRef.current) {
-          setSyslogFindError('Не удалось показать совпадение')
+          setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
         } else if (ok) {
           setSyslogFindError('')
         }
@@ -2137,7 +2151,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               updated[nextIndex - 1], nextIndex, findGeneration, true,
             )
             if (!ok && findGeneration === syslogFindGenerationRef.current) {
-              setSyslogFindError('Не удалось показать совпадение')
+              setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
             } else if (ok) setSyslogFindError('')
           }
         } finally {
@@ -2172,7 +2186,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           updated[nextIndex - 1], nextIndex, findGeneration, false,
         )
         if (!ok && findGeneration === syslogFindGenerationRef.current) {
-          setSyslogFindError('Не удалось показать совпадение')
+          setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
         } else if (ok) setSyslogFindError('')
       }
     } catch (reason) {
@@ -2188,11 +2202,18 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
       if (findGeneration === syslogFindGenerationRef.current) setSyslogFindBusyState(false)
     }
   }, [
-    fetchSyslogMatchPage, loadMore, setSyslogFindBusyState, syslogFindTrim, syslogHideStream,
+    fetchSyslogMatchPage, loadMore, setSyslogFindBusyState, syslogCommittedTrim,
+    syslogHideStream,
   ])
+  const submitSyslogFind = useCallback(() => {
+    const needle = syslogFind.trim()
+    if (!needle || syslogFindBusyRef.current) return
+    setSyslogCommittedFind(needle)
+    setSyslogSearchToken((value) => value + 1)
+  }, [syslogFind])
   const goSyslogFindNext = () => {
-    if (!syslogFindTrim || syslogFindBusyRef.current) return
-    if (syslogFindNeedleRef.current !== syslogFindTrim) return
+    if (!syslogCommittedTrim || syslogFindBusyRef.current) return
+    if (syslogFindNeedleRef.current !== syslogCommittedTrim) return
     const index = syslogFindIndexRef.current
     if (!syslogFindHitRef.current) {
       void goSyslogFindAtIndex(1)
@@ -2215,8 +2236,8 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     void goSyslogFindAtIndex(nextIndex)
   }
   const goSyslogFindPrev = () => {
-    if (!syslogFindTrim || syslogFindBusyRef.current || !syslogFindHitRef.current) return
-    if (syslogFindNeedleRef.current !== syslogFindTrim) return
+    if (!syslogCommittedTrim || syslogFindBusyRef.current || !syslogFindHitRef.current) return
+    if (syslogFindNeedleRef.current !== syslogCommittedTrim) return
     const index = syslogFindIndexRef.current
     if (index > 1) {
       void goSyslogFindAtIndex(index - 1)
@@ -2227,7 +2248,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     setSyslogFindBusyState(true)
     api<SyslogFindResponse>(
       `/devices/${device.id}/syslog-messages/find?date=${encodeURIComponent(date)}`
-        + `&q=${encodeURIComponent(syslogFindTrim)}&oldest=1`,
+        + `&q=${encodeURIComponent(syslogCommittedTrim)}&oldest=1`,
       { timeoutMs: 35000 },
     ).then(async (body) => {
       if (findGeneration !== syslogFindGenerationRef.current) return
@@ -2240,7 +2261,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
         syslogHideFind,
       )
       if (!ok && findGeneration === syslogFindGenerationRef.current) {
-        setSyslogFindError('Не удалось показать совпадение')
+        setSyslogFindError(SYSLOG_FIND_LOCATE_ERROR)
       } else if (ok) setSyslogFindError('')
     }).catch((reason) => {
       if (findGeneration !== syslogFindGenerationRef.current) return
@@ -2256,6 +2277,7 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
     syslogFindNeedleRef.current = ''
     resetSyslogMatchIndex()
     setSyslogFind('')
+    setSyslogCommittedFind('')
     setSyslogFindHitState(null)
     setSyslogFindIndexState(0)
     setSyslogFindTotalState(0)
@@ -2322,23 +2344,31 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
           <input placeholder="Найти за сутки…" value={syslogFind}
             aria-label="Найти в Syslog"
             onChange={(event) => {
-              const next = event.target.value
-              // Clear hit immediately (generation bump is owned by the search effect).
-              syslogFindNeedleRef.current = next.trim()
-              syslogFindHitRef.current = null
-              setSyslogFind(next)
-              setSyslogFindHit(null)
-              setSyslogFindIndex(0)
+              setSyslogFind(event.target.value)
               setSyslogFindError('')
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                if (event.shiftKey) goSyslogFindPrev()
-                else goSyslogFindNext()
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              const draft = syslogFind.trim()
+              if (!draft) return
+              if (event.shiftKey && syslogCommittedTrim && draft === syslogCommittedTrim
+                && syslogFindHit) {
+                goSyslogFindPrev()
+                return
               }
+              if (!event.shiftKey && syslogCommittedTrim && draft === syslogCommittedTrim
+                && syslogFindHit) {
+                goSyslogFindNext()
+                return
+              }
+              submitSyslogFind()
             }} />
-          {syslogFindTrim ? <span className="syslog-find-count" aria-live="polite"
+          <button type="button" className="syslog-find-submit"
+            disabled={!syslogFindTrim || syslogFindBusy}
+            title="Найти" aria-label="Найти"
+            onClick={submitSyslogFind}>Найти</button>
+          {syslogCommittedTrim ? <span className="syslog-find-count" aria-live="polite"
             title={syslogFindError || undefined}>
             {syslogFindBusy && !syslogFindHit ? '…'
               : syslogFindError && !syslogFindHit ? '!'
@@ -2347,14 +2377,15 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
                   : '0 / 0'}
           </span> : null}
           <button type="button" className="syslog-find-prev"
-            disabled={!syslogFindTrim || syslogFindBusy || !syslogFindHit}
+            disabled={!syslogCommittedTrim || syslogFindBusy || !syslogFindHit}
             title="Предыдущее совпадение" aria-label="Предыдущее совпадение"
             onClick={goSyslogFindPrev}><ChevronUp size={14} /></button>
           <button type="button" className="syslog-find-next"
-            disabled={!syslogFindTrim || syslogFindBusy || !syslogFindHit}
+            disabled={!syslogCommittedTrim || syslogFindBusy || !syslogFindHit}
             title="Следующее совпадение" aria-label="Следующее совпадение"
             onClick={goSyslogFindNext}><ChevronDown size={14} /></button>
-          <button type="button" className="syslog-find-clear" disabled={!syslogFind}
+          <button type="button" className="syslog-find-clear"
+            disabled={!syslogFind && !syslogCommittedTrim}
             title="Сбросить поиск" aria-label="Сбросить поиск"
             onClick={clearSyslogFind}><X size={14} /></button>
         </div> : !columnFiltersActive && <div className="search"><Search size={14} />
@@ -2381,10 +2412,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
               setSyslogViewMode('raw')
             }}>Raw</button>
         </div>}
-        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? (syslogHideStream ? syslogFind : '') : query}:${filtersKeyFrom(exportColumnFilters)}`}
+        <ExportButton key={`${dataset}:${date}:${dataset === 'syslog' ? (syslogHideStream ? syslogCommittedFind : '') : query}:${filtersKeyFrom(exportColumnFilters)}`}
           deviceID={device.id} dataset={dataset}
           query={columnFiltersActive ? ''
-            : dataset === 'syslog' ? (syslogHideStream ? syslogFind : '')
+            : dataset === 'syslog' ? (syslogHideStream ? syslogCommittedFind : '')
               : query}
           date={date}
           filters={exportColumnFilters} />
@@ -2449,10 +2480,10 @@ function DataView({ device, dataset, admin }: { device: Device; dataset: Dataset
             } : undefined}
             onSelect={setSelectedAntifraud} />
           : syslogViewMode === 'raw'
-            ? <EventsRawLog rows={rows as EventRow[]} find={syslogFindTrim}
+            ? <EventsRawLog rows={rows as EventRow[]} find={syslogCommittedTrim}
               activeEventId={syslogActiveEventId} onSelect={setSelectedEvent} />
             : <EventsTable rows={rows as EventRow[]} timezone={activeDeviceTimezone(device)}
-              find={syslogFindTrim} activeEventId={syslogActiveEventId}
+              find={syslogCommittedTrim} activeEventId={syslogActiveEventId}
               onSelect={setSelectedEvent} />}
       {showAntifraudEmpty && <AntifraudEmptyState />}
       <div className="scroll-sentinel" ref={sentinelRef}>

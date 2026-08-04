@@ -99,6 +99,26 @@ func TestFindRateLimitIndependentOfCostlyLimit(t *testing.T) {
 	}
 }
 
+func TestListSyslogFindMatchesRequiresQ(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/?date=2026-08-03", nil)
+
+	(&Server{}).listSyslogFindMatches(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "q is required") {
+		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
+}
+
+func TestSyslogFindScanTimeoutConstant(t *testing.T) {
+	if analytics.SyslogFindScanTimeout < 30*time.Second {
+		t.Fatalf("SyslogFindScanTimeout=%s, want >=30s", analytics.SyslogFindScanTimeout)
+	}
+}
+
 func TestListEventsRejectsConflictingCursors(t *testing.T) {
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet,

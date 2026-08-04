@@ -66,6 +66,20 @@ func (c *Client) AdmitWorkload(
 func (c *Client) queryContext(
 	ctx context.Context, requested workload.Class,
 ) (context.Context, func(), error) {
+	return c.queryContextTimeout(ctx, requested, 0)
+}
+
+// SyslogFindScanTimeout bounds payload substring scans (find / find-matches / count / list?q=).
+// Default Interactive is 10s and is too short for dense device-days.
+const SyslogFindScanTimeout = 30 * time.Second
+
+func (c *Client) queryContextFindScan(ctx context.Context) (context.Context, func(), error) {
+	return c.queryContextTimeout(ctx, workload.Interactive, SyslogFindScanTimeout)
+}
+
+func (c *Client) queryContextTimeout(
+	ctx context.Context, requested workload.Class, timeout time.Duration,
+) (context.Context, func(), error) {
 	admission := c.admission()
 	class := requested
 	if current, ok := admission.Current(ctx); ok {
@@ -75,7 +89,10 @@ func (c *Client) queryContext(
 	if err != nil {
 		return ctx, nil, err
 	}
-	timeout, threads, memory, resultRows, resultBytes := c.workloadQueryLimits(class)
+	classTimeout, threads, memory, resultRows, resultBytes := c.workloadQueryLimits(class)
+	if timeout <= 0 {
+		timeout = classTimeout
+	}
 	queryCtx, cancel := context.WithTimeout(admitted, timeout)
 	// Bind workload class for withFreshQueryID; do NOT set WithQueryID here —
 	// one shared id across multi-query CustomReplay sessions causes CH 216.

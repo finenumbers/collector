@@ -119,7 +119,16 @@ func (c *Client) ListSyslogMessagesBound(
 	if modes > 1 {
 		return SyslogMessagePage{}, errors.New("conflicting syslog list cursors")
 	}
-	ctx, release, err := c.queryContext(ctx, workload.Interactive)
+	// Payload substring scans need a longer budget than default Interactive (10s).
+	var (
+		release func()
+		err     error
+	)
+	if search != "" {
+		ctx, release, err = c.queryContextFindScan(ctx)
+	} else {
+		ctx, release, err = c.queryContext(ctx, workload.Interactive)
+	}
 	if err != nil {
 		return SyslogMessagePage{}, err
 	}
@@ -131,9 +140,10 @@ func (c *Client) ListSyslogMessagesBound(
 	if search != "" && timeRange == nil && !c.admittedAs(ctx, workload.Export) {
 		return SyslogMessagePage{}, ErrSearchRequiresRange
 	}
+	// No FINAL: event_id is unique per insert (see custom_projection syslog discovery).
 	query := `SELECT event_id,device_id,received_at,toString(source_ip),source_port,
 		transport,payload,payload_sha256
-		FROM collector.syslog_messages FINAL WHERE device_id=?`
+		FROM collector.syslog_messages WHERE device_id=?`
 	args := []any{deviceID}
 	if timeRange != nil {
 		query += ` AND received_at>=? AND received_at<?`
@@ -236,13 +246,14 @@ func (c *Client) FindSyslogMessageBound(
 	if bound.Oldest && (bound.Before != nil || bound.After != nil) {
 		return SyslogFindResult{}, errors.New("conflicting syslog find cursors")
 	}
-	ctx, release, err := c.queryContext(ctx, workload.Interactive)
+	ctx, release, err := c.queryContextFindScan(ctx)
 	if err != nil {
 		return SyslogFindResult{}, err
 	}
 	defer release()
+	// No FINAL: event_id is unique per insert; FINAL starves dense device-day scans.
 	query := `SELECT event_id,received_at
-		FROM collector.syslog_messages FINAL WHERE device_id=?`
+		FROM collector.syslog_messages WHERE device_id=?`
 	args := []any{deviceID}
 	if timeRange != nil {
 		query += ` AND received_at>=? AND received_at<?`
@@ -291,6 +302,76 @@ func (c *Client) FindSyslogMessageBound(
 	return result, nil
 }
 
+// SyslogFindMatch is a lightweight match cursor for find-matches paging.
+type SyslogFindMatch struct {
+	EventID    uuid.UUID `json:"eventId"`
+	ReceivedAt time.Time `json:"receivedAt"`
+}
+
+// SyslogFindMatchPage is a keyset page of payload matches (newest first).
+type SyslogFindMatchPage struct {
+	Items   []SyslogFindMatch `json:"items"`
+	HasMore bool              `json:"hasMore"`
+}
+
+func (c *Client) ListSyslogFindMatches(
+	ctx context.Context, deviceID uuid.UUID, search string, limit uint64,
+	before *SyslogMessageCursor, timeRange *TimeRange,
+) (SyslogFindMatchPage, error) {
+	search = strings.TrimSpace(search)
+	if search == "" {
+		return SyslogFindMatchPage{}, ErrSearchRequiresRange
+	}
+	if timeRange == nil && !c.admittedAs(ctx, workload.Export) {
+		return SyslogFindMatchPage{}, ErrSearchRequiresRange
+	}
+	ctx, release, err := c.queryContextFindScan(ctx)
+	if err != nil {
+		return SyslogFindMatchPage{}, err
+	}
+	defer release()
+	const maxPage = 100
+	if limit == 0 || limit > maxPage {
+		limit = 50
+	}
+	query := `SELECT event_id,received_at
+		FROM collector.syslog_messages WHERE device_id=?`
+	args := []any{deviceID}
+	if timeRange != nil {
+		query += ` AND received_at>=? AND received_at<?`
+		args = append(args, timeRange.From, timeRange.To)
+	}
+	query += ` AND positionCaseInsensitiveUTF8(payload,?)>0`
+	args = append(args, search)
+	if before != nil {
+		query += ` AND (received_at<? OR (received_at=? AND event_id<?))`
+		args = append(args, before.ReceivedAt, before.ReceivedAt, before.EventID)
+	}
+	query += ` ORDER BY received_at DESC,event_id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := c.query(ctx, query, args...)
+	if err != nil {
+		return SyslogFindMatchPage{}, err
+	}
+	defer rows.Close()
+	items := make([]SyslogFindMatch, 0, maxPage+1)
+	for rows.Next() {
+		var item SyslogFindMatch
+		if err := rows.Scan(&item.EventID, &item.ReceivedAt); err != nil {
+			return SyslogFindMatchPage{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return SyslogFindMatchPage{}, err
+	}
+	hasMore := uint64(len(items)) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return SyslogFindMatchPage{Items: items, HasMore: hasMore}, nil
+}
+
 func (c *Client) CountSyslogMessages(
 	ctx context.Context, deviceID uuid.UUID, search string, timeRange *TimeRange,
 ) (uint64, error) {
@@ -298,13 +379,13 @@ func (c *Client) CountSyslogMessages(
 	if search == "" || (timeRange == nil && !c.admittedAs(ctx, workload.Export)) {
 		return 0, ErrSearchRequiresRange
 	}
-	ctx, release, err := c.queryContext(ctx, workload.Interactive)
+	ctx, release, err := c.queryContextFindScan(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer release()
 	query := `SELECT count()
-		FROM collector.syslog_messages FINAL WHERE device_id=?`
+		FROM collector.syslog_messages WHERE device_id=?`
 	args := []any{deviceID}
 	if timeRange != nil {
 		query += ` AND received_at>=? AND received_at<?`

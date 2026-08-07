@@ -187,30 +187,8 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .toolbar h3 { font-size: 14px; margin: 0 0 2px; }
 .toolbar > div > span { color: var(--muted); font-size: 10px; }
 .toolbar-actions { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.toolbar-actions > .view-toggle,
 .toolbar-actions > .export-button-wrap,
-.toolbar-actions > .secondary,
-.toolbar-actions > .syslog-hide-stream { flex-shrink: 0; }
-.syslog-hide-stream { display: inline-flex; align-items: center; gap: 5px; margin: 0;
-  color: var(--muted); font-size: 11px; white-space: nowrap; user-select: none; cursor: pointer; }
-.syslog-hide-stream input { margin: 0; }
-.view-toggle { display: inline-flex; align-items: stretch; border: 1px solid var(--line);
-  border-radius: var(--control-radius); background: var(--panel-2); overflow: hidden; }
-.view-toggle button { min-height: var(--control-height); padding: 0 10px; border: 0; border-radius: 0;
-  background: transparent; color: var(--muted); font-size: 12px; }
-.view-toggle button + button { border-left: 1px solid var(--line); }
-.view-toggle button:hover { background: #eef2f7; color: var(--text); }
-.view-toggle button.active { color: #174ea6; background: var(--accent-soft); font-weight: 600; }
-.syslog-raw-log { display: flex; flex-direction: column; width: 100%; min-width: 0;
-  font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
-.syslog-raw-line { display: block; width: 100%;
-  min-height: 0; margin: 0; padding: 4px 8px; border: 0; border-radius: 0; border-bottom: 1px solid #eef2f7;
-  background: transparent; color: inherit; text-align: left; cursor: pointer;
-  font: inherit; }
-.syslog-raw-line:hover { background: #f4f7fb; }
-.syslog-raw-line:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.syslog-raw-payload { display: block; min-width: 0; white-space: pre-wrap; word-break: break-word;
-  overflow-wrap: anywhere; color: #344054; }
+.toolbar-actions > .secondary { flex-shrink: 0; }
 .export-button-wrap { position: relative; display: flex; align-items: center; }
 .export-button-wrap > a.secondary { display: inline-flex; align-items: center;
   color: inherit; text-decoration: none; font-size: var(--control-font-size); }
@@ -223,29 +201,6 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .search:focus-within { border-color: var(--accent); }
 .search svg { color: var(--muted); }
 .search input { flex: 1; height: calc(var(--control-height) - 2px); border: 0; padding: 0 7px 0 0; }
-.search.syslog-find { width: min(420px, 100%); flex: 0 1 420px; min-width: 0; padding-right: 4px; gap: 4px; }
-.syslog-find-count { flex: none; color: var(--muted); font-size: 10px; white-space: nowrap;
-  font-variant-numeric: tabular-nums; }
-.syslog-find-error { margin: -4px 0 8px; color: var(--warn); font-size: 11px; }
-.syslog-find-submit { flex: none; height: 26px; min-height: 26px; padding: 0 8px;
-  font-size: 11px; color: #174ea6; background: var(--accent-soft);
-  border-radius: var(--control-radius); }
-.syslog-find-submit:hover:not(:disabled) { background: #d9e8ff; }
-.syslog-find-submit:disabled { opacity: .35; cursor: default; }
-.syslog-find-prev, .syslog-find-next, .syslog-find-clear { flex: none; width: 26px; min-height: 26px;
-  height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
-  color: var(--muted); border-radius: var(--control-radius); }
-.syslog-find-prev:hover:not(:disabled), .syslog-find-next:hover:not(:disabled),
-.syslog-find-clear:hover:not(:disabled) {
-  color: var(--text); background: #eef2f7; }
-.syslog-find-prev:disabled, .syslog-find-next:disabled, .syslog-find-clear:disabled {
-  opacity: .35; cursor: default; }
-.syslog-find-hit { background: #4ade80; color: #14532d; padding: 0 1px; border-radius: 2px; }
-.syslog-find-hit-active { background: #22c55e; color: #052e16; outline: 1px solid #15803d; }
-.syslog-find-row-active { background: #fef08a; }
-tr.syslog-find-row-active:hover { background: #fde047; }
-.syslog-raw-line.syslog-find-row-active { background: #fef08a; }
-.syslog-raw-line.syslog-find-row-active:hover { background: #fde047; }
 .table-shell { position: relative; min-height: 0; height: 0; flex: 1 1 0; overflow-x: auto; overflow-y: scroll;
   scrollbar-gutter: stable; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--panel); }
 .table-loading { position: sticky; top: 0; z-index: 5; height: 2px; background: var(--accent); animation: pulse 1s ease-in-out infinite; }
@@ -361,17 +316,14 @@ tbody tr { cursor: pointer; }
 .table-fit,
 .satel-cdr-table.table-fit,
 .eltex-cdr-table.table-fit,
-.antifraud-table.table-fit,
-.syslog-table {
+.antifraud-table.table-fit {
   width: 100%;
   min-width: 100%;
   max-width: 100%;
   table-layout: auto;
 }
 .table-fit > thead > tr > th:not(.col-flex):not(.col-flex-pair):not(.col-flex-3):not(.col-flex-4),
-.table-fit > tbody > tr > td:not(.col-flex):not(.col-flex-pair):not(.col-flex-3):not(.col-flex-4),
-.syslog-table > thead > tr > th:not(.col-flex),
-.syslog-table > tbody > tr > td:not(.col-flex) {
+.table-fit > tbody > tr > td:not(.col-flex):not(.col-flex-pair):not(.col-flex-3):not(.col-flex-4) {
   width: 1%;
   max-width: none;
   white-space: nowrap;
@@ -379,9 +331,7 @@ tbody tr { cursor: pointer; }
   text-overflow: ellipsis;
 }
 .table-fit > thead > tr > th.col-flex,
-.table-fit > tbody > tr > td.col-flex,
-.syslog-table > thead > tr > th.col-flex,
-.syslog-table > tbody > tr > td.col-flex {
+.table-fit > tbody > tr > td.col-flex {
   width: 100%;
   min-width: 8rem;
   max-width: 0;

@@ -561,7 +561,9 @@ func (c *Client) StatsRange(
 	if err != nil {
 		return DeviceStats{}, err
 	}
-	err = c.queryRow(ctx, `SELECT count() FROM collector.syslog_messages FINAL
+	// No FINAL: event_id is unique per insert (same policy as list/discovery).
+	// uniqExact covers rare identical-key retries before merges.
+	err = c.queryRow(ctx, `SELECT uniqExact(event_id) FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?`,
 		deviceID, timeRange.From, timeRange.To).Scan(&result.SyslogMessages24h)
 	return result, err

@@ -1,6 +1,6 @@
 export type SourceCategory = 'equipment' | 'softswitch'
 export type SourceDataset = 'calls'
-export type DeviceSurface = 'calls' | 'syslog' | 'antifraud'
+export type DeviceSurface = 'calls' | 'antifraud'
 
 export type SourceCapabilities = {
   syslog: boolean
@@ -97,7 +97,7 @@ export function deviceSurfaces(value: {
   const capabilities = sourceCapabilities(value)
   const result: DeviceSurface[] = []
   if (capabilities.typedCdr) result.push('calls')
-  if (capabilities.syslog) result.push('syslog')
+  // Syslog browse UI removed: raw messages stay in CH for AF/projection only.
   if (capabilities.syslog && capabilities.antifraud && capabilities.radius &&
     value.antifraudEnabled) result.push('antifraud')
   return result

@@ -32,19 +32,20 @@ describe('equipment templates', () => {
     expect(defaultSourceDataset(template)).toBe('calls')
   })
 
-  it('shows exactly three enabled and two disabled Eltex surfaces', () => {
+  it('shows calls and optional antifraud surfaces without syslog browse', () => {
     const template = fallbackTemplates[0]
     expect(deviceSurfaces({ ...template, antifraudEnabled: true }))
-      .toEqual(['calls', 'syslog', 'antifraud'])
+      .toEqual(['calls', 'antifraud'])
     expect(deviceSurfaces({ ...template, antifraudEnabled: false }))
-      .toEqual(['calls', 'syslog'])
+      .toEqual(['calls'])
   })
 
   it('does not expose legacy Syslog category surfaces', () => {
     expect(main).not.toContain("id: 'alarms'")
     expect(main).not.toContain("id: 'radius'")
     expect(main).not.toContain('category=${')
-    expect(main).toContain("label: 'Сообщения Syslog'")
+    expect(main).not.toContain("label: 'Сообщения Syslog'")
+    expect(main).not.toContain("id: 'syslog'")
   })
 
   it('exposes Satel RTU as the only softswitch template', () => {
@@ -124,28 +125,17 @@ describe('equipment templates', () => {
     expect(main).toMatch(/operators:\s*new Set/)
     expect(main).toMatch(/geoip:\s*new Set/)
     expect(main).toMatch(/all:\s*new Set/)
-    // Column-filter surfaces hide toolbar search; syslog find jumps within full day feed.
-    expect(main).toContain('dataset === \'syslog\' ? <div className="search syslog-find">')
-    expect(main).toContain('Найти за сутки…')
-    expect(main).toContain('submitSyslogFind')
-    expect(main).toContain('syslogCommittedFind')
-    expect(main).toContain('syslog-find-submit')
-    expect(main).toContain('Скрывать поток')
-    expect(main).toContain('syslogHideStream')
-    expect(main).toContain('/syslog-messages/find?')
-    expect(main).toContain('jumpSyslogToHit')
-    expect(main).toContain('centerSyslogHit')
-    expect(main).toContain('find-matches')
-    expect(main).toContain('syslogMatchItemsRef')
-    expect(main).toContain('feedEpochRef')
-    expect(styles).toMatch(/\.search\.syslog-find\s*\{[^}]*width:\s*min\(420px/)
-    expect(styles).toMatch(/\.syslog-find-submit\s*\{/)
-    expect(styles).toMatch(/\.toolbar-actions\s*>\s*\.view-toggle[\s\S]*?flex-shrink:\s*0/)
-    expect(styles).toMatch(/\.syslog-hide-stream\s*\{/)
-    expect(styles).toMatch(/\.syslog-find-hit\s*\{[^}]*background:\s*#4ade80/s)
-    expect(styles).toMatch(/\.syslog-find-row-active\s*\{[^}]*background:\s*#fef08a/s)
+    // Column-filter surfaces hide toolbar search; syslog browse/find UI is removed.
+    expect(main).not.toContain('syslog-find')
+    expect(main).not.toContain('submitSyslogFind')
+    expect(main).not.toContain('/syslog-messages')
+    expect(main).not.toContain('Скрывать поток')
+    expect(styles).not.toMatch(/\.search\.syslog-find/)
+    expect(styles).not.toMatch(/\.view-toggle/)
+    expect(styles).not.toMatch(/\.syslog-hide-stream/)
     expect(main).toContain('!columnFiltersActive && <div className="search">')
     expect(main).toContain('Поиск по данным…')
+    expect(main).toContain('feedEpochRef')
     expect(main).toContain('menuRef.current?.contains(target)')
     expect(styles).toContain('.col-filter-trigger')
     expect(styles).toMatch(/\.col-filter-trigger\s*\{[^}]*background:\s*transparent/s)
@@ -232,7 +222,7 @@ describe('equipment templates', () => {
     expect(main).toContain('setSelectedAntifraud(null)')
     expect(main).toContain('setSelectedCall(null)')
     expect(main).toContain('setSelectedSatelCall(null)')
-    expect(main).toContain('setSelectedEvent(null)')
+    expect(main).not.toContain('setSelectedEvent')
   })
 
   it('explains matched CDR coverage when AntiFraud detail is missing', () => {

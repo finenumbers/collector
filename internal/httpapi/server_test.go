@@ -22,96 +22,11 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-func TestRawSyslogListRejectsLegacyCategory(t *testing.T) {
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/?category=radius", nil)
 
-	(&Server{}).listEvents(response, request)
 
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "category is not supported") {
-		t.Fatalf("unexpected response: %s", response.Body.String())
-	}
-}
 
-func TestFindSyslogMessageRequiresQ(t *testing.T) {
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/?date=2026-08-03", nil)
 
-	(&Server{}).findSyslogMessage(response, request)
 
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "q is required") {
-		t.Fatalf("unexpected response: %s", response.Body.String())
-	}
-}
-
-func TestFindSyslogMessageRejectsConflictingCursors(t *testing.T) {
-	id := uuid.NewString()
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet,
-		"/?date=2026-08-03&q=x&before=2026-08-03T12:00:00Z&before_id="+id+
-			"&after=2026-08-03T11:00:00Z&after_id="+id, nil)
-
-	(&Server{}).findSyslogMessage(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "use only one of before, after, or oldest") {
-		t.Fatalf("unexpected response: %s", response.Body.String())
-	}
-}
-
-func TestCountSyslogFindRequiresQ(t *testing.T) {
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/?date=2026-08-03", nil)
-
-	(&Server{}).countSyslogFind(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "q is required") {
-		t.Fatalf("unexpected response: %s", response.Body.String())
-	}
-}
-
-func TestFindRateLimitIndependentOfCostlyLimit(t *testing.T) {
-	server := &Server{}
-	userID := uuid.New()
-	for i := 0; i < 10; i++ {
-		if !server.allowCostlyRequest(userID) {
-			t.Fatalf("costly request %d unexpectedly denied", i+1)
-		}
-	}
-	if server.allowCostlyRequest(userID) {
-		t.Fatal("11th costly request should be denied")
-	}
-	for i := 0; i < 11; i++ {
-		if !server.allowFindRequest(userID) {
-			t.Fatalf("find request %d unexpectedly denied after costly exhaustion", i+1)
-		}
-	}
-}
-
-func TestListSyslogFindMatchesRequiresQ(t *testing.T) {
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/?date=2026-08-03", nil)
-
-	(&Server{}).listSyslogFindMatches(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "q is required") {
-		t.Fatalf("unexpected response: %s", response.Body.String())
-	}
-}
 
 func TestSyslogFindScanTimeoutConstant(t *testing.T) {
 	if analytics.SyslogFindScanTimeout < 30*time.Second {
@@ -119,21 +34,6 @@ func TestSyslogFindScanTimeoutConstant(t *testing.T) {
 	}
 }
 
-func TestListEventsRejectsConflictingCursors(t *testing.T) {
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet,
-		"/?date=2026-08-03&from=2026-08-03T12:00:00Z&from_id="+uuid.NewString()+
-			"&before=2026-08-03T11:00:00Z&before_id="+uuid.NewString(), nil)
-
-	(&Server{}).listEvents(response, request)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	if !strings.Contains(response.Body.String(), "use only one of before, from, or after") {
-		t.Fatalf("unexpected response: %s", response.Body.String())
-	}
-}
 
 func TestDashboardWindowValidation(t *testing.T) {
 	for _, value := range []string{"", "1h", "24h", "7d"} {

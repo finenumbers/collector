@@ -34,9 +34,10 @@ func (c *Client) DeviceProjectionFreshness(
 		return nil, err
 	}
 	defer release()
+	// Tips only — no 6h payload substring scans (those starved Diagnostics 10s/128MiB).
+	// ClassificationGap stays false here; queue depth / failed jobs cover ops signal.
 	for _, deviceID := range deviceIDs {
 		item := DeviceProjectionFreshness{DeviceID: deviceID}
-		var hasAFSyslog uint8
 		if err := c.queryRow(ctx, `SELECT
 			greatest(0, dateDiff('second', ifNull(
 				(SELECT max(received_at) FROM collector.syslog_messages WHERE device_id=?),
@@ -46,44 +47,18 @@ func (c *Client) DeviceProjectionFreshness(
 				toDateTime64('1970-01-01', 6)), now64(6))),
 			greatest(0, dateDiff('second', ifNull(
 				(SELECT max(activated_at) FROM collector.custom_projection_state WHERE device_id=?),
-				toDateTime64('1970-01-01', 6)), now64(6))),
-			(SELECT countIf(positionCaseInsensitiveUTF8(payload,'Antifraud-Auth-Request')>0)
-				FROM collector.syslog_messages
-				WHERE device_id=? AND received_at>=now()-INTERVAL 6 HOUR),
-			(SELECT countIf(positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0)
-				FROM collector.syslog_messages
-				WHERE device_id=? AND received_at>=now()-INTERVAL 6 HOUR),
-			greatest(0, dateDiff('second', ifNull(
-				(SELECT max(received_at) FROM collector.syslog_messages
-					WHERE device_id=?
-					  AND (positionCaseInsensitiveUTF8(payload,'Antifraud-Auth-Request')>0
-					       OR positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0)),
-				now64(6)), now64(6))),
-			if((SELECT max(received_at) FROM collector.syslog_messages
-				WHERE device_id=?
-				  AND (positionCaseInsensitiveUTF8(payload,'Antifraud-Auth-Request')>0
-				       OR positionCaseInsensitiveUTF8(payload,'xpgk-request-type')>0)) IS NULL, 0, 1)`,
-			deviceID, deviceID, deviceID, deviceID, deviceID, deviceID, deviceID,
+				toDateTime64('1970-01-01', 6)), now64(6)))`,
+			deviceID, deviceID, deviceID,
 		).Scan(
 			&item.SyslogLagSeconds, &item.AFCallLagSeconds, &item.ActivatedLagSeconds,
-			&item.AFAuthHeaders6h, &item.XpgkHeaders6h,
-			&item.AFSyslogLagSeconds, &hasAFSyslog,
 		); err != nil {
 			return nil, err
 		}
-		item.HasAFSyslogTip = hasAFSyslog == 1
-		if !item.HasAFSyslogTip {
-			// No AF-classifiable syslog tip: do not invent content debt from epoch.
-			item.AFSyslogLagSeconds = 0
-		}
+		item.AFSyslogLagSeconds = 0
+		item.HasAFSyslogTip = false
 		item.ProjectionLagSeconds = item.ActivatedLagSeconds
-		item.ClassificationGap = item.SyslogLagSeconds <= 300 &&
-			item.AFAuthHeaders6h == 0 && item.XpgkHeaders6h == 0 &&
-			item.AFCallLagSeconds >= 900
-		// CH-only freshness cannot see queue depth; final SLO is computed in
-		// httpapi diagnostics via EvaluateProjectionDeviceHealth.
-		item.ProjectionSLOMet = !item.ClassificationGap &&
-			item.ActivatedLagSeconds <= ProjectionHealthSLOSeconds
+		item.ClassificationGap = false
+		item.ProjectionSLOMet = item.ActivatedLagSeconds <= ProjectionHealthSLOSeconds
 		result[deviceID] = item
 	}
 	return result, nil

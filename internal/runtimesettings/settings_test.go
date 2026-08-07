@@ -71,6 +71,25 @@ func TestPublicViewRedactsEnrichmentTokens(t *testing.T) {
 	}
 }
 
+func TestMergePatchKeepsSyslogArchivePassword(t *testing.T) {
+	base := Defaults()
+	base.SyslogArchive.Enabled = true
+	base.SyslogArchive.FTPHost = "ftp.example"
+	base.SyslogArchive.FTPUser = "u"
+	base.SyslogArchive.FTPPassword = "secret"
+	merged, err := MergePatch(base, json.RawMessage(`{"syslogArchive":{"enabled":true,"ftpHost":"ftp.example","ftpUser":"u","ftpPort":21}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.SyslogArchive.FTPPassword != "secret" {
+		t.Fatalf("password lost: %+v", merged.SyslogArchive)
+	}
+	view := merged.PublicView()
+	if view.SyslogArchive.FTPPassword != "" || !view.SyslogArchive.PasswordSet {
+		t.Fatalf("public view=%+v", view.SyslogArchive)
+	}
+}
+
 func TestContainersComposeEnvFragment(t *testing.T) {
 	fragment := Defaults().Containers.ComposeEnvFragment()
 	for _, key := range []string{

@@ -109,6 +109,20 @@ type RuntimeSettings = {
     appCpus: string
     appMemory: string
   }
+  syslogArchive?: {
+    enabled: boolean
+    ftpHost: string
+    ftpPort: number
+    ftpUser: string
+    ftpPassword?: string
+    passwordSet?: boolean
+    ftpTls: boolean
+    localSpoolDir: string
+    closeDelay: string
+    lookbackHours: number
+    maxArchiveBytes: number
+    spoolBudgetBytes: number
+  }
 }
 type DashboardDevice = {
   id: string
@@ -213,6 +227,8 @@ type Device = {
   ftpHome: string
   generatedPassword?: string
   enabled: boolean
+  syslogArchiveEnabled?: boolean
+  syslogArchiveRemoteDir?: string
   purgeState?: 'active' | 'deleting' | 'purge_failed'
   purgeError?: string
   sourceCategory?: SourceCategory
@@ -3418,6 +3434,19 @@ function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
       tokenSet: false,
     },
   }
+  const syslogArchive = value.syslogArchive || {
+    enabled: false,
+    ftpHost: '',
+    ftpPort: 21,
+    ftpUser: '',
+    passwordSet: false,
+    ftpTls: false,
+    localSpoolDir: '/data/spool/syslog-archive',
+    closeDelay: '2m',
+    lookbackHours: 48,
+    maxArchiveBytes: 2147483648,
+    spoolBudgetBytes: 53687091200,
+  }
   return {
     ...value,
     enrichment: {
@@ -3429,6 +3458,7 @@ function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
       apiCpus: '2', apiMemory: '2G', exportCpus: '2', exportMemory: '2G',
       maintenanceCpus: '2', maintenanceMemory: '2G', appCpus: '4', appMemory: '4G',
     },
+    syslogArchive,
   }
 }
 
@@ -3549,6 +3579,15 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
   const [password, setPassword] = useState('')
   const [pstnToken, setPstnToken] = useState('')
   const [geoipToken, setGeoipToken] = useState('')
+  const [ftpPassword, setFtpPassword] = useState('')
+  const [archiveDevices, setArchiveDevices] = useState<Device[]>([])
+  const [archiveBusyID, setArchiveBusyID] = useState('')
+  const [archiveError, setArchiveError] = useState('')
+  useEffect(() => {
+    void api<{ items: Device[] }>('/devices')
+      .then((response) => setArchiveDevices((response.items || []).filter((d) => d.capabilities?.syslog)))
+      .catch((reason) => setArchiveError(reason instanceof Error ? reason.message : 'Ошибка загрузки устройств'))
+  }, [])
   const updateProjection = (patch: Partial<RuntimeSettings['projection']>) =>
     setForm((current) => ({ ...current, projection: { ...current.projection, ...patch } }))
   const updateCoverage = (patch: Partial<RuntimeSettings['coverage']>) =>
@@ -3570,10 +3609,45 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
     setForm((current) => ({ ...current, platform: { ...current.platform, ...patch } }))
   const updateContainers = (patch: Partial<RuntimeSettings['containers']>) =>
     setForm((current) => ({ ...current, containers: { ...current.containers, ...patch } }))
+  const updateArchive = (patch: Partial<NonNullable<RuntimeSettings['syslogArchive']>>) =>
+    setForm((current) => {
+      const syslogArchive = normalizeRuntimeSettings(current).syslogArchive!
+      return { ...current, syslogArchive: { ...syslogArchive, ...patch } }
+    })
+  const saveDeviceArchive = async (device: Device, enabled: boolean, remoteDir: string) => {
+    setArchiveBusyID(device.id)
+    setArchiveError('')
+    try {
+      const updated = await api<Device>(`/devices/${device.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: device.name,
+          sourceCategory: device.sourceCategory,
+          templateKey: device.templateKey,
+          firmware: device.firmware,
+          timezone: device.timezone,
+          managementIp: device.managementIp || '',
+          syslogSourceIp: device.syslogSourceIp || '',
+          deviceSign: device.deviceSign,
+          antifraudEnabled: device.antifraudEnabled,
+          voipmonitorEnabled: device.voipmonitorEnabled,
+          enabled: device.enabled,
+          syslogArchiveEnabled: enabled,
+          syslogArchiveRemoteDir: remoteDir,
+        }),
+      })
+      setArchiveDevices((current) => current.map((item) => item.id === updated.id ? updated : item))
+    } catch (reason) {
+      setArchiveError(reason instanceof Error ? reason.message : 'Ошибка сохранения схемы архива')
+    } finally {
+      setArchiveBusyID('')
+    }
+  }
   const enrichment = form.enrichment || normalizeRuntimeSettings(form).enrichment!
+  const syslogArchive = form.syslogArchive || normalizeRuntimeSettings(form).syslogArchive!
   return <section className="runtime-settings">
     <div className="page-heading"><div><h3>Операционные параметры</h3>
-      <p>AntiFraud projection, coverage, VoIPmonitor, обогащение CDR и export. Значения хранятся в БД и
+      <p>AntiFraud projection, coverage, VoIPmonitor, обогащение CDR, архив Syslog и export. Значения хранятся в БД и
         применяются без правки .env (инфраструктурные секреты остаются в .env).</p></div></div>
 
     <article className="runtime-card">
@@ -3734,6 +3808,53 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
     </article>
 
     <article className="runtime-card">
+      <h4>Архив Syslog (FTP)</h4>
+      <p className="runtime-note">Часовые ZIP с raw syslog на внешний FTP. При недоступности FTP архивы
+        копятся локально и отправляются позже после проверки размера на сервере.</p>
+      <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.enabled}
+        onChange={(e) => updateArchive({ enabled: e.target.checked })} /> Включён</label>
+      <div className="runtime-grid">
+        <label>FTP host<input value={syslogArchive.ftpHost}
+          onChange={(e) => updateArchive({ ftpHost: e.target.value })} /></label>
+        <label>FTP port<input type="number" min={1} max={65535} value={syslogArchive.ftpPort}
+          onChange={(e) => updateArchive({ ftpPort: Number(e.target.value) })} /></label>
+        <label>FTP user<input value={syslogArchive.ftpUser}
+          onChange={(e) => updateArchive({ ftpUser: e.target.value })} /></label>
+        <label>FTP password<input type="password"
+          placeholder={syslogArchive.passwordSet ? '•••••••• (не менять)' : 'пароль'}
+          value={ftpPassword} onChange={(e) => setFtpPassword(e.target.value)} /></label>
+        <label>Local spool<input value={syslogArchive.localSpoolDir}
+          onChange={(e) => updateArchive({ localSpoolDir: e.target.value })} /></label>
+        <label>Close delay<input value={syslogArchive.closeDelay}
+          onChange={(e) => updateArchive({ closeDelay: e.target.value })} /></label>
+        <label>Lookback hours<input type="number" min={1} max={720} value={syslogArchive.lookbackHours}
+          onChange={(e) => updateArchive({ lookbackHours: Number(e.target.value) })} /></label>
+        <label>Max archive bytes<input type="number" value={syslogArchive.maxArchiveBytes}
+          onChange={(e) => updateArchive({ maxArchiveBytes: Number(e.target.value) })} /></label>
+        <label>Spool budget bytes<input type="number" value={syslogArchive.spoolBudgetBytes}
+          onChange={(e) => updateArchive({ spoolBudgetBytes: Number(e.target.value) })} /></label>
+      </div>
+      <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.ftpTls}
+        onChange={(e) => updateArchive({ ftpTls: e.target.checked })} /> Explicit FTPS (TLS)</label>
+    </article>
+
+    <article className="runtime-card">
+      <h4>Архив Syslog по оборудованию</h4>
+      <p className="runtime-note">Для каждого устройства с Syslog: включение архивирования и каталог на FTP.
+        Имя файла: {'{deviceSign}_{DD.MM.YYYY}_{HH}.zip'}.</p>
+      {archiveError && <div className="form-error">{archiveError}</div>}
+      {archiveDevices.length === 0 && <div className="table-empty">
+        <strong>Нет устройств с Syslog</strong>
+      </div>}
+      {archiveDevices.map((device) => <DeviceArchiveSchemeRow
+        key={`${device.id}:${device.syslogArchiveEnabled}:${device.syslogArchiveRemoteDir || ''}`}
+        device={device}
+        busy={archiveBusyID === device.id}
+        onSave={(enabled, remoteDir) => void saveDeviceArchive(device, enabled, remoteDir)}
+      />)}
+    </article>
+
+    <article className="runtime-card">
       <h4>Платформа</h4>
       <div className="runtime-grid">
         <label>ClickHouse admission capacity<input type="number" min={4} max={128}
@@ -3795,11 +3916,37 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
               token: geoipToken || undefined,
             },
           },
+          syslogArchive: {
+            ...syslogArchive,
+            ftpPassword: ftpPassword || undefined,
+          },
         }
         void onSave(payload)
       }}>Сохранить параметры</button>
     </div>
   </section>
+}
+
+function DeviceArchiveSchemeRow({ device, busy, onSave }: {
+  device: Device
+  busy: boolean
+  onSave: (enabled: boolean, remoteDir: string) => void
+}) {
+  const [enabled, setEnabled] = useState(Boolean(device.syslogArchiveEnabled))
+  const [remoteDir, setRemoteDir] = useState(device.syslogArchiveRemoteDir || '')
+  return <div className="runtime-grid" style={{ marginBottom: '0.75rem', alignItems: 'end' }}>
+    <div>
+      <strong>{device.name}</strong>
+      <small className="field-hint">sign: {device.deviceSign || '—'} · {device.activeTimezone}</small>
+    </div>
+    <label className="checkbox-row"><input type="checkbox" checked={enabled} disabled={busy}
+      onChange={(e) => setEnabled(e.target.checked)} /> Архивировать</label>
+    <label>Директория на FTP<input value={remoteDir} disabled={busy}
+      placeholder="/archives/mts"
+      onChange={(e) => setRemoteDir(e.target.value)} /></label>
+    <button className="secondary" type="button" disabled={busy}
+      onClick={() => onSave(enabled, remoteDir)}>Сохранить</button>
+  </div>
 }
 
 function RetentionPolicyEditor({ policy, busy, onChange, onCancel }: {

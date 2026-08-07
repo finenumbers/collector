@@ -44,6 +44,7 @@ func (s *Store) LoadRuntimeSettings(ctx context.Context) (RuntimeSettingsRow, er
 		row.Settings.Containers = runtimesettings.Defaults().Containers
 	}
 	runtimesettings.NormalizeEnrichment(&row.Settings)
+	runtimesettings.NormalizeSyslogArchive(&row.Settings)
 	row.Seeded = true
 	return row, nil
 }

@@ -3847,7 +3847,7 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
         <strong>Нет устройств с Syslog</strong>
       </div>}
       {archiveDevices.map((device) => <DeviceArchiveSchemeRow
-        key={device.id}
+        key={`${device.id}:${device.syslogArchiveEnabled}:${device.syslogArchiveRemoteDir || ''}`}
         device={device}
         busy={archiveBusyID === device.id}
         onSave={(enabled, remoteDir) => void saveDeviceArchive(device, enabled, remoteDir)}
@@ -3934,10 +3934,6 @@ function DeviceArchiveSchemeRow({ device, busy, onSave }: {
 }) {
   const [enabled, setEnabled] = useState(Boolean(device.syslogArchiveEnabled))
   const [remoteDir, setRemoteDir] = useState(device.syslogArchiveRemoteDir || '')
-  useEffect(() => {
-    setEnabled(Boolean(device.syslogArchiveEnabled))
-    setRemoteDir(device.syslogArchiveRemoteDir || '')
-  }, [device.syslogArchiveEnabled, device.syslogArchiveRemoteDir])
   return <div className="runtime-grid" style={{ marginBottom: '0.75rem', alignItems: 'end' }}>
     <div>
       <strong>{device.name}</strong>

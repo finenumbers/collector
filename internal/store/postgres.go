@@ -124,6 +124,8 @@ type Device struct {
 	FTPUsername            string                 `json:"ftpUsername"`
 	FTPHome                string                 `json:"ftpHome"`
 	Enabled                bool                   `json:"enabled"`
+	SyslogArchiveEnabled   bool                   `json:"syslogArchiveEnabled"`
+	SyslogArchiveRemoteDir string                 `json:"syslogArchiveRemoteDir"`
 	PurgeState             string                 `json:"purgeState"`
 	PurgeError             string                 `json:"purgeError,omitempty"`
 	DetectionStatus        string                 `json:"detectionStatus"`
@@ -160,17 +162,19 @@ type NewDevice struct {
 }
 
 type DeviceUpdate struct {
-	Name               string `json:"name"`
-	SourceCategory     string `json:"sourceCategory"`
-	TemplateKey        string `json:"templateKey"`
-	Firmware           string `json:"firmware"`
-	Timezone           string `json:"timezone"`
-	ManagementIP       string `json:"managementIp"`
-	SyslogSourceIP     string `json:"syslogSourceIp"`
-	DeviceSign         string `json:"deviceSign"`
-	AntifraudEnabled   bool   `json:"antifraudEnabled"`
-	VoipmonitorEnabled bool   `json:"voipmonitorEnabled"`
-	Enabled            bool   `json:"enabled"`
+	Name                   string  `json:"name"`
+	SourceCategory         string  `json:"sourceCategory"`
+	TemplateKey            string  `json:"templateKey"`
+	Firmware               string  `json:"firmware"`
+	Timezone               string  `json:"timezone"`
+	ManagementIP           string  `json:"managementIp"`
+	SyslogSourceIP         string  `json:"syslogSourceIp"`
+	DeviceSign             string  `json:"deviceSign"`
+	AntifraudEnabled       bool    `json:"antifraudEnabled"`
+	VoipmonitorEnabled     bool    `json:"voipmonitorEnabled"`
+	Enabled                bool    `json:"enabled"`
+	SyslogArchiveEnabled   *bool   `json:"syslogArchiveEnabled,omitempty"`
+	SyslogArchiveRemoteDir *string `json:"syslogArchiveRemoteDir,omitempty"`
 }
 
 type Session struct {
@@ -571,16 +575,34 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	return s.ListDevicesByCategory(ctx, "")
 }
 
-func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]Device, error) {
-	if category != "" && category != equipment.CategoryEquipment && category != equipment.CategorySoftswitch {
-		return nil, errors.New("category must be equipment or softswitch")
-	}
-	rows, err := s.DB.Query(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
+const deviceSelectColumns = `id,name,source_category,template_key,model,firmware,timezone,active_timezone,
 		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
 		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,
 		COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,enabled,purge_state,purge_error,
 		detection_status,detection_template,detection_fingerprint,detection_error,detection_checked_at,
-		detection_last_file_at,created_at
+		detection_last_file_at,created_at,
+		COALESCE(syslog_archive_enabled,false),COALESCE(syslog_archive_remote_dir,'')`
+
+func scanDeviceRow(row interface {
+	Scan(dest ...any) error
+}, device *Device) error {
+	return row.Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
+		&device.Model, &device.Firmware, &device.Timezone,
+		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
+		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
+		&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
+		&device.FTPHome, &device.Enabled, &device.PurgeState,
+		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
+		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
+		&device.DetectionLastFileAt, &device.CreatedAt,
+		&device.SyslogArchiveEnabled, &device.SyslogArchiveRemoteDir)
+}
+
+func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]Device, error) {
+	if category != "" && category != equipment.CategoryEquipment && category != equipment.CategorySoftswitch {
+		return nil, errors.New("category must be equipment or softswitch")
+	}
+	rows, err := s.DB.Query(ctx, `SELECT `+deviceSelectColumns+`
 		FROM devices WHERE ($1='' OR source_category=$1) ORDER BY name`, category)
 	if err != nil {
 		return nil, err
@@ -589,15 +611,7 @@ func (s *Store) ListDevicesByCategory(ctx context.Context, category string) ([]D
 	var result []Device
 	for rows.Next() {
 		var device Device
-		if err := rows.Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
-			&device.Model, &device.Firmware, &device.Timezone,
-			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-			&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
-			&device.FTPHome, &device.Enabled, &device.PurgeState,
-			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
-			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
-			&device.DetectionLastFileAt, &device.CreatedAt); err != nil {
+		if err := scanDeviceRow(rows, &device); err != nil {
 			return nil, err
 		}
 		normalizeDeviceFirmware(&device)
@@ -642,22 +656,7 @@ func (s *Store) LockDevicePurge(id uuid.UUID) func() {
 
 func (s *Store) Device(ctx context.Context, id uuid.UUID) (Device, error) {
 	var device Device
-	err := s.DB.QueryRow(ctx, `SELECT id,name,source_category,template_key,model,firmware,timezone,active_timezone,
-		timezone_revision,active_timezone_revision,cdr_source_timezone,host(management_ip),
-		COALESCE(host(syslog_source_ip),''),COALESCE(device_sign,''),antifraud_enabled,
-		COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,enabled,purge_state,purge_error,
-		detection_status,detection_template,detection_fingerprint,detection_error,detection_checked_at,
-		detection_last_file_at,created_at
-		FROM devices WHERE id=$1`, id).
-		Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
-			&device.Model, &device.Firmware, &device.Timezone,
-			&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-			&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-			&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
-			&device.FTPHome, &device.Enabled, &device.PurgeState,
-			&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
-			&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
-			&device.DetectionLastFileAt, &device.CreatedAt)
+	err := scanDeviceRow(s.DB.QueryRow(ctx, `SELECT `+deviceSelectColumns+` FROM devices WHERE id=$1`, id), &device)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}
@@ -1048,29 +1047,17 @@ func (s *Store) CreateDevice(ctx context.Context, input NewDevice, actor User, r
 		return Device{}, err
 	}
 	var device Device
-	err = tx.QueryRow(ctx, `INSERT INTO devices
+	err = scanDeviceRow(tx.QueryRow(ctx, `INSERT INTO devices
 		(id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
 		 active_timezone_revision,cdr_source_timezone,management_ip,syslog_source_ip,device_sign,
 		 antifraud_enabled,voipmonitor_enabled,ftp_username,ftp_home)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$7,1,1,$7,NULLIF($8,'')::inet,NULLIF($9,'')::inet,$10,$11,$12,$13,$14)
-		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
-		 active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
-		 COALESCE(device_sign,''),antifraud_enabled,COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,
-		 enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
-		 detection_error,detection_checked_at,detection_last_file_at,created_at`,
+		RETURNING `+deviceSelectColumns,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Model, input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign, input.AntifraudEnabled,
 		input.VoipmonitorEnabled, ftpUsername, ftpHome,
-	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
-		&device.Model, &device.Firmware, &device.Timezone,
-		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-		&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
-		&device.FTPHome, &device.Enabled, &device.PurgeState,
-		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
-		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
-		&device.DetectionLastFileAt, &device.CreatedAt)
+	), &device)
 	if err != nil {
 		return Device{}, err
 	}
@@ -1179,6 +1166,13 @@ func (s *Store) UpdateDevice(
 			input.Firmware = FirmwareScheme3232
 		}
 	}
+	if input.SyslogArchiveRemoteDir != nil {
+		dir := strings.TrimSpace(*input.SyslogArchiveRemoteDir)
+		if dir != "" && (strings.Contains(dir, "..") || strings.ContainsRune(dir, 0)) {
+			return Device{}, errors.New("syslogArchiveRemoteDir contains invalid characters")
+		}
+		*input.SyslogArchiveRemoteDir = dir
+	}
 	// Raw Syslog has no timezone-derived projection. CDR reinterpretation is
 	// independent, so the control-plane timezone can become active immediately.
 	activateTimezoneImmediately := true
@@ -1201,7 +1195,7 @@ func (s *Store) UpdateDevice(
 		return Device{}, err
 	}
 	var device Device
-	err = tx.QueryRow(ctx, `UPDATE devices SET
+	err = scanDeviceRow(tx.QueryRow(ctx, `UPDATE devices SET
 		name=$2,source_category=$3,template_key=$4,firmware=$5,
 		timezone_revision=CASE WHEN timezone IS DISTINCT FROM $6 THEN timezone_revision+1
 			ELSE timezone_revision END,
@@ -1218,26 +1212,17 @@ func (s *Store) UpdateDevice(
 		voipmonitor_policy_revision=CASE WHEN voipmonitor_enabled IS DISTINCT FROM $11
 			THEN voipmonitor_policy_revision+1 ELSE voipmonitor_policy_revision END,
 		voipmonitor_enabled=$11,
-		enabled=$12
+		enabled=$12,
+		syslog_archive_enabled=COALESCE($14, syslog_archive_enabled),
+		syslog_archive_remote_dir=COALESCE($15, syslog_archive_remote_dir)
 		WHERE id=$1 AND purge_state='active'
-		RETURNING id,name,source_category,template_key,model,firmware,timezone,active_timezone,timezone_revision,
-			active_timezone_revision,cdr_source_timezone,host(management_ip),COALESCE(host(syslog_source_ip),''),
-			COALESCE(device_sign,''),antifraud_enabled,COALESCE(voipmonitor_enabled,false),ftp_username,ftp_home,
-			enabled,purge_state,purge_error,detection_status,detection_template,detection_fingerprint,
-			detection_error,detection_checked_at,detection_last_file_at,created_at`,
+		RETURNING `+deviceSelectColumns,
 		id, strings.TrimSpace(input.Name), input.SourceCategory, input.TemplateKey,
 		input.Firmware, input.Timezone,
 		input.ManagementIP, input.SyslogSourceIP, input.DeviceSign,
 		input.AntifraudEnabled, input.VoipmonitorEnabled, input.Enabled, activateTimezoneImmediately,
-	).Scan(&device.ID, &device.Name, &device.SourceCategory, &device.TemplateKey,
-		&device.Model, &device.Firmware, &device.Timezone,
-		&device.ActiveTimezone, &device.TimezoneRevision, &device.ActiveTimezoneRevision,
-		&device.CDRSourceTimezone, &device.ManagementIP, &device.SyslogSourceIP, &device.DeviceSign,
-		&device.AntifraudEnabled, &device.VoipmonitorEnabled, &device.FTPUsername,
-		&device.FTPHome, &device.Enabled, &device.PurgeState,
-		&device.PurgeError, &device.DetectionStatus, &device.DetectionTemplate,
-		&device.DetectionFingerprint, &device.DetectionError, &device.DetectionCheckedAt,
-		&device.DetectionLastFileAt, &device.CreatedAt)
+		input.SyslogArchiveEnabled, input.SyslogArchiveRemoteDir,
+	), &device)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}

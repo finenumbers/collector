@@ -9,12 +9,28 @@ import (
 
 // Document is the admin-editable runtime configuration formerly kept only in .env.
 type Document struct {
-	Projection  ProjectionSettings  `json:"projection"`
-	Coverage    CoverageSettings    `json:"coverage"`
-	Voipmonitor VoipmonitorSettings `json:"voipmonitor"`
-	Enrichment  EnrichmentSettings  `json:"enrichment"`
-	Platform    PlatformSettings    `json:"platform"`
-	Containers  ContainersSettings  `json:"containers"`
+	Projection    ProjectionSettings     `json:"projection"`
+	Coverage      CoverageSettings       `json:"coverage"`
+	Voipmonitor   VoipmonitorSettings    `json:"voipmonitor"`
+	Enrichment    EnrichmentSettings     `json:"enrichment"`
+	Platform      PlatformSettings       `json:"platform"`
+	Containers    ContainersSettings     `json:"containers"`
+	SyslogArchive SyslogArchiveSettings  `json:"syslogArchive"`
+}
+
+type SyslogArchiveSettings struct {
+	Enabled          bool   `json:"enabled"`
+	FTPHost          string `json:"ftpHost"`
+	FTPPort          int    `json:"ftpPort"`
+	FTPUser          string `json:"ftpUser"`
+	FTPPassword      string `json:"ftpPassword,omitempty"`
+	PasswordSet      bool   `json:"passwordSet,omitempty"`
+	FTPTLS           bool   `json:"ftpTls"`
+	LocalSpoolDir    string `json:"localSpoolDir"`
+	CloseDelay       string `json:"closeDelay"`
+	LookbackHours    int    `json:"lookbackHours"`
+	MaxArchiveBytes  int64  `json:"maxArchiveBytes"`
+	SpoolBudgetBytes int64  `json:"spoolBudgetBytes"`
 }
 
 type EnrichmentSettings struct {
@@ -143,6 +159,15 @@ func Defaults() Document {
 			ExportPageSize:              1000,
 		},
 		Containers: defaultContainers(),
+		SyslogArchive: SyslogArchiveSettings{
+			Enabled:          false,
+			FTPPort:          21,
+			LocalSpoolDir:    "/data/spool/syslog-archive",
+			CloseDelay:       "2m",
+			LookbackHours:    48,
+			MaxArchiveBytes:  2 << 30,
+			SpoolBudgetBytes: 50 << 30,
+		},
 	}
 }
 
@@ -161,6 +186,8 @@ func (d Document) PublicView() Document {
 	view.Enrichment.PSTN.Token = ""
 	view.Enrichment.GeoIP.TokenSet = view.Enrichment.GeoIP.Token != ""
 	view.Enrichment.GeoIP.Token = ""
+	view.SyslogArchive.PasswordSet = view.SyslogArchive.FTPPassword != ""
+	view.SyslogArchive.FTPPassword = ""
 	return view
 }
 
@@ -251,6 +278,30 @@ func (d Document) Validate() error {
 	if err := d.Containers.Validate(); err != nil {
 		return err
 	}
+	if err := requireDuration("syslogArchive.closeDelay", d.SyslogArchive.CloseDelay, time.Second, time.Hour); err != nil {
+		return err
+	}
+	if d.SyslogArchive.FTPPort < 1 || d.SyslogArchive.FTPPort > 65535 {
+		return fmt.Errorf("syslogArchive.ftpPort must be between 1 and 65535")
+	}
+	if d.SyslogArchive.LookbackHours < 1 || d.SyslogArchive.LookbackHours > 720 {
+		return fmt.Errorf("syslogArchive.lookbackHours must be between 1 and 720")
+	}
+	if d.SyslogArchive.MaxArchiveBytes < 1<<20 || d.SyslogArchive.MaxArchiveBytes > 8<<30 {
+		return fmt.Errorf("syslogArchive.maxArchiveBytes must be between 1MiB and 8GiB")
+	}
+	if d.SyslogArchive.SpoolBudgetBytes < 100<<20 || d.SyslogArchive.SpoolBudgetBytes > 500<<30 {
+		return fmt.Errorf("syslogArchive.spoolBudgetBytes must be between 100MiB and 500GiB")
+	}
+	if strings.TrimSpace(d.SyslogArchive.LocalSpoolDir) == "" {
+		return fmt.Errorf("syslogArchive.localSpoolDir is required")
+	}
+	if d.SyslogArchive.Enabled && strings.TrimSpace(d.SyslogArchive.FTPHost) == "" {
+		return fmt.Errorf("syslogArchive.ftpHost is required when syslogArchive.enabled=true")
+	}
+	if d.SyslogArchive.Enabled && strings.TrimSpace(d.SyslogArchive.FTPUser) == "" {
+		return fmt.Errorf("syslogArchive.ftpUser is required when syslogArchive.enabled=true")
+	}
 	return nil
 }
 
@@ -283,6 +334,7 @@ func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 	keptPassword := out.Voipmonitor.Password
 	keptPSTN := out.Enrichment.PSTN.Token
 	keptGeoIP := out.Enrichment.GeoIP.Token
+	keptArchivePassword := out.SyslogArchive.FTPPassword
 	if err := json.Unmarshal(patch, &out); err != nil {
 		return Document{}, fmt.Errorf("invalid settings payload: %w", err)
 	}
@@ -294,6 +346,9 @@ func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 			PSTN  struct{ Token *string `json:"token"` } `json:"pstn"`
 			GeoIP struct{ Token *string `json:"token"` } `json:"geoip"`
 		} `json:"enrichment"`
+		SyslogArchive struct {
+			FTPPassword *string `json:"ftpPassword"`
+		} `json:"syslogArchive"`
 	}
 	_ = json.Unmarshal(patch, &peek)
 	if peek.Voipmonitor.Password == nil || *peek.Voipmonitor.Password == "" {
@@ -305,9 +360,13 @@ func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 	if peek.Enrichment.GeoIP.Token == nil || *peek.Enrichment.GeoIP.Token == "" {
 		out.Enrichment.GeoIP.Token = keptGeoIP
 	}
+	if peek.SyslogArchive.FTPPassword == nil || *peek.SyslogArchive.FTPPassword == "" {
+		out.SyslogArchive.FTPPassword = keptArchivePassword
+	}
 	out.Voipmonitor.PasswordSet = false
 	out.Enrichment.PSTN.TokenSet = false
 	out.Enrichment.GeoIP.TokenSet = false
+	out.SyslogArchive.PasswordSet = false
 	// Fill zero enrichment fields from defaults when upgrading old documents.
 	defaults := Defaults().Enrichment
 	if out.Enrichment.PSTN.APIURL == "" {
@@ -325,7 +384,35 @@ func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 	if out.Enrichment.CatchUp.Sleep == "" {
 		out.Enrichment.CatchUp.Sleep = defaults.CatchUp.Sleep
 	}
+	NormalizeSyslogArchive(&out)
 	return out, nil
+}
+
+// NormalizeSyslogArchive fills missing archive defaults for documents seeded
+// before this section existed.
+func NormalizeSyslogArchive(doc *Document) {
+	if doc == nil {
+		return
+	}
+	defaults := Defaults().SyslogArchive
+	if doc.SyslogArchive.FTPPort == 0 {
+		doc.SyslogArchive.FTPPort = defaults.FTPPort
+	}
+	if doc.SyslogArchive.LocalSpoolDir == "" {
+		doc.SyslogArchive.LocalSpoolDir = defaults.LocalSpoolDir
+	}
+	if doc.SyslogArchive.CloseDelay == "" {
+		doc.SyslogArchive.CloseDelay = defaults.CloseDelay
+	}
+	if doc.SyslogArchive.LookbackHours == 0 {
+		doc.SyslogArchive.LookbackHours = defaults.LookbackHours
+	}
+	if doc.SyslogArchive.MaxArchiveBytes == 0 {
+		doc.SyslogArchive.MaxArchiveBytes = defaults.MaxArchiveBytes
+	}
+	if doc.SyslogArchive.SpoolBudgetBytes == 0 {
+		doc.SyslogArchive.SpoolBudgetBytes = defaults.SpoolBudgetBytes
+	}
 }
 
 func FingerprintWorkers(d Document) string {

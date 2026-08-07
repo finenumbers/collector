@@ -29,6 +29,7 @@ import (
 	"collector/internal/runtimesettings"
 	"collector/internal/spool"
 	"collector/internal/store"
+	"collector/internal/syslogarchive"
 	"collector/internal/voipmonitor"
 
 	"github.com/google/uuid"
@@ -335,6 +336,18 @@ func main() {
 						slog.Error("retention reconciliation failed", "error", err)
 					}
 				}
+			}
+		}()
+		archiveWorker := &syslogarchive.Worker{
+			Store: control, Analytics: warehouse,
+			WorkerID: fmt.Sprintf("%s-syslog-archive-%d", hostname, os.Getpid()),
+			Settings: func() runtimesettings.SyslogArchiveSettings {
+				return runtime.Snapshot().SyslogArchive
+			},
+		}
+		go func() {
+			if err := archiveWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				slog.Error("syslog archive worker stopped", "error", err)
 			}
 		}()
 	}

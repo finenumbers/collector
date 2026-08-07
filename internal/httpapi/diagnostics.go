@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -66,30 +67,39 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 	reconciliation := store.ReconciliationQueueStats{}
 	deviceStats := []store.CustomProjectionDeviceStats{}
 	freshness := map[uuid.UUID]analytics.DeviceProjectionFreshness{}
-	var warehouseErr, projectionErr, reconciliationErr, deviceErr, freshnessErr error
+	sectionErrors := map[string]string{}
+	noteErr := func(key string, err error) {
+		if err == nil {
+			return
+		}
+		sectionErrors[key] = err.Error()
+		log.Printf("diagnostics: %s: %v", key, err)
+	}
 	if s.customProjectionEnabled() {
+		var warehouseErr, projectionErr, reconciliationErr, deviceErr, freshnessErr error
 		warehouse, warehouseErr = s.Analytics.OperationalDiagnostics(ctx)
+		noteErr("warehouse", warehouseErr)
 		projection, projectionErr = s.Store.CustomProjectionQueueStats(ctx)
+		noteErr("projection", projectionErr)
 		reconciliation, reconciliationErr = s.Store.ReconciliationQueueStats(ctx)
+		noteErr("reconciliation", reconciliationErr)
 		deviceStats, deviceErr = s.Store.CustomProjectionDeviceStats(ctx)
+		noteErr("devices", deviceErr)
 		if deviceErr == nil && len(deviceStats) > 0 {
 			ids := make([]uuid.UUID, 0, len(deviceStats))
 			for _, item := range deviceStats {
 				ids = append(ids, item.DeviceID)
 			}
 			freshness, freshnessErr = s.Analytics.DeviceProjectionFreshness(ctx, ids)
+			noteErr("freshness", freshnessErr)
+			if freshnessErr != nil {
+				freshness = map[uuid.UUID]analytics.DeviceProjectionFreshness{}
+			}
 		}
 	}
 	exports, exportErr := s.Store.ExportQueueStats(ctx)
-	var refreshErr error
-	for _, err := range []error{
-		warehouseErr, projectionErr, reconciliationErr, deviceErr, freshnessErr, exportErr,
-	} {
-		if err != nil {
-			refreshErr = err
-			break
-		}
-	}
+	noteErr("exports", exportErr)
+
 	devices := make([]map[string]any, 0, len(deviceStats))
 	var maxDeviceLag, maxEventTipLag int64
 	anyFailed := projection.Failed > 0
@@ -175,9 +185,11 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		enrichmentWorkers = doc.Enrichment.Workers
 		enrichmentCatchUp = doc.Enrichment.CatchUp.Enabled
 	}
+	degraded := len(sectionErrors) > 0
 	value := map[string]any{
 		"generatedAt":             time.Now().UTC(),
 		"customProjectionEnabled": s.customProjectionEnabled(),
+		"degraded":                degraded,
 		"workloads":               s.Analytics.WorkloadSnapshot(),
 		"rawIngest":               rawIngest,
 		"enrichmentApis":          enrichmentApis,
@@ -199,6 +211,16 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		"reconciliationQueue": reconciliation,
 		"derived":             warehouse,
 		"exports":             exports,
+	}
+	if degraded {
+		value["errors"] = sectionErrors
+	}
+	// Always return partial payload; UI shows degraded/errors. Hard 503 only when
+	// every section failed and we have no device/export/warehouse signal at all.
+	var refreshErr error
+	if degraded && exportErr != nil && len(deviceStats) == 0 && warehouse.Calls == 0 &&
+		projection.Depth == 0 && reconciliation.Depth == 0 {
+		refreshErr = errors.New("operational diagnostics unavailable")
 	}
 	s.finishDiagnostics(done, value, refreshErr)
 }

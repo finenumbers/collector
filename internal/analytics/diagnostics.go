@@ -28,16 +28,23 @@ func (c *Client) OperationalDiagnostics(ctx context.Context) (OperationalDiagnos
 	defer release()
 	var result OperationalDiagnostics
 	var matched, expected, late, missing, notApplicable, ambiguous uint64
+	// Tip + 24h window only — unbounded FINAL counts on *_current views
+	// exhausted Diagnostics (10s / 128MiB) on dense fleets.
 	err = c.queryRow(ctx, `SELECT
 		(SELECT greatest(0,dateDiff('second',ifNull(max(activated_at),now64(6)),now64(6)))
 		 FROM collector.custom_projection_state),
-		(SELECT count() FROM collector.custom_antifraud_calls_current),
-		(SELECT count() FROM collector.custom_radius_packets_current),
-		(SELECT count() FROM collector.custom_radius_packets_current WHERE orphan_reason!=''),
-		(SELECT count() FROM collector.custom_radius_packets_current WHERE ambiguity_reason!=''),
+		(SELECT count() FROM collector.custom_antifraud_calls_current
+			WHERE last_seen_at>=now()-INTERVAL 24 HOUR),
+		(SELECT count() FROM collector.custom_radius_packets_current
+			WHERE last_seen_at>=now()-INTERVAL 24 HOUR),
+		(SELECT count() FROM collector.custom_radius_packets_current
+			WHERE last_seen_at>=now()-INTERVAL 24 HOUR AND orphan_reason!=''),
+		(SELECT count() FROM collector.custom_radius_packets_current
+			WHERE last_seen_at>=now()-INTERVAL 24 HOUR AND ambiguity_reason!=''),
 		countIf(state='matched'),countIf(state='expected'),countIf(state='late'),
 		countIf(state='missing'),countIf(state='not_applicable'),countIf(ambiguous=1)
-		FROM collector.cdr_antifraud_coverage_current`).Scan(
+		FROM collector.cdr_antifraud_coverage_current
+		WHERE updated_at>=now()-INTERVAL 24 HOUR`).Scan(
 		&result.ProjectionLagSeconds, &result.Calls, &result.Packets,
 		&result.Orphans, &result.Ambiguity, &matched, &expected, &late,
 		&missing, &notApplicable, &ambiguous,

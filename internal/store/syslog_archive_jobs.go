@@ -604,6 +604,7 @@ func (s *Store) SyslogArchiveDeviceProgress(ctx context.Context) ([]SyslogArchiv
 			COALESCE((
 				SELECT last_error FROM syslog_archive_jobs e
 				WHERE e.device_id=j.device_id AND e.last_error<>''
+				  AND e.status NOT IN ('abandoned','skipped_stale')
 				ORDER BY e.updated_at DESC LIMIT 1
 			),''),
 			EXISTS (

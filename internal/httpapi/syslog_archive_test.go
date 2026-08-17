@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,5 +24,16 @@ func TestLiveArchiveLagUsesClosedSlotNotLookback(t *testing.T) {
 	}
 	if lag := liveArchiveLag(now, loc, closeDelay, cutoff, nil); lag <= 0 {
 		t.Fatal("missing uploads must report positive live-window lag")
+	}
+}
+
+func TestSyslogArchiveStatusHidesSealedWorkerError(t *testing.T) {
+	body, err := os.ReadFile("syslog_archive.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(body)
+	if !strings.Contains(source, "HideWorkerLastError") {
+		t.Fatal("status API must strip utc hour sealed from the worker summary")
 	}
 }

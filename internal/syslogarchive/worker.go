@@ -242,7 +242,7 @@ func (w *Worker) processOne(
 	}
 	if err != nil {
 		retry := uploadBackoff(job.Attempts)
-		keepLocal := job.LocalPath != "" || job.Status == store.SyslogArchiveStatusUploading
+		keepLocal := job.LocalPath != ""
 		if markErr := w.Store.FailSyslogArchiveJob(ctx, job.ID, w.WorkerID, err.Error(), retry, keepLocal); markErr != nil {
 			slog.Error("mark syslog archive failed", "job", job.ID, "error", markErr)
 		}

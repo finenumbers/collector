@@ -27,15 +27,17 @@ func (c *Client) SyslogSlotFingerprint(
 	}
 	defer release()
 	var fp SyslogSlotFingerprint
+	var count uint64
 	var maxAt time.Time
 	var maxID uuid.UUID
 	err = c.queryRow(ctx, `SELECT count(), max(received_at), argMax(event_id, (received_at, event_id))
 		FROM collector.syslog_messages
 		WHERE device_id=? AND received_at>=? AND received_at<?`,
-		deviceID, from.UTC(), to.UTC()).Scan(&fp.Count, &maxAt, &maxID)
+		deviceID, from.UTC(), to.UTC()).Scan(&count, &maxAt, &maxID)
 	if err != nil {
 		return SyslogSlotFingerprint{}, err
 	}
+	fp.Count = int64(count)
 	if fp.Count > 0 {
 		fp.MaxReceivedAt = maxAt.UTC()
 		fp.MaxEventID = maxID

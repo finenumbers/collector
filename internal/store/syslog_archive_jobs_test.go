@@ -15,7 +15,10 @@ func TestClaimSyslogArchiveJobRebuildsFailedWithoutLocalPath(t *testing.T) {
 	if !strings.Contains(source, "status='failed' AND local_path=''") {
 		t.Fatal("failed jobs without a local ZIP must rebuild, not upload")
 	}
-	if !strings.Contains(source, "WHEN j.status='failed' AND j.local_path<>'' THEN 'uploading'") {
-		t.Fatal("failed jobs with a local ZIP must retry upload")
+	if !strings.Contains(source, "WHEN j.status IN ('failed','uploading') AND j.local_path<>'' THEN 'uploading'") {
+		t.Fatal("failed/uploading jobs with a local ZIP must retry upload")
+	}
+	if !strings.Contains(source, "status='uploading' AND local_path=''") {
+		t.Fatal("uploading jobs without a local ZIP must rebuild")
 	}
 }

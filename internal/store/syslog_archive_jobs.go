@@ -191,7 +191,9 @@ func (s *Store) ClaimSyslogArchiveJob(
 			) OR (
 				$3 AND status='pending' AND next_attempt_at<=now()
 			) OR (
-				status='uploading' AND lease_expires_at<now()
+				status='uploading' AND local_path<>'' AND lease_expires_at<now()
+			) OR (
+				$3 AND status='uploading' AND local_path='' AND lease_expires_at<now()
 			) OR (
 				$3 AND status='building' AND lease_expires_at<now()
 			)
@@ -199,22 +201,22 @@ func (s *Store) ClaimSyslogArchiveJob(
 				CASE
 					WHEN status='ready' THEN 0
 					WHEN status='failed' AND local_path<>'' THEN 1
-					WHEN status='uploading' THEN 2
+					WHEN status='uploading' AND local_path<>'' THEN 2
 					WHEN status='building' THEN 3
-					WHEN status IN ('pending') OR (status='failed' AND local_path='') THEN 4
+					WHEN status IN ('pending') OR ((status IN ('failed','uploading')) AND local_path='') THEN 4
 					ELSE 5
 				END,
-				CASE WHEN status IN ('pending','building') OR (status='failed' AND local_path='')
+				CASE WHEN status IN ('pending','building') OR ((status IN ('failed','uploading')) AND local_path='')
 					THEN hour_start END DESC NULLS LAST,
-				CASE WHEN status IN ('ready','uploading') OR (status='failed' AND local_path<>'')
+				CASE WHEN status IN ('ready') OR ((status IN ('failed','uploading')) AND local_path<>'')
 					THEN hour_start END ASC,
 				next_attempt_at, id
 			FOR UPDATE SKIP LOCKED LIMIT 1
 		)
 		UPDATE syslog_archive_jobs j SET
 			status=CASE
-				WHEN j.status IN ('ready','uploading') THEN 'uploading'
-				WHEN j.status='failed' AND j.local_path<>'' THEN 'uploading'
+				WHEN j.status='ready' THEN 'uploading'
+				WHEN j.status IN ('failed','uploading') AND j.local_path<>'' THEN 'uploading'
 				ELSE 'building'
 			END,
 			worker_id=$1,

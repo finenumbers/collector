@@ -2,6 +2,8 @@ package ftpclient
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +48,28 @@ func TestProbeDetailedRequiresRemoteDir(t *testing.T) {
 	}
 	if _, err := client.ProbeDetailed(context.Background(), "/a/../secret"); err == nil {
 		t.Fatal("expected invalid directory error")
+	}
+}
+
+func TestMoveRequiresConfigAndName(t *testing.T) {
+	if err := New(Config{}).Move(context.Background(), "/a", "/a/d", "x.zip", 1); err == nil {
+		t.Fatal("expected not configured")
+	}
+}
+
+func TestMoveCreatesDestAndVerifiesSize(t *testing.T) {
+	body, err := os.ReadFile("client.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(body)
+	if !strings.Contains(source, "func (c *Client) Move(") {
+		t.Fatal("Move must exist for day-folder relocate")
+	}
+	if !strings.Contains(source, "ensureDirs(conn, dest)") {
+		t.Fatal("Move must mkdir the day folder")
+	}
+	if !strings.Contains(source, "verifySize(conn, file, wantBytes)") {
+		t.Fatal("Move must SIZE-verify dest")
 	}
 }

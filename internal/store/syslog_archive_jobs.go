@@ -22,6 +22,7 @@ const (
 	syslogArchiveOrchestratorLockKey    int64 = 0x53594C4152434831 // SYLARCH1
 	DefaultSyslogArchiveLease                 = 2 * time.Minute
 	SyslogArchiveWorkerHeartbeatTimeout       = 45 * time.Second
+	SyslogArchiveJobLogWindow                 = 24 * time.Hour
 	syslogRawGCLockKey                  int64 = 0x53594C5241574731 // SYLRAWG1
 )
 
@@ -305,14 +306,30 @@ func (s *Store) PromoteSyslogArchiveUploading(
 }
 
 func (s *Store) MarkSyslogArchiveUploaded(
-	ctx context.Context, jobID uuid.UUID, workerID string,
+	ctx context.Context, jobID uuid.UUID, workerID, remoteDir string,
 ) error {
 	tag, err := s.DB.Exec(ctx, `
 		UPDATE syslog_archive_jobs SET
 			status='uploaded', uploaded_at=now(), local_path='', last_error='',
+			remote_dir=CASE WHEN $3<>'' THEN $3 ELSE remote_dir END,
 			worker_id=NULL, heartbeat_at=NULL, lease_expires_at=NULL, updated_at=now()
 		WHERE id=$1 AND worker_id=$2 AND status='uploading'`,
-		jobID, workerID,
+		jobID, workerID, remoteDir,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetSyslogArchiveRemoteDirQuiet(ctx context.Context, jobID uuid.UUID, remoteDir string) error {
+	tag, err := s.DB.Exec(ctx, `
+		UPDATE syslog_archive_jobs SET remote_dir=$2
+		WHERE id=$1 AND status='uploaded' AND remote_dir IS DISTINCT FROM $2`,
+		jobID, remoteDir,
 	)
 	if err != nil {
 		return err
@@ -540,6 +557,89 @@ func (s *Store) GetSyslogArchiveJob(ctx context.Context, jobID uuid.UUID) (Syslo
 	return job, err
 }
 
+func (s *Store) ListSyslogArchiveJobsPage(
+	ctx context.Context, limit int, before time.Time, beforeID uuid.UUID,
+) ([]SyslogArchiveJob, bool, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	rows, err := s.DB.Query(ctx, `
+		SELECT `+syslogArchiveJobColumnsPrefixed+`,
+			COALESCE(d.name,''), COALESCE(d.device_sign,'')
+		FROM syslog_archive_jobs j
+		JOIN devices d ON d.id=j.device_id
+		WHERE (
+			j.updated_at >= now()-make_interval(secs=>$2)
+			OR j.status IN ('pending','building','ready','uploading','failed')
+		)
+		AND (
+			$3::timestamptz IS NULL
+			OR (j.updated_at, j.id) < ($3, $4)
+		)
+		ORDER BY j.updated_at DESC, j.id DESC
+		LIMIT $1`, limit+1, int(SyslogArchiveJobLogWindow.Seconds()), nullableTime(before), beforeID)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var jobs []SyslogArchiveJob
+	for rows.Next() {
+		var name, sign string
+		job, scanErr := scanSyslogArchiveJobExtra(rows, &name, &sign)
+		if scanErr != nil {
+			return nil, false, scanErr
+		}
+		job.DeviceName = name
+		job.DeviceSign = sign
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(jobs) > limit
+	if hasMore {
+		jobs = jobs[:limit]
+	}
+	return jobs, hasMore, nil
+}
+
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
+}
+
+func (s *Store) ListSyslogArchiveUploadedForRelocate(ctx context.Context, limit int) ([]SyslogArchiveJob, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 40
+	}
+	rows, err := s.DB.Query(ctx, `
+		SELECT `+syslogArchiveJobColumns+`
+		FROM syslog_archive_jobs
+		WHERE status='uploaded'
+		  AND archive_name ~ '_[0-9]{2}-[0-9]{2}\.zip$'
+		  AND remote_dir NOT LIKE '%/' || substring(archive_name from '_([0-9]{2}\\.[0-9]{2}\\.[0-9]{4})_')
+		ORDER BY hour_start DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jobs []SyslogArchiveJob
+	for rows.Next() {
+		job, scanErr := scanSyslogArchiveJob(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
 func (s *Store) ListRecentSyslogArchiveJobs(ctx context.Context, limit int) ([]SyslogArchiveJob, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
@@ -577,11 +677,11 @@ func (s *Store) SyslogArchiveJobCounts(ctx context.Context) (SyslogArchiveJobCou
 			count(*) FILTER (WHERE status='building'),
 			count(*) FILTER (WHERE status='ready'),
 			count(*) FILTER (WHERE status='uploading'),
-			count(*) FILTER (WHERE status='uploaded'),
+			count(*) FILTER (WHERE status='uploaded' AND uploaded_at >= now()-make_interval(secs=>$1)),
 			count(*) FILTER (WHERE status='failed'),
 			count(*) FILTER (WHERE status='abandoned'),
 			count(*) FILTER (WHERE status='skipped_stale')
-		FROM syslog_archive_jobs`).Scan(
+		FROM syslog_archive_jobs`, int(SyslogArchiveJobLogWindow.Seconds())).Scan(
 		&counts.Pending, &counts.Building, &counts.Ready, &counts.Uploading,
 		&counts.Uploaded, &counts.Failed, &counts.Abandoned, &counts.SkippedStale,
 	)

@@ -36,4 +36,10 @@ func TestSyslogArchiveStatusHidesSealedWorkerError(t *testing.T) {
 	if !strings.Contains(source, "HideWorkerLastError") {
 		t.Fatal("status API must strip utc hour sealed from the worker summary")
 	}
+	if strings.Contains(source, `"jobs":          jobs`) {
+		t.Fatal("status must not embed the job log; use the paged jobs endpoint")
+	}
+	if !strings.Contains(source, "listSyslogArchiveJobs") {
+		t.Fatal("archive job log must be a paged admin endpoint")
+	}
 }

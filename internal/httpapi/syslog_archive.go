@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,48 @@ func (s *Server) syslogArchiveStatus(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusOK, status)
 }
 
+func (s *Server) listSyslogArchiveJobs(writer http.ResponseWriter, request *http.Request) {
+	if s.Store == nil {
+		writeError(writer, http.StatusInternalServerError, "store unavailable")
+		return
+	}
+	limit := 50
+	if raw := strings.TrimSpace(request.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = parsed
+	}
+	var before time.Time
+	var beforeID uuid.UUID
+	beforeRaw := strings.TrimSpace(request.URL.Query().Get("before"))
+	beforeIDRaw := strings.TrimSpace(request.URL.Query().Get("before_id"))
+	if beforeRaw != "" || beforeIDRaw != "" {
+		parsedTime, timeErr := time.Parse(time.RFC3339Nano, beforeRaw)
+		parsedID, idErr := uuid.Parse(beforeIDRaw)
+		if timeErr != nil || idErr != nil {
+			writeError(writer, http.StatusBadRequest, "invalid job cursor")
+			return
+		}
+		before, beforeID = parsedTime, parsedID
+	}
+	items, hasMore, err := s.Store.ListSyslogArchiveJobsPage(request.Context(), limit, before, beforeID)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "unable to load archive jobs")
+		return
+	}
+	var next map[string]any
+	if hasMore && len(items) > 0 {
+		last := items[len(items)-1]
+		next = map[string]any{"before": last.UpdatedAt, "beforeId": last.ID}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"items": items, "hasMore": hasMore, "nextCursor": next,
+	})
+}
+
 func (s *Server) buildSyslogArchiveStatus(ctx context.Context) (map[string]any, error) {
 	doc := s.runtimeDocument()
 	if s.Store != nil {
@@ -61,7 +104,6 @@ func (s *Server) buildSyslogArchiveStatus(ctx context.Context) (map[string]any, 
 
 	counts := store.SyslogArchiveJobCounts{}
 	var spoolBytes int64
-	var jobs []store.SyslogArchiveJob
 	progress := map[uuid.UUID]store.SyslogArchiveDeviceProgress{}
 	if s.Store != nil {
 		var err error
@@ -70,10 +112,6 @@ func (s *Server) buildSyslogArchiveStatus(ctx context.Context) (map[string]any, 
 			return nil, err
 		}
 		spoolBytes, err = s.Store.SyslogArchiveSpoolBytes(ctx)
-		if err != nil {
-			return nil, err
-		}
-		jobs, err = s.Store.ListRecentSyslogArchiveJobs(ctx, 100)
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +185,6 @@ func (s *Server) buildSyslogArchiveStatus(ctx context.Context) (map[string]any, 
 		"worker":        worker,
 		"counts":        counts,
 		"devices":       deviceRows,
-		"jobs":          jobs,
 	}, nil
 }
 

@@ -68,6 +68,39 @@ func TestIsLegacyHourlyArchiveName(t *testing.T) {
 	}
 }
 
+func TestCanonicalArchiveDirFromTenMinuteName(t *testing.T) {
+	name := "fixer_17.08.2026_23-50.zip"
+	day, ok := DayFolderFromArchiveName(name)
+	if !ok || day != "17.08.2026" {
+		t.Fatalf("day=%q ok=%v", day, ok)
+	}
+	if _, ok := DayFolderFromArchiveName("fixer_17.08.2026_14.zip"); ok {
+		t.Fatal("hourly leftover must not yield a day folder")
+	}
+	got := CanonicalArchiveDir("/SMG/Fixer/Syslog", name)
+	if got != "/SMG/Fixer/Syslog/17.08.2026" {
+		t.Fatalf("got %q", got)
+	}
+	if CanonicalArchiveDir(got, name) != got {
+		t.Fatal("canonical dir must not nest the same day twice")
+	}
+	if ArchiveDayBaseDir(got, name) != "/SMG/Fixer/Syslog" {
+		t.Fatalf("base=%q", ArchiveDayBaseDir(got, name))
+	}
+	loc, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := time.Date(2026, 8, 17, 23, 50, 0, 0, loc)
+	archive, err := ArchiveName("fixer", slot, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if CanonicalArchiveDir("/SMG/Fixer/Syslog", archive) != "/SMG/Fixer/Syslog/17.08.2026" {
+		t.Fatalf("MSK late slot must stay on 17.08: %s", archive)
+	}
+}
+
 func TestClosedSlotStart(t *testing.T) {
 	loc := time.FixedZone("test", 7*3600)
 	now := time.Date(2026, 7, 22, 15, 11, 0, 0, loc)

@@ -120,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 				"/system/runtime-settings/syslog-archive/test-ftp", s.testSyslogArchiveFTP,
 			)
 			private.With(s.requireAdmin).Get("/system/syslog-archive/status", s.syslogArchiveStatus)
+			private.With(s.requireAdmin).Get("/system/syslog-archive/jobs", s.listSyslogArchiveJobs)
 			private.With(s.requireAdmin).Post(
 				"/system/syslog-archive/jobs/{jobID}/verify", s.verifySyslogArchiveJob,
 			)

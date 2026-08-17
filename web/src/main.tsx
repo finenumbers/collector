@@ -3602,6 +3602,23 @@ function formatProbeSteps(steps?: { name: string; ok: boolean; duration?: string
   }).join(' · ')
 }
 
+type SyslogArchiveJob = {
+  id: string
+  deviceId: string
+  deviceName?: string
+  deviceSign?: string
+  hourStart: string
+  archiveName: string
+  remoteDir: string
+  timezone?: string
+  status: string
+  bytes: number
+  payloadCount: number
+  lastError?: string
+  uploadedAt?: string
+  updatedAt: string
+}
+
 type SyslogArchiveStatus = {
   enabled: boolean
   ftpConfigured: boolean
@@ -3637,21 +3654,6 @@ type SyslogArchiveStatus = {
     skipReason?: string
     nameMismatch?: boolean
   }[]
-  jobs: {
-    id: string
-    deviceId: string
-    deviceName?: string
-    deviceSign?: string
-    hourStart: string
-    archiveName: string
-    remoteDir: string
-    status: string
-    bytes: number
-    payloadCount: number
-    lastError?: string
-    uploadedAt?: string
-    updatedAt: string
-  }[]
 }
 
 function DataSaveSettingsPage({ runtime, busy, onRuntimeSaved, onError, setBusy }: {
@@ -3672,18 +3674,65 @@ function DataSaveSettingsPage({ runtime, busy, onRuntimeSaved, onError, setBusy 
   const [statusError, setStatusError] = useState('')
   const [verifyBusyID, setVerifyBusyID] = useState('')
   const [verifyMessage, setVerifyMessage] = useState('')
+  const [archiveJobs, setArchiveJobs] = useState<SyslogArchiveJob[]>([])
+  const [archiveJobsError, setArchiveJobsError] = useState('')
+  const [archiveJobsHasMore, setArchiveJobsHasMore] = useState(false)
+  const [archiveJobsBusy, setArchiveJobsBusy] = useState(false)
+  const archiveJobsCursorRef = useRef<PageCursor | null>(null)
+  const archiveJobsLoadingRef = useRef(false)
+  const archiveJobsShellRef = useRef<HTMLDivElement>(null)
+  const archiveJobsSentinelRef = useRef<HTMLDivElement>(null)
   const syslogArchive = form.syslogArchive || normalizeRuntimeSettings(form).syslogArchive!
   const loadStatus = useCallback(() => {
     api<SyslogArchiveStatus>('/system/syslog-archive/status')
       .then(setStatus)
       .catch((reason) => setStatusError(reason instanceof Error ? reason.message : 'Статус архива недоступен'))
   }, [])
+  const loadArchiveJobs = useCallback((reset: boolean) => {
+    if (archiveJobsLoadingRef.current) return
+    if (!reset && !archiveJobsCursorRef.current) return
+    archiveJobsLoadingRef.current = true
+    setArchiveJobsBusy(true)
+    const params = new URLSearchParams()
+    params.set('limit', '50')
+    const cursor = reset ? null : archiveJobsCursorRef.current
+    if (cursor) {
+      params.set('before', cursor.before)
+      params.set('before_id', cursor.beforeId)
+    }
+    void api<PageResponse<SyslogArchiveJob>>(`/system/syslog-archive/jobs?${params}`)
+      .then((response) => {
+        const items = response.items || []
+        setArchiveJobs((current) => reset ? items : [...current, ...items])
+        setArchiveJobsHasMore(Boolean(response.hasMore))
+        archiveJobsCursorRef.current = response.nextCursor || null
+        setArchiveJobsError('')
+      })
+      .catch((reason) => {
+        setArchiveJobsError(reason instanceof Error ? reason.message : 'Журнал архива недоступен')
+      })
+      .finally(() => {
+        archiveJobsLoadingRef.current = false
+        setArchiveJobsBusy(false)
+      })
+  }, [])
   useEffect(() => {
     void api<{ items: Device[] }>('/devices')
       .then((response) => setArchiveDevices((response.items || []).filter((d) => d.capabilities?.syslog)))
       .catch((reason) => setArchiveError(reason instanceof Error ? reason.message : 'Ошибка загрузки устройств'))
     loadStatus()
-  }, [loadStatus])
+    loadArchiveJobs(true)
+  }, [loadStatus, loadArchiveJobs])
+  useEffect(() => {
+    const root = archiveJobsShellRef.current
+    const target = archiveJobsSentinelRef.current
+    if (!root || !target || !archiveJobsHasMore) return
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) loadArchiveJobs(false)
+    }, { root, rootMargin: '80px 0px', threshold: 0 })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [archiveJobsHasMore, loadArchiveJobs, archiveJobs.length])
   const updateArchive = (patch: Partial<NonNullable<RuntimeSettings['syslogArchive']>>) =>
     setForm((current) => {
       const next = normalizeRuntimeSettings(current).syslogArchive!
@@ -3756,7 +3805,8 @@ function DataSaveSettingsPage({ runtime, busy, onRuntimeSaved, onError, setBusy 
   }
   return <section className="runtime-settings">
     <div className="page-heading"><div><h3>Сохранение данных</h3>
-      <p>10-минутные ZIP raw Syslog на внешний FTP. Сырой Syslog в ClickHouse — короткий буфер (~2–3 часа), не склад.
+      <p>10-минутные ZIP raw Syslog на внешний FTP в каталог устройства <span className="mono">{'{DD.MM.YYYY}'}</span>.
+        Сырой Syslog в ClickHouse — короткий буфер (~2–3 часа), не склад.
         Файл пробы FTP удаляется после проверки; ZIP появляются только у jobs со статусом uploaded.</p></div></div>
 
     <article className="runtime-card">
@@ -3773,13 +3823,16 @@ function DataSaveSettingsPage({ runtime, busy, onRuntimeSaved, onError, setBusy 
         {' · '}spool {formatBytes(status.spoolBytes)} / {formatBytes(status.spoolBudget)}
       </div>}
       {verifyMessage && <p className="runtime-note">{verifyMessage}</p>}
+      {archiveJobsError && <div className="form-error">{archiveJobsError}</div>}
+      <div className="archive-jobs-shell" ref={archiveJobsShellRef}>
       <table className="table-fit"><thead><tr>
-        <th>Устройство</th><th>Имя</th><th>Каталог</th><th>Статус</th>
+        <th>Время</th><th>Устройство</th><th>Имя</th><th>Каталог</th><th>Статус</th>
         <th>Байт</th><th>Ошибка</th><th></th>
       </tr></thead>
         <tbody>
-          {(status?.jobs || []).length === 0 && <tr><td colSpan={7}>Нет задач архива</td></tr>}
-          {(status?.jobs || []).map((job) => <tr key={job.id}>
+          {archiveJobs.length === 0 && !archiveJobsBusy && <tr><td colSpan={8}>Нет задач архива за последние сутки</td></tr>}
+          {archiveJobs.map((job) => <tr key={job.id}>
+            <td className="mono">{formatTime(job.updatedAt, job.timezone || 'UTC')}</td>
             <td>{job.deviceName || job.deviceSign || job.deviceId}</td>
             <td className="mono">{job.archiveName}</td>
             <td className="mono">{job.remoteDir}</td>
@@ -3804,12 +3857,16 @@ function DataSaveSettingsPage({ runtime, busy, onRuntimeSaved, onError, setBusy 
               }}>{verifyBusyID === job.id ? 'SIZE…' : 'SIZE'}</button>}</td>
           </tr>)}
         </tbody></table>
+        <div className="scroll-sentinel" ref={archiveJobsSentinelRef}>
+          {archiveJobsBusy ? 'Загрузка…' : archiveJobsHasMore ? 'Ещё' : ''}
+        </div>
+      </div>
     </article>
 
     <article className="runtime-card">
       <h4>Архив Syslog (FTP)</h4>
-      <p className="runtime-note">Имя: {'{deviceSign}_{DD.MM.YYYY}_{HH-mm}.zip'}. При недоступности FTP архивы
-        копятся локально и отправляются позже.</p>
+      <p className="runtime-note">Имя: {'{deviceSign}_{DD.MM.YYYY}_{HH-mm}.zip'} в папке {'{DD.MM.YYYY}'} по дате слота.
+        При недоступности FTP архивы копятся локально и отправляются позже.</p>
       <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.enabled}
         onChange={(e) => updateArchive({ enabled: e.target.checked })} /> Включён</label>
       <div className="runtime-grid">

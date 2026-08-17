@@ -36,6 +36,12 @@ func TestWorkerUsesTenMinuteSlots(t *testing.T) {
 	if !strings.Contains(source, "errors.Is(err, errArchiveAbandoned)") {
 		t.Fatal("processOne must treat abandon as success for the worker tick")
 	}
+	if !strings.Contains(source, "CanonicalArchiveDir") {
+		t.Fatal("enqueue and upload must write ZIP into the day folder")
+	}
+	if !strings.Contains(source, "relocateDayFolders") {
+		t.Fatal("uploaded leftovers in the device root must be moved into day folders")
+	}
 }
 
 func TestHideWorkerLastError(t *testing.T) {

@@ -2,9 +2,12 @@ package syslogarchive
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
+
+	"collector/internal/ftpclient"
 )
 
 const SlotDuration = 10 * time.Minute
@@ -19,6 +22,7 @@ var deviceSignPattern = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 var (
 	tenMinuteArchiveName = regexp.MustCompile(`_[0-9]{2}-[0-9]{2}\.zip$`)
 	hourlyArchiveName    = regexp.MustCompile(`_[0-9]{2}\.zip$`)
+	tenMinuteDayFolder   = regexp.MustCompile(`_(\d{2}\.\d{2}\.\d{4})_[0-9]{2}-[0-9]{2}\.zip$`)
 )
 
 func SanitizeDeviceSign(sign string) string {
@@ -45,6 +49,43 @@ func ArchiveName(deviceSign string, slotStart time.Time, loc *time.Location) (st
 // IsLegacyHourlyArchiveName reports leftover hourly `{sign}_{DD.MM.YYYY}_{HH}.zip`.
 func IsLegacyHourlyArchiveName(name string) bool {
 	return hourlyArchiveName.MatchString(name) && !tenMinuteArchiveName.MatchString(name)
+}
+
+// DayFolderFromArchiveName returns DD.MM.YYYY from a 10-minute ZIP name.
+func DayFolderFromArchiveName(name string) (string, bool) {
+	match := tenMinuteDayFolder.FindStringSubmatch(path.Base(name))
+	if len(match) != 2 {
+		return "", false
+	}
+	return match[1], true
+}
+
+// ArchiveDayBaseDir is the device FTP root: parent of the day folder when
+// remoteDir already ends with this archive's date, otherwise remoteDir itself.
+func ArchiveDayBaseDir(remoteDir, archiveName string) string {
+	dir := ftpclient.NormalizeRemoteDir(remoteDir)
+	day, ok := DayFolderFromArchiveName(archiveName)
+	if !ok || path.Base(dir) != day {
+		return dir
+	}
+	parent := path.Dir(dir)
+	if parent == "." || parent == "" {
+		return "/"
+	}
+	return parent
+}
+
+// CanonicalArchiveDir is {deviceDir}/{DD.MM.YYYY} for a 10-minute ZIP.
+func CanonicalArchiveDir(remoteDir, archiveName string) string {
+	day, ok := DayFolderFromArchiveName(archiveName)
+	if !ok {
+		return ftpclient.NormalizeRemoteDir(remoteDir)
+	}
+	base := ArchiveDayBaseDir(remoteDir, archiveName)
+	if base == "/" {
+		return "/" + day
+	}
+	return base + "/" + day
 }
 
 // TruncateSlot returns the 10-minute slot start containing t in loc.

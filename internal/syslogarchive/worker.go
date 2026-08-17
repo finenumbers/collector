@@ -22,6 +22,8 @@ import (
 
 type SettingsFunc func() runtimesettings.SyslogArchiveSettings
 
+const maxArchiveBuildsPerTick = 4
+
 type Worker struct {
 	Store     *store.Store
 	Analytics *analytics.Client
@@ -29,6 +31,9 @@ type Worker struct {
 	WorkerID  string
 	Poll      time.Duration
 	Lease     time.Duration
+
+	historicalPurgeDone bool
+	ttlApplied          bool
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -60,6 +65,10 @@ func (w *Worker) tick(ctx context.Context) {
 			slog.Error("syslog archive tick panic", "panic", recovered)
 		}
 	}()
+	w.applyBufferTTL(ctx)
+	w.historicalPurge(ctx)
+	w.gcRawHours(ctx)
+
 	cfg := w.settings()
 	if !cfg.Enabled {
 		return
@@ -69,11 +78,16 @@ func (w *Worker) tick(ctx context.Context) {
 		return
 	}
 	w.gcOrphans(cfg.LocalSpoolDir)
-	w.enqueueClosedHours(ctx, cfg)
+	w.enqueueClosedSlots(ctx, cfg)
+	builds := 0
 	for {
-		worked, err := w.processOne(ctx, cfg)
+		allowBuild := builds < maxArchiveBuildsPerTick
+		worked, built, err := w.processOne(ctx, cfg, allowBuild)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			slog.Error("syslog archive job failed", "error", err)
+		}
+		if built {
+			builds++
 		}
 		if !worked {
 			return
@@ -95,7 +109,7 @@ func (w *Worker) settings() runtimesettings.SyslogArchiveSettings {
 	return doc.SyslogArchive
 }
 
-func (w *Worker) enqueueClosedHours(ctx context.Context, cfg runtimesettings.SyslogArchiveSettings) {
+func (w *Worker) enqueueClosedSlots(ctx context.Context, cfg runtimesettings.SyslogArchiveSettings) {
 	release, ok, err := w.Store.TrySyslogArchiveOrchestratorLock(ctx)
 	if err != nil {
 		slog.Error("syslog archive orchestrator lock", "error", err)
@@ -108,7 +122,7 @@ func (w *Worker) enqueueClosedHours(ctx context.Context, cfg runtimesettings.Sys
 
 	closeDelay, err := time.ParseDuration(cfg.CloseDelay)
 	if err != nil {
-		closeDelay = 2 * time.Minute
+		closeDelay = time.Minute
 	}
 	devices, err := w.Store.ListSyslogArchiveDevices(ctx)
 	if err != nil {
@@ -128,22 +142,45 @@ func (w *Worker) enqueueClosedHours(ctx context.Context, cfg runtimesettings.Sys
 			slog.Warn("syslog archive bad timezone", "device", device.ID, "tz", device.ActiveTimezone)
 			continue
 		}
-		closed := ClosedHourStart(now, loc, closeDelay)
+		closed := ClosedSlotStart(now, loc, closeDelay)
 		oldest := closed.Add(-time.Duration(cfg.LookbackHours) * time.Hour)
-		for hour := closed; !hour.Before(oldest); hour = hour.Add(-time.Hour) {
-			name, err := ArchiveName(device.DeviceSign, hour, loc)
-			if err != nil {
+		hourCounts := map[time.Time]int64{}
+		hourCount := func(hour time.Time) int64 {
+			hour = hour.UTC().Truncate(time.Hour)
+			if count, ok := hourCounts[hour]; ok {
+				return count
+			}
+			fp, fpErr := w.Analytics.SyslogSlotFingerprint(ctx, device.ID, hour, hour.Add(time.Hour))
+			if fpErr != nil {
+				slog.Error("syslog archive hour fingerprint", "device", device.ID, "hour", hour, "error", fpErr)
+				hourCounts[hour] = -1
+				return -1
+			}
+			hourCounts[hour] = fp.Count
+			return fp.Count
+		}
+		for slot := closed; !slot.Before(oldest); slot = slot.Add(-SlotDuration) {
+			from, to := SlotBoundsUTC(slot)
+			startHour := from.Truncate(time.Hour)
+			endHour := to.Add(-time.Nanosecond).Truncate(time.Hour)
+			if HourMayDelete(now, startHour) && HourMayDelete(now, endHour) {
+				startCount, endCount := hourCount(startHour), hourCount(endHour)
+				if startCount == 0 && endCount == 0 {
+					continue
+				}
+			}
+			name, nameErr := ArchiveName(device.DeviceSign, slot, loc)
+			if nameErr != nil {
 				continue
 			}
 			if _, err := w.Store.EnsureSyslogArchiveJob(
-				ctx, device.ID, hour, name, device.SyslogArchiveRemoteDir, device.ActiveTimezone,
-			); err != nil {
-				slog.Error("ensure syslog archive job", "device", device.ID, "hour", hour, "error", err)
+				ctx, device.ID, slot, name, device.SyslogArchiveRemoteDir, device.ActiveTimezone,
+			); err != nil && !errors.Is(err, store.ErrNotFound) {
+				slog.Error("ensure syslog archive job", "device", device.ID, "slot", slot, "error", err)
 			}
 		}
-		// Mark one stale sentinel older than lookback so gaps are visible once.
-		stale := oldest.Add(-time.Hour)
-		if name, err := ArchiveName(device.DeviceSign, stale, loc); err == nil {
+		stale := oldest.Add(-SlotDuration)
+		if name, nameErr := ArchiveName(device.DeviceSign, stale, loc); nameErr == nil {
 			_ = w.Store.EnsureSyslogArchiveSkippedStale(
 				ctx, device.ID, stale, name, device.SyslogArchiveRemoteDir, device.ActiveTimezone,
 			)
@@ -151,14 +188,17 @@ func (w *Worker) enqueueClosedHours(ctx context.Context, cfg runtimesettings.Sys
 	}
 }
 
-func (w *Worker) processOne(ctx context.Context, cfg runtimesettings.SyslogArchiveSettings) (bool, error) {
-	job, err := w.Store.ClaimSyslogArchiveJob(ctx, w.WorkerID, w.Lease)
+func (w *Worker) processOne(
+	ctx context.Context, cfg runtimesettings.SyslogArchiveSettings, allowBuild bool,
+) (bool, bool, error) {
+	job, err := w.Store.ClaimSyslogArchiveJob(ctx, w.WorkerID, w.Lease, allowBuild)
 	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
+	built := job.Status == store.SyslogArchiveStatusBuilding
 	start := time.Now()
 	switch job.Status {
 	case store.SyslogArchiveStatusBuilding:
@@ -178,12 +218,12 @@ func (w *Worker) processOne(ctx context.Context, cfg runtimesettings.SyslogArchi
 			"job", job.ID, "device", job.DeviceID, "hour", job.HourStart,
 			"phase", job.Status, "attempts", job.Attempts, "error", err,
 			"duration", time.Since(start))
-		return true, err
+		return true, built, err
 	}
 	slog.Info("syslog archive job ok",
 		"job", job.ID, "device", job.DeviceID, "hour", job.HourStart,
 		"phase", job.Status, "bytes", job.Bytes, "duration", time.Since(start))
-	return true, nil
+	return true, built, nil
 }
 
 func (w *Worker) build(ctx context.Context, cfg runtimesettings.SyslogArchiveSettings, job store.SyslogArchiveJob) error {
@@ -204,11 +244,17 @@ func (w *Worker) build(ctx context.Context, cfg runtimesettings.SyslogArchiveSet
 	if err != nil {
 		loc = time.UTC
 	}
-	hourLocal := job.HourStart.In(loc)
-	// Recompute local hour wall from stored UTC instant.
-	hourLocal = time.Date(hourLocal.Year(), hourLocal.Month(), hourLocal.Day(),
-		hourLocal.Hour(), 0, 0, 0, loc)
-	from, to := HourBoundsUTC(hourLocal)
+	slotLocal := job.HourStart.In(loc)
+	from, to := SlotBoundsUTC(slotLocal)
+	for _, hour := range []time.Time{from.Truncate(time.Hour), to.Add(-time.Nanosecond).Truncate(time.Hour)} {
+		blocked, blockErr := w.Store.SyslogUTCHourBlocked(ctx, job.DeviceID, hour)
+		if blockErr != nil {
+			return blockErr
+		}
+		if blocked {
+			return w.abandon(ctx, job, "utc hour sealed")
+		}
+	}
 
 	tmp, err := os.CreateTemp(cfg.LocalSpoolDir, "building-*.zip")
 	if err != nil {
@@ -236,13 +282,15 @@ func (w *Worker) build(ctx context.Context, cfg runtimesettings.SyslogArchiveSet
 	if err != nil {
 		return err
 	}
-	payloadBytes, err := w.Analytics.ExportSyslogPayloadsRaw(ctx, job.DeviceID, from, to, limited)
+	_, err = w.Analytics.ExportSyslogPayloadsRaw(ctx, job.DeviceID, from, to, limited)
 	releaseHeavy()
 	if err != nil {
 		return err
 	}
-	_ = payloadBytes
 	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -252,12 +300,19 @@ func (w *Worker) build(ctx context.Context, cfg runtimesettings.SyslogArchiveSet
 	if err != nil {
 		return err
 	}
+	fp, err := w.Analytics.SyslogSlotFingerprint(ctx, job.DeviceID, from, to)
+	if err != nil {
+		return err
+	}
+	count, maxAt, maxID := fingerprintArgs(fp)
 	finalPath := filepath.Join(cfg.LocalSpoolDir, job.ID.String()+"_"+job.ArchiveName)
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return err
 	}
 	tmpPath = "" // renamed; skip defer remove of final
-	if err := w.Store.MarkSyslogArchiveReady(ctx, job.ID, w.WorkerID, finalPath, info.Size()); err != nil {
+	if err := w.Store.MarkSyslogArchiveReady(
+		ctx, job.ID, w.WorkerID, finalPath, info.Size(), count, maxAt, maxID,
+	); err != nil {
 		_ = os.Remove(finalPath)
 		return err
 	}
@@ -394,4 +449,13 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	n, err := l.w.Write(p)
 	l.written += int64(n)
 	return n, err
+}
+
+func fingerprintArgs(fp analytics.SyslogSlotFingerprint) (int64, *time.Time, *uuid.UUID) {
+	if fp.Count == 0 {
+		return 0, nil, nil
+	}
+	ts := fp.MaxReceivedAt.UTC()
+	id := fp.MaxEventID
+	return fp.Count, &ts, &id
 }

@@ -12,8 +12,7 @@ type retentionTable struct {
 }
 
 var retentionTables = map[string][]retentionTable{
-	"syslog": {
-		{name: "syslog_messages", timeExpr: "received_at"},
+	"antifraud": {
 		{name: "custom_radius_packets", timeExpr: "first_seen_at"},
 		{name: "custom_radius_packet_members", timeExpr: "received_at"},
 		{name: "custom_radius_exchanges", timeExpr: "occurred_at"},

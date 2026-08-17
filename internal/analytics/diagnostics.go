@@ -57,7 +57,8 @@ func (c *Client) OperationalDiagnostics(ctx context.Context) (OperationalDiagnos
 		"not_applicable": notApplicable, "ambiguous": ambiguous,
 	}
 	applicable := matched + expected + late + missing
-	result.CoverageSLOMet = applicable == 0 || float64(late+missing)/float64(applicable) <= 0.01
+	result.CoverageSLOMet = missing == 0 &&
+		(applicable == 0 || float64(late)/float64(applicable) <= 0.01)
 	result.ProjectionSLOMet = result.ProjectionLagSeconds <= 300
 	return result, nil
 }

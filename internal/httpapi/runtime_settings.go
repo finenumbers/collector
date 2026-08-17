@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
+	"time"
 
+	syslogftp "collector/internal/ftpclient"
 	"collector/internal/runtimesettings"
 	"collector/internal/store"
 
@@ -88,4 +92,57 @@ func (s *Server) downloadContainerLimitsEnv(writer http.ResponseWriter, request 
 	writer.Header().Set("Content-Disposition", `attachment; filename="container-limits.env"`)
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write([]byte(fragment))
+}
+
+func (s *Server) testSyslogArchiveFTP(writer http.ResponseWriter, request *http.Request) {
+	var body struct {
+		FTPHost     string `json:"ftpHost"`
+		FTPPort     int    `json:"ftpPort"`
+		FTPUser     string `json:"ftpUser"`
+		FTPPassword string `json:"ftpPassword"`
+		FTPTLS      bool   `json:"ftpTls"`
+		RemoteDir   string `json:"remoteDir"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid ftp probe payload")
+		return
+	}
+	doc := s.runtimeDocument()
+	if s.Store != nil {
+		if row, err := s.Store.LoadRuntimeSettings(request.Context()); err == nil && row.Seeded {
+			doc = row.Settings
+		}
+	}
+	host := strings.TrimSpace(body.FTPHost)
+	user := strings.TrimSpace(body.FTPUser)
+	password := body.FTPPassword
+	if password == "" {
+		password = doc.SyslogArchive.FTPPassword
+	}
+	port := body.FTPPort
+	if port == 0 {
+		port = doc.SyslogArchive.FTPPort
+	}
+	if host == "" || user == "" {
+		writeError(writer, http.StatusBadRequest, "ftp host and user are required")
+		return
+	}
+	if strings.TrimSpace(password) == "" {
+		writeError(writer, http.StatusBadRequest, "ftp password is required")
+		return
+	}
+	remoteDir := strings.TrimSpace(body.RemoteDir)
+	if remoteDir == "" {
+		remoteDir = "/"
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
+	defer cancel()
+	client := syslogftp.New(syslogftp.Config{
+		Host: host, Port: port, User: user, Password: password, TLS: body.FTPTLS,
+	})
+	if err := client.Probe(ctx, remoteDir); err != nil {
+		writeError(writer, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }

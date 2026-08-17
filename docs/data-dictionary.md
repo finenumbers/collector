@@ -14,10 +14,9 @@ column and `syslog_parser_rebuild_jobs` table are removed by migration 017.
 durable asynchronous export queue. Users, sessions, retention policies, and
 audit records remain control-plane data.
 
-## Immutable Syslog
+## Syslog buffer
 
-`collector.syslog_messages` is the only persisted Syslog model in this
-foundation:
+`collector.syslog_messages` is the only persisted Syslog transport model:
 
 - `event_id UUID`: stable ID created at ingress;
 - `device_id UUID`: source resolved from the original sender IP;
@@ -27,11 +26,14 @@ foundation:
 - `payload String`: exact datagram bytes;
 - `payload_sha256 FixedString(64)`: lowercase hexadecimal digest.
 
+The table is a live buffer, not a warehouse: ClickHouse TTL is 72 hours, and
+maintenance deletes a UTC hour after ZIP+AntiFraud gates and a 2-hour tail.
 The table is monthly-partitioned `MergeTree`, ordered by
 `(device_id, received_at, event_id)`. This order is the API keyset cursor.
 There are no parser, category, component, RADIUS, construct, correlation, or
-AntiFraud columns. The Custom worker reads this immutable table and owns a
-separate marker-selected projection.
+AntiFraud columns. The Custom worker reads this buffer and owns a
+separate marker-selected projection. Call cards do not read raw Syslog after
+GC; they use `custom_radius_packet_members`.
 
 `GET /api/devices/{deviceID}/syslog-messages` returns the same flat fields.
 The endpoint rejects a `category` query parameter. Search applies only to
@@ -87,9 +89,11 @@ used to recompute sessions spanning hours or days.
 
 ## Retention
 
-- `syslog` controls only `syslog_messages`;
+- `antifraud` controls Custom AntiFraud / RADIUS projection tables, not `syslog_messages`;
 - `cdr` controls Eltex CDR and CDR time tables;
 - `softswitch_cdr` controls Satel RTU tables;
 - `raw_cdr_archive` controls the MinIO CDR prefix.
 
-The legacy `derived` retention class is removed.
+Raw Syslog retention is a 72-hour ClickHouse TTL plus hourly GC after ZIP and
+AntiFraud completion. The legacy `syslog` and `derived` retention classes are
+removed.

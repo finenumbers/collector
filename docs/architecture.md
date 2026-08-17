@@ -31,9 +31,12 @@ spool, and JetStream. Spool deletion happens only after the next durable
 boundary acknowledges it. `Nats-Msg-Id=event_id` suppresses duplicate publish
 after a crash.
 
-The NATS consumer writes the immutable transport record directly to
-`syslog_messages` and acknowledges NATS as soon as raw persistence succeeds.
-The durable PostgreSQL discovery job continuously scans the immutable table
+The NATS consumer writes the transport record to `syslog_messages` and
+acknowledges NATS as soon as raw persistence succeeds, unless that UTC hour is
+already sealed for deletion. `syslog_messages` is a short live buffer (~2–3
+hours, TTL 72 hours), not a long-term warehouse. Ten-minute ZIP archives and
+Custom AntiFraud consume it; hourly GC then seals the UTC hour and deletes raw
+rows. The durable PostgreSQL discovery job continuously scans the buffer
 and idempotently enqueues new UTC-hour buckets for enabled devices. A temporary
 PostgreSQL enqueue failure therefore cannot force duplicate raw delivery or
 lose later projection. The transport consumer itself does no parsing.
@@ -41,8 +44,10 @@ lose later projection. The transport consumer itself does no parsing.
 ## Storage boundaries
 
 PostgreSQL stores users, sessions, devices, ingest/export ledgers, retention,
-and audit state. ClickHouse stores immutable Syslog, Eltex CDR, Satel RTU CDR,
-and CDR time interpretations. MinIO stores immutable source CDR files.
+syslog archive jobs, raw-hour seals, and audit state. ClickHouse stores a short
+Syslog buffer, Eltex CDR, Satel RTU CDR, Custom AntiFraud projections, and CDR
+time interpretations. MinIO stores immutable source CDR files. FTP receives
+10-minute raw Syslog ZIP archives.
 
 `syslog_messages` is the extension boundary for the pure `customradius`
 engine. PostgreSQL owns policy revisions, durable discovery/bucket jobs,

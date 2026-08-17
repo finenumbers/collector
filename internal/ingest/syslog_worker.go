@@ -52,6 +52,10 @@ type customProjectionEnqueuer interface {
 	EnqueueCustomProjectionBuckets(context.Context, uuid.UUID, uint64, []time.Time) error
 }
 
+type syslogUTCHourBlocker interface {
+	SyslogUTCHourBlocked(context.Context, uuid.UUID, time.Time) (bool, error)
+}
+
 func EnsureStreams(nc *nats.Conn) error {
 	js, err := nc.JetStream()
 	if err != nil {
@@ -223,6 +227,9 @@ func RunSyslogWorker(
 			records := make([]analytics.SyslogMessage, 0, len(pending))
 			// One DeviceTimeConfig lookup per distinct device in the batch.
 			deviceConfigErr := make(map[uuid.UUID]error)
+			deviceBlockedHour := make(map[string]bool)
+			deviceBlockErr := make(map[uuid.UUID]error)
+			blocker, hasBlocker := timeResolver.(syslogUTCHourBlocker)
 			for _, item := range pending {
 				if timeResolver != nil {
 					configErr, seen := deviceConfigErr[item.raw.DeviceID]
@@ -237,6 +244,29 @@ func RunSyslogWorker(
 							continue
 						}
 						_ = item.message.NakWithDelay(5 * time.Second)
+						continue
+					}
+				}
+				if hasBlocker {
+					hour := item.raw.ReceivedAt.UTC().Truncate(time.Hour)
+					key := item.raw.DeviceID.String() + hour.Format(time.RFC3339Nano)
+					blocked, seen := deviceBlockedHour[key]
+					if !seen {
+						if blockErr, ok := deviceBlockErr[item.raw.DeviceID]; ok && blockErr != nil {
+							_ = item.message.NakWithDelay(5 * time.Second)
+							continue
+						}
+						var blockErr error
+						blocked, blockErr = blocker.SyslogUTCHourBlocked(ctx, item.raw.DeviceID, hour)
+						if blockErr != nil {
+							deviceBlockErr[item.raw.DeviceID] = blockErr
+							_ = item.message.NakWithDelay(5 * time.Second)
+							continue
+						}
+						deviceBlockedHour[key] = blocked
+					}
+					if blocked {
+						_ = item.message.Ack()
 						continue
 					}
 				}

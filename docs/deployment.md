@@ -13,10 +13,12 @@ Syslog-derived object.
 
 Administrators manage retention through `GET /api/system/retention` and
 `PATCH /api/system/retention`. The four independent policy classes are
-`syslog`, `cdr` (equipment), `softswitch_cdr`, and `raw_cdr_archive`; each
+`antifraud`, `cdr` (equipment), `softswitch_cdr`, and `raw_cdr_archive`; each
 accepts 7–1095 days and defaults to 1095.
-`syslog` controls only `collector.syslog_messages`; the removed `derived`
-policy is deleted during migration.
+`antifraud` controls Custom AntiFraud / RADIUS tables, not `collector.syslog_messages`.
+Raw Syslog is a 72-hour buffer plus hourly GC after 10-minute ZIP archives and
+AntiFraud completion. The removed `syslog` / `derived` policies are rewritten
+during migration.
 `softswitch_cdr` currently controls both Satel RTU ClickHouse tables and is the
 contract for future typed softswitch parsers. Every valid change is effective
 immediately, and the PATCH waits for the advisory-locked reconciliation
@@ -209,13 +211,15 @@ health vs event-tip ages, classification gap, coverage states и SLO, orphans/am
 
 Обязательные алерты: container restart, оба local spool depth/size (`ingress.db`,
 `syslog.db`), handoff errors, NATS lag/storage, **per-device health lag** >5 мин при
-`depth>0` или `failed>0`, classification gap, coverage late+missing >1% после grace,
+`depth>0` или `failed>0`, classification gap, coverage `missing` на AntiFraud-устройстве
+(нарушение инварианта) или late >1% после grace,
 CDR ingest age, disk >75/85%, ClickHouse insert errors, SFTPGo unavailable, backup age.
 
 IANA timezone выбирается из выпадающего списка в настройках конкретного SMG и применяется
-к CDR wall clock этого устройства. Сырой Syslog остаётся в `syslog_messages` с
-`received_at`; Custom AntiFraud и coverage пересобираются фоновыми bucket jobs без
-остановки приёма. Контролируйте projection lag, coverage SLO и ClickHouse read rows/CPU.
+к CDR wall clock этого устройства. Сырой Syslog живёт в `syslog_messages` как короткий
+буфер с `received_at`; 10-минутные ZIP уходят на FTP, а Custom AntiFraud и coverage
+пересобираются фоновыми bucket jobs без остановки приёма. Контролируйте projection lag,
+coverage SLO и ClickHouse read rows/CPU.
 
 ## Инциденты
 

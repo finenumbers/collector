@@ -9,13 +9,13 @@ import (
 
 // Document is the admin-editable runtime configuration formerly kept only in .env.
 type Document struct {
-	Projection    ProjectionSettings     `json:"projection"`
-	Coverage      CoverageSettings       `json:"coverage"`
-	Voipmonitor   VoipmonitorSettings    `json:"voipmonitor"`
-	Enrichment    EnrichmentSettings     `json:"enrichment"`
-	Platform      PlatformSettings       `json:"platform"`
-	Containers    ContainersSettings     `json:"containers"`
-	SyslogArchive SyslogArchiveSettings  `json:"syslogArchive"`
+	Projection    ProjectionSettings    `json:"projection"`
+	Coverage      CoverageSettings      `json:"coverage"`
+	Voipmonitor   VoipmonitorSettings   `json:"voipmonitor"`
+	Enrichment    EnrichmentSettings    `json:"enrichment"`
+	Platform      PlatformSettings      `json:"platform"`
+	Containers    ContainersSettings    `json:"containers"`
+	SyslogArchive SyslogArchiveSettings `json:"syslogArchive"`
 }
 
 type SyslogArchiveSettings struct {
@@ -163,7 +163,7 @@ func Defaults() Document {
 			Enabled:          false,
 			FTPPort:          21,
 			LocalSpoolDir:    "/data/spool/syslog-archive",
-			CloseDelay:       "2m",
+			CloseDelay:       "1m",
 			LookbackHours:    48,
 			MaxArchiveBytes:  2 << 30,
 			SpoolBudgetBytes: 50 << 30,
@@ -278,7 +278,7 @@ func (d Document) Validate() error {
 	if err := d.Containers.Validate(); err != nil {
 		return err
 	}
-	if err := requireDuration("syslogArchive.closeDelay", d.SyslogArchive.CloseDelay, time.Second, time.Hour); err != nil {
+	if err := requireDuration("syslogArchive.closeDelay", d.SyslogArchive.CloseDelay, time.Second, 10*time.Minute-time.Second); err != nil {
 		return err
 	}
 	if d.SyslogArchive.FTPPort < 1 || d.SyslogArchive.FTPPort > 65535 {
@@ -343,8 +343,12 @@ func MergePatch(base Document, patch json.RawMessage) (Document, error) {
 			Password *string `json:"password"`
 		} `json:"voipmonitor"`
 		Enrichment struct {
-			PSTN  struct{ Token *string `json:"token"` } `json:"pstn"`
-			GeoIP struct{ Token *string `json:"token"` } `json:"geoip"`
+			PSTN struct {
+				Token *string `json:"token"`
+			} `json:"pstn"`
+			GeoIP struct {
+				Token *string `json:"token"`
+			} `json:"geoip"`
 		} `json:"enrichment"`
 		SyslogArchive struct {
 			FTPPassword *string `json:"ftpPassword"`

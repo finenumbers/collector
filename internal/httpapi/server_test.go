@@ -589,6 +589,17 @@ func TestDashboardAPIRejectsInvalidWindowBeforeQueries(t *testing.T) {
 	}
 }
 
+func TestSyslogArchiveFTPProbeValidatesInput(t *testing.T) {
+	server := &Server{}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/system/runtime-settings/syslog-archive/test-ftp",
+		strings.NewReader(`{"ftpHost":"","ftpUser":"u"}`))
+	server.testSyslogArchiveFTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want 400", response.Code)
+	}
+}
+
 func TestRetentionAPIValidatesInputBeforeDatabase(t *testing.T) {
 	tests := []struct {
 		name string
@@ -597,7 +608,7 @@ func TestRetentionAPIValidatesInputBeforeDatabase(t *testing.T) {
 	}{
 		{name: "unknown class", body: `{"policyClass":"unknown","days":30}`,
 			want: "invalid retention policy class"},
-		{name: "too short", body: `{"policyClass":"syslog","days":6}`,
+		{name: "too short", body: `{"policyClass":"antifraud","days":6}`,
 			want: "retention days must be between 7 and 1095"},
 		{name: "too long", body: `{"policyClass":"cdr","days":1096}`,
 			want: "retention days must be between 7 and 1095"},
@@ -679,13 +690,13 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = control.DB.Exec(context.Background(), `UPDATE retention_policies SET
 			active_days=1095,pending_days=NULL,effective_at=NULL,updated_by=NULL,last_error=NULL
-			WHERE policy_class='syslog'`)
+			WHERE policy_class='antifraud'`)
 	})
 
 	t.Run("success returns applied policy", func(t *testing.T) {
 		if _, err := control.DB.Exec(ctx, `UPDATE retention_policies SET
 			active_days=30,pending_days=NULL,effective_at=NULL,last_error=NULL
-			WHERE policy_class='syslog'`); err != nil {
+			WHERE policy_class='antifraud'`); err != nil {
 			t.Fatal(err)
 		}
 		called := false
@@ -698,7 +709,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 					return err
 				}
 				for _, policy := range policies {
-					if policy.PolicyClass == "syslog" {
+					if policy.PolicyClass == "antifraud" {
 						return control.CompleteRetentionPolicy(
 							ctx, policy.PolicyClass, *policy.PendingDays, policy.UpdatedAt,
 						)
@@ -709,7 +720,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 		}
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPatch, "/api/system/retention",
-			strings.NewReader(`{"policyClass":"syslog","days":14}`))
+			strings.NewReader(`{"policyClass":"antifraud","days":14}`))
 		request = request.WithContext(context.WithValue(request.Context(), sessionKey,
 			store.Session{User: actor}))
 		server.updateRetention(response, request)
@@ -725,7 +736,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 	t.Run("failure remains pending", func(t *testing.T) {
 		if _, err := control.DB.Exec(ctx, `UPDATE retention_policies SET
 			active_days=30,pending_days=NULL,effective_at=NULL,last_error=NULL
-			WHERE policy_class='syslog'`); err != nil {
+			WHERE policy_class='antifraud'`); err != nil {
 			t.Fatal(err)
 		}
 		applyErr := errors.New("clickhouse unavailable")
@@ -737,7 +748,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 					return err
 				}
 				for _, policy := range policies {
-					if policy.PolicyClass == "syslog" {
+					if policy.PolicyClass == "antifraud" {
 						if err := control.FailRetentionPolicy(
 							ctx, policy.PolicyClass, policy.UpdatedAt, applyErr,
 						); err != nil {
@@ -751,7 +762,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 		}
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPatch, "/api/system/retention",
-			strings.NewReader(`{"policyClass":"syslog","days":14}`))
+			strings.NewReader(`{"policyClass":"antifraud","days":14}`))
 		request = request.WithContext(context.WithValue(request.Context(), sessionKey,
 			store.Session{User: actor}))
 		server.updateRetention(response, request)
@@ -767,7 +778,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, policy := range policies {
-			if policy.PolicyClass == "syslog" {
+			if policy.PolicyClass == "antifraud" {
 				if policy.PendingDays == nil || *policy.PendingDays != 14 ||
 					policy.LastError == nil || *policy.LastError != applyErr.Error() {
 					t.Fatalf("failed policy was not preserved: %+v", policy)
@@ -775,7 +786,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 				return
 			}
 		}
-		t.Fatal("syslog policy not found")
+		t.Fatal("antifraud policy not found")
 	})
 
 	t.Run("failed pending change can be cancelled", func(t *testing.T) {
@@ -789,7 +800,7 @@ func TestRetentionAPISynchronouslyReconcilesAndRefreshes(t *testing.T) {
 		}
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPatch, "/api/system/retention",
-			strings.NewReader(`{"policyClass":"syslog","cancel":true}`))
+			strings.NewReader(`{"policyClass":"antifraud","cancel":true}`))
 		request = request.WithContext(context.WithValue(request.Context(), sessionKey,
 			store.Session{User: actor}))
 		server.updateRetention(response, request)

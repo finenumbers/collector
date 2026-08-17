@@ -96,7 +96,7 @@ fixed anonymized capture at expected peak plus 50% for 30 minutes and record:
 - projection **live health** lag under 5 minutes after load stops; quiet SMGs must
   not false-breach on absolute AF tip / watermark / catch-up age alone
   (`contentLag≈0` + fresh activated is ok);
-- coverage late+missing at or below 1% after the configured grace;
+- coverage `missing` must be zero on AntiFraud-enabled devices; late at or below 1% after the configured grace;
 - export/replay never overlap in the heavy lane; when both wait, custom_replay
   is preferred over export;
 - no container OOM, ClickHouse overcommit, or unbounded response.

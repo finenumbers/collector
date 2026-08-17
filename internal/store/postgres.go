@@ -148,13 +148,13 @@ type DeviceTimeConfig struct {
 }
 
 type NewDevice struct {
-	Name             string `json:"name"`
-	SourceCategory   string `json:"sourceCategory"`
-	TemplateKey      string `json:"templateKey"`
-	Model            string `json:"model"`
-	Firmware         string `json:"firmware"`
-	Timezone         string `json:"timezone"`
-	ManagementIP     string `json:"managementIp"`
+	Name               string `json:"name"`
+	SourceCategory     string `json:"sourceCategory"`
+	TemplateKey        string `json:"templateKey"`
+	Model              string `json:"model"`
+	Firmware           string `json:"firmware"`
+	Timezone           string `json:"timezone"`
+	ManagementIP       string `json:"managementIp"`
 	SyslogSourceIP     string `json:"syslogSourceIp"`
 	DeviceSign         string `json:"deviceSign"`
 	AntifraudEnabled   bool   `json:"antifraudEnabled"`
@@ -1356,6 +1356,7 @@ func (s *Store) BeginDevicePurge(ctx context.Context, id uuid.UUID) (Device, err
 		return Device{}, ErrNotFound
 	}
 	s.deviceCacheRevision.Add(1)
+	_ = s.AbandonSyslogArchiveJobsForDevice(ctx, id, "device purge")
 	return s.Device(ctx, id)
 }
 

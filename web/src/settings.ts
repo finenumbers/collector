@@ -3,11 +3,11 @@ export type Role = 'admin' | 'analyst' | 'viewer'
 export type FirmwareScheme = '3.23.2' | '3.410'
 
 export type RetentionPolicyClass =
-  'syslog' | 'cdr' | 'softswitch_cdr' | 'raw_cdr_archive'
+  'antifraud' | 'cdr' | 'softswitch_cdr' | 'raw_cdr_archive'
 
 export function retentionLabel(value: RetentionPolicyClass): string {
   return {
-    syslog: 'Syslog и события',
+    antifraud: 'АнтиФрод и RADIUS',
     cdr: 'CDR оборудования',
     softswitch_cdr: 'CDR софтсвитчей',
     raw_cdr_archive: 'Raw CDR архив всех источников',
@@ -16,7 +16,7 @@ export function retentionLabel(value: RetentionPolicyClass): string {
 
 export function retentionDescription(value: RetentionPolicyClass): string {
   return {
-    syslog: 'Исходные Syslog datagram в syslog_messages.',
+    antifraud: 'Проекция Custom AntiFraud и RADIUS в ClickHouse. Сырой Syslog живёт отдельно как короткий буфер (TTL 72 часа).',
     cdr: 'Нормализованные CDR оборудования и timezone interpretations.',
     softswitch_cdr: 'Нормализованные CDR софтсвитчей и timezone interpretations.',
     raw_cdr_archive: 'Неизменённые исходные CDR-файлы всех источников в объектном хранилище.',

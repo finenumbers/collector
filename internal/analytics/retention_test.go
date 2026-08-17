@@ -8,19 +8,22 @@ import (
 
 func TestRetentionRegistryIncludesCustomProjection(t *testing.T) {
 	required := map[string]bool{
-		"syslog_messages": false, "custom_radius_packets": false,
+		"custom_radius_packets": false,
 		"custom_radius_packet_members": false, "custom_radius_exchanges": false,
 		"custom_antifraud_calls": false, "custom_antifraud_call_packets": false,
 		"custom_radius_session_events": false,
 	}
-	for _, table := range retentionTables["syslog"] {
+	for _, table := range retentionTables["antifraud"] {
+		if table.name == "syslog_messages" {
+			t.Fatal("syslog_messages must not be in antifraud retention")
+		}
 		if _, ok := required[table.name]; ok {
 			required[table.name] = true
 		}
 	}
 	for table, found := range required {
 		if !found {
-			t.Fatalf("%s is missing from Syslog retention", table)
+			t.Fatalf("%s is missing from AntiFraud retention", table)
 		}
 	}
 }
@@ -55,7 +58,7 @@ func TestRetentionRegistrySeparatesEltexAndSatelCDR(t *testing.T) {
 func TestApplyRetentionRejectsUnsafeInputBeforeDatabaseAccess(t *testing.T) {
 	client := &Client{}
 	for _, days := range []int{0, 6, 1096} {
-		err := client.ApplyRetention(context.Background(), "syslog", days)
+		err := client.ApplyRetention(context.Background(), "antifraud", days)
 		if err == nil || !strings.Contains(err.Error(), "between 7 and 1095") {
 			t.Fatalf("days=%d: got %v", days, err)
 		}

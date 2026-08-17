@@ -6,9 +6,11 @@ CDR record — биллинговый факт одного логическог
 вызов может состоять из нескольких records при B2BUA, redirection, transfer, pickup,
 conference, IVR, SIP fork и alternate route.
 
-Custom AntiFraud строится только из immutable `collector.syslog_messages`. Фоновый
-worker собирает RADIUS-пакеты и вызовы Custom AntiFraud в staged snapshots, а видимость
-задаёт active marker. Сырые Syslog-строки не изменяются и не удаляются replay.
+Custom AntiFraud строится только из `collector.syslog_messages`, пока сырьё ещё
+в коротком буфере. Фоновый worker собирает RADIUS-пакеты и вызовы Custom
+AntiFraud в staged snapshots, а видимость задаёт active marker. Replay не
+переписывает сырые строки; после печати UTC-часа сырьё удаляется, а проекция
+остаётся.
 
 Логический вызов Custom AntiFraud = один нормализованный `h323-conf-id`. Несколько
 `Acct-Session-Id` (ноги) с общим h323 входят в **один** Call / одну строку таблицы /

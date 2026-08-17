@@ -59,7 +59,7 @@ func (a fakeAnalyticsRetention) ApplyRetention(context.Context, string, int) err
 func TestReconcilerCompletesImmediatelyDuePolicy(t *testing.T) {
 	days := 30
 	control := &fakePolicyStore{policies: []store.RetentionPolicy{{
-		PolicyClass: "syslog", PendingDays: &days, UpdatedAt: time.Now(),
+		PolicyClass: "antifraud", PendingDays: &days, UpdatedAt: time.Now(),
 	}}}
 	reconciler := &Reconciler{
 		Store: control, Analytics: fakeAnalyticsRetention{},
@@ -94,7 +94,7 @@ func TestRunNowWaitsForConcurrentReconciliation(t *testing.T) {
 	control := &fakePolicyStore{
 		lockAfter: 1,
 		policies: []store.RetentionPolicy{{
-			PolicyClass: "syslog", PendingDays: &days, UpdatedAt: time.Now(),
+			PolicyClass: "antifraud", PendingDays: &days, UpdatedAt: time.Now(),
 		}},
 	}
 	reconciler := &Reconciler{

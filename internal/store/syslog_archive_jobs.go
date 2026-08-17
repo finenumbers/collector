@@ -19,9 +19,10 @@ const (
 	SyslogArchiveStatusAbandoned    = "abandoned"
 	SyslogArchiveStatusSkippedStale = "skipped_stale"
 
-	syslogArchiveOrchestratorLockKey int64 = 0x53594C4152434831 // SYLARCH1
-	DefaultSyslogArchiveLease              = 2 * time.Minute
-	syslogRawGCLockKey               int64 = 0x53594C5241574731 // SYLRAWG1
+	syslogArchiveOrchestratorLockKey    int64 = 0x53594C4152434831 // SYLARCH1
+	DefaultSyslogArchiveLease                 = 2 * time.Minute
+	SyslogArchiveWorkerHeartbeatTimeout       = 45 * time.Second
+	syslogRawGCLockKey                  int64 = 0x53594C5241574731 // SYLRAWG1
 )
 
 type SyslogArchiveJob struct {
@@ -46,20 +47,51 @@ type SyslogArchiveJob struct {
 	UploadedAt    *time.Time `json:"uploadedAt,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+	DeviceName    string     `json:"deviceName,omitempty"`
+	DeviceSign    string     `json:"deviceSign,omitempty"`
+}
+
+type SyslogArchiveWorkerState struct {
+	WorkerID    string     `json:"workerId,omitempty"`
+	HeartbeatAt *time.Time `json:"heartbeatAt,omitempty"`
+	LastTickAt  *time.Time `json:"lastTickAt,omitempty"`
+	LastError   string     `json:"lastError,omitempty"`
+	Alive       bool       `json:"alive"`
+}
+
+type SyslogArchiveJobCounts struct {
+	Pending      int64 `json:"pending"`
+	Building     int64 `json:"building"`
+	Ready        int64 `json:"ready"`
+	Uploading    int64 `json:"uploading"`
+	Uploaded     int64 `json:"uploaded"`
+	Failed       int64 `json:"failed"`
+	Abandoned    int64 `json:"abandoned"`
+	SkippedStale int64 `json:"skippedStale"`
 }
 
 const syslogArchiveJobColumns = `id,device_id,hour_start,archive_name,remote_dir,timezone,status,
 	local_path,bytes,payload_count,max_received_at,max_event_id,attempts,last_error,next_attempt_at,
 	COALESCE(worker_id,''),heartbeat_at,lease_expires_at,uploaded_at,created_at,updated_at`
 
+const syslogArchiveJobColumnsPrefixed = `j.id,j.device_id,j.hour_start,j.archive_name,j.remote_dir,j.timezone,j.status,
+	j.local_path,j.bytes,j.payload_count,j.max_received_at,j.max_event_id,j.attempts,j.last_error,j.next_attempt_at,
+	COALESCE(j.worker_id,''),j.heartbeat_at,j.lease_expires_at,j.uploaded_at,j.created_at,j.updated_at`
+
 func scanSyslogArchiveJob(row pgx.Row) (SyslogArchiveJob, error) {
+	return scanSyslogArchiveJobExtra(row)
+}
+
+func scanSyslogArchiveJobExtra(row pgx.Row, extra ...any) (SyslogArchiveJob, error) {
 	var job SyslogArchiveJob
-	err := row.Scan(
+	args := []any{
 		&job.ID, &job.DeviceID, &job.HourStart, &job.ArchiveName, &job.RemoteDir, &job.Timezone,
 		&job.Status, &job.LocalPath, &job.Bytes, &job.PayloadCount, &job.MaxReceivedAt, &job.MaxEventID,
 		&job.Attempts, &job.LastError, &job.NextAttemptAt,
 		&job.WorkerID, &job.HeartbeatAt, &job.LeaseExpires, &job.UploadedAt, &job.CreatedAt, &job.UpdatedAt,
-	)
+	}
+	args = append(args, extra...)
+	err := row.Scan(args...)
 	return job, err
 }
 
@@ -101,7 +133,23 @@ func (s *Store) EnsureSyslogArchiveJob(
 			(id,device_id,hour_start,archive_name,remote_dir,timezone,status)
 		VALUES ($1,$2,$3,$4,$5,$6,'pending')
 		ON CONFLICT (device_id, hour_start) DO UPDATE SET
-			updated_at=syslog_archive_jobs.updated_at
+			archive_name=CASE
+				WHEN syslog_archive_jobs.status IN ('pending','failed','ready')
+				THEN EXCLUDED.archive_name ELSE syslog_archive_jobs.archive_name END,
+			remote_dir=CASE
+				WHEN syslog_archive_jobs.status IN ('pending','failed','ready')
+				THEN EXCLUDED.remote_dir ELSE syslog_archive_jobs.remote_dir END,
+			timezone=CASE
+				WHEN syslog_archive_jobs.status IN ('pending','failed','ready')
+				THEN EXCLUDED.timezone ELSE syslog_archive_jobs.timezone END,
+			updated_at=CASE
+				WHEN syslog_archive_jobs.status IN ('pending','failed','ready')
+				 AND (
+					syslog_archive_jobs.archive_name IS DISTINCT FROM EXCLUDED.archive_name
+					OR syslog_archive_jobs.remote_dir IS DISTINCT FROM EXCLUDED.remote_dir
+					OR syslog_archive_jobs.timezone IS DISTINCT FROM EXCLUDED.timezone
+				 )
+				THEN now() ELSE syslog_archive_jobs.updated_at END
 		RETURNING `+syslogArchiveJobColumns,
 		id, deviceID, hourStart.UTC(), archiveName, remoteDir, timezone,
 	))
@@ -135,7 +183,11 @@ func (s *Store) ClaimSyslogArchiveJob(
 		WITH candidate AS (
 			SELECT id AS job_id FROM syslog_archive_jobs
 			WHERE (
-				status IN ('ready','failed') AND next_attempt_at<=now()
+				status='ready' AND next_attempt_at<=now()
+			) OR (
+				status='failed' AND local_path<>'' AND next_attempt_at<=now()
+			) OR (
+				$3 AND status='failed' AND local_path='' AND next_attempt_at<=now()
 			) OR (
 				$3 AND status='pending' AND next_attempt_at<=now()
 			) OR (
@@ -144,22 +196,25 @@ func (s *Store) ClaimSyslogArchiveJob(
 				$3 AND status='building' AND lease_expires_at<now()
 			)
 			ORDER BY
-				CASE status
-					WHEN 'ready' THEN 0
-					WHEN 'failed' THEN 1
-					WHEN 'uploading' THEN 2
-					WHEN 'building' THEN 3
-					WHEN 'pending' THEN 4
+				CASE
+					WHEN status='ready' THEN 0
+					WHEN status='failed' AND local_path<>'' THEN 1
+					WHEN status='uploading' THEN 2
+					WHEN status='building' THEN 3
+					WHEN status IN ('pending') OR (status='failed' AND local_path='') THEN 4
 					ELSE 5
 				END,
-				CASE WHEN status IN ('pending','building') THEN hour_start END DESC NULLS LAST,
-				CASE WHEN status IN ('ready','failed','uploading') THEN hour_start END ASC,
+				CASE WHEN status IN ('pending','building') OR (status='failed' AND local_path='')
+					THEN hour_start END DESC NULLS LAST,
+				CASE WHEN status IN ('ready','uploading') OR (status='failed' AND local_path<>'')
+					THEN hour_start END ASC,
 				next_attempt_at, id
 			FOR UPDATE SKIP LOCKED LIMIT 1
 		)
 		UPDATE syslog_archive_jobs j SET
 			status=CASE
-				WHEN j.status IN ('ready','failed','uploading') THEN 'uploading'
+				WHEN j.status IN ('ready','uploading') THEN 'uploading'
+				WHEN j.status='failed' AND j.local_path<>'' THEN 'uploading'
 				ELSE 'building'
 			END,
 			worker_id=$1,
@@ -472,4 +527,152 @@ func (s *Store) AbandonSyslogArchiveJobsForDevice(ctx context.Context, deviceID 
 		WHERE device_id=$1 AND status NOT IN ('uploaded','abandoned','skipped_stale')`,
 		deviceID, reason)
 	return err
+}
+
+func (s *Store) GetSyslogArchiveJob(ctx context.Context, jobID uuid.UUID) (SyslogArchiveJob, error) {
+	job, err := scanSyslogArchiveJob(s.DB.QueryRow(ctx,
+		`SELECT `+syslogArchiveJobColumns+` FROM syslog_archive_jobs WHERE id=$1`, jobID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SyslogArchiveJob{}, ErrNotFound
+	}
+	return job, err
+}
+
+func (s *Store) ListRecentSyslogArchiveJobs(ctx context.Context, limit int) ([]SyslogArchiveJob, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.DB.Query(ctx, `
+		SELECT `+syslogArchiveJobColumnsPrefixed+`,
+			COALESCE(d.name,''), COALESCE(d.device_sign,'')
+		FROM syslog_archive_jobs j
+		JOIN devices d ON d.id=j.device_id
+		ORDER BY j.updated_at DESC, j.hour_start DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jobs []SyslogArchiveJob
+	for rows.Next() {
+		var name, sign string
+		job, scanErr := scanSyslogArchiveJobExtra(rows, &name, &sign)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		job.DeviceName = name
+		job.DeviceSign = sign
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
+func (s *Store) SyslogArchiveJobCounts(ctx context.Context) (SyslogArchiveJobCounts, error) {
+	var counts SyslogArchiveJobCounts
+	err := s.DB.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE status='pending'),
+			count(*) FILTER (WHERE status='building'),
+			count(*) FILTER (WHERE status='ready'),
+			count(*) FILTER (WHERE status='uploading'),
+			count(*) FILTER (WHERE status='uploaded'),
+			count(*) FILTER (WHERE status='failed'),
+			count(*) FILTER (WHERE status='abandoned'),
+			count(*) FILTER (WHERE status='skipped_stale')
+		FROM syslog_archive_jobs`).Scan(
+		&counts.Pending, &counts.Building, &counts.Ready, &counts.Uploading,
+		&counts.Uploaded, &counts.Failed, &counts.Abandoned, &counts.SkippedStale,
+	)
+	return counts, err
+}
+
+type SyslogArchiveDeviceProgress struct {
+	DeviceID       uuid.UUID
+	LastUploadedAt *time.Time
+	LastUploaded   *time.Time
+	LastError      string
+	NameMismatch   bool
+}
+
+func (s *Store) SyslogArchiveDeviceProgress(ctx context.Context) ([]SyslogArchiveDeviceProgress, error) {
+	rows, err := s.DB.Query(ctx, `
+		SELECT device_id,
+			max(uploaded_at) FILTER (WHERE status='uploaded'),
+			max(hour_start) FILTER (WHERE status='uploaded'),
+			COALESCE((
+				SELECT last_error FROM syslog_archive_jobs e
+				WHERE e.device_id=j.device_id AND e.last_error<>''
+				ORDER BY e.updated_at DESC LIMIT 1
+			),''),
+			EXISTS (
+				SELECT 1 FROM syslog_archive_jobs h
+				WHERE h.device_id=j.device_id
+				  AND h.status='uploaded'
+				  AND h.archive_name ~ '_[0-9]{2}\.zip$'
+				  AND h.archive_name !~ '_[0-9]{2}-[0-9]{2}\.zip$'
+			)
+		FROM syslog_archive_jobs j
+		GROUP BY device_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []SyslogArchiveDeviceProgress
+	for rows.Next() {
+		var item SyslogArchiveDeviceProgress
+		if err := rows.Scan(
+			&item.DeviceID, &item.LastUploadedAt, &item.LastUploaded,
+			&item.LastError, &item.NameMismatch,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) TouchSyslogArchiveWorker(ctx context.Context, workerID string) error {
+	_, err := s.DB.Exec(ctx, `
+		INSERT INTO syslog_archive_worker (k, worker_id, heartbeat_at, updated_at)
+		VALUES (1, $1, now(), now())
+		ON CONFLICT (k) DO UPDATE SET
+			worker_id=EXCLUDED.worker_id,
+			heartbeat_at=now(),
+			updated_at=now()`, workerID)
+	return err
+}
+
+func (s *Store) NoteSyslogArchiveWorkerTick(ctx context.Context, workerID, lastError string) error {
+	_, err := s.DB.Exec(ctx, `
+		INSERT INTO syslog_archive_worker (k, worker_id, heartbeat_at, last_tick_at, last_error, updated_at)
+		VALUES (1, $1, now(), now(), $2, now())
+		ON CONFLICT (k) DO UPDATE SET
+			worker_id=EXCLUDED.worker_id,
+			heartbeat_at=now(),
+			last_tick_at=now(),
+			last_error=$2,
+			updated_at=now()`, workerID, lastError)
+	return err
+}
+
+func (s *Store) SyslogArchiveWorkerState(ctx context.Context, maxAge time.Duration) (SyslogArchiveWorkerState, error) {
+	if maxAge <= 0 {
+		maxAge = SyslogArchiveWorkerHeartbeatTimeout
+	}
+	var state SyslogArchiveWorkerState
+	var heartbeat, tick *time.Time
+	err := s.DB.QueryRow(ctx, `
+		SELECT worker_id, heartbeat_at, last_tick_at, last_error,
+			heartbeat_at IS NOT NULL AND heartbeat_at >= now()-make_interval(secs=>$1)
+		FROM syslog_archive_worker WHERE k=1`, int(maxAge.Seconds()),
+	).Scan(&state.WorkerID, &heartbeat, &tick, &state.LastError, &state.Alive)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SyslogArchiveWorkerState{}, nil
+	}
+	if err != nil {
+		return SyslogArchiveWorkerState{}, err
+	}
+	state.HeartbeatAt = heartbeat
+	state.LastTickAt = tick
+	return state, nil
 }

@@ -38,3 +38,13 @@ func TestProbeRequiresConfig(t *testing.T) {
 		t.Fatal("expected not configured")
 	}
 }
+
+func TestProbeDetailedRequiresRemoteDir(t *testing.T) {
+	client := New(Config{Host: "ftp.example", User: "u", Password: "p"})
+	if _, err := client.ProbeDetailed(context.Background(), ""); err == nil {
+		t.Fatal("expected remote directory error")
+	}
+	if _, err := client.ProbeDetailed(context.Background(), "/a/../secret"); err == nil {
+		t.Fatal("expected invalid directory error")
+	}
+}

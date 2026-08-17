@@ -345,6 +345,12 @@ type OperationalDiagnostics = {
   }
   enrichmentWorkers?: number
   enrichmentCatchUp?: boolean
+  syslogArchive?: {
+    enabled?: boolean
+    workerAlive?: boolean
+    failed?: number
+    lagSeconds?: number
+  }
 }
 type EnrichmentAPIDiagnostics = {
   enabled: boolean
@@ -1899,6 +1905,12 @@ function OperationalDiagnosticsPanel() {
         {formatCount(value.exports?.queued)} / {formatCount(value.exports?.running)} /
         {formatDurationNanos(value.exports?.oldestAge)}
       </strong></span>
+      <span>Syslog archive · worker / failed / lag: <strong>
+        {value.syslogArchive?.workerAlive ? 'ok' : 'down'} /
+        {formatCount(value.syslogArchive?.failed)} /
+        {formatCount(value.syslogArchive?.lagSeconds)} с
+        {value.syslogArchive?.enabled === false ? ' · off' : ''}
+      </strong></span>
       {(['pstn', 'geoip'] as const).map((name) => {
         const api = value.enrichmentApis?.[name]
         const label = name === 'pstn' ? 'PSTN lookup' : 'GeoIP lookup'
@@ -3167,7 +3179,7 @@ function EditDeviceDialog({ device, templates, onClose, onSaved, onDeleted, init
 }
 
 function SystemSettingsPage({ user }: { user: User }) {
-  const [tab, setTab] = useState<'system' | 'users' | 'retention' | 'runtime' | 'logs'>('system')
+  const [tab, setTab] = useState<'system' | 'users' | 'retention' | 'runtime' | 'dataSave' | 'logs'>('system')
   const [info, setInfo] = useState<SystemInfo | null>(null)
   const [users, setUsers] = useState<ManagedUser[]>([])
   const [retention, setRetention] = useState<RetentionPolicy[]>([])
@@ -3308,6 +3320,8 @@ function SystemSettingsPage({ user }: { user: User }) {
         onClick={() => setTab('users')}>Пользователи</button>}
       {canManageUsers(user.role) && <button className={tab === 'runtime' ? 'active' : ''}
         onClick={() => setTab('runtime')}>Параметры</button>}
+      {canManageUsers(user.role) && <button className={tab === 'dataSave' ? 'active' : ''}
+        onClick={() => setTab('dataSave')}>Сохранение данных</button>}
       {canManageUsers(user.role) && <button className={tab === 'logs' ? 'active' : ''}
         onClick={() => setTab('logs')}>Логи</button>}
       {canManageUsers(user.role) && <button className={tab === 'retention' ? 'active' : ''}
@@ -3401,6 +3415,15 @@ function SystemSettingsPage({ user }: { user: User }) {
               setBusy(false)
             }
           }}
+        />
+      )}
+      {tab === 'dataSave' && canManageUsers(user.role) && runtime && (
+        <DataSaveSettingsPage
+          runtime={runtime}
+          busy={busy}
+          onRuntimeSaved={setRuntime}
+          onError={setError}
+          setBusy={setBusy}
         />
       )}
       {tab === 'logs' && canManageUsers(user.role) && <SystemAuditLogsPanel />}
@@ -3570,52 +3593,131 @@ function formatAuditDetails(value: unknown) {
   }
 }
 
-function RuntimeSettingsEditor({ value, busy, onSave }: {
-  value: RuntimeSettings
+function formatProbeSteps(steps?: { name: string; ok: boolean; duration?: string; error?: string }[]) {
+  if (!steps?.length) return ''
+  return steps.map((step) => {
+    const mark = step.ok ? 'ok' : 'fail'
+    return `${step.name} ${mark}${step.duration ? ` ${step.duration}` : ''}${step.error ? ` (${step.error})` : ''}`
+  }).join(' · ')
+}
+
+type SyslogArchiveStatus = {
+  enabled: boolean
+  ftpConfigured: boolean
+  spoolBytes: number
+  spoolBudget: number
+  lagSeconds: number
+  worker: {
+    alive: boolean
+    workerId?: string
+    heartbeatAt?: string
+    lastTickAt?: string
+    lastError?: string
+  }
+  counts: {
+    pending: number
+    building: number
+    ready: number
+    uploading: number
+    uploaded: number
+    failed: number
+    abandoned: number
+    skippedStale: number
+  }
+  devices: {
+    deviceId: string
+    name: string
+    sign: string
+    archiveEnabled: boolean
+    remoteDir: string
+    timezone: string
+    lastUploadedAt?: string
+    lastError?: string
+    skipReason?: string
+    nameMismatch?: boolean
+  }[]
+  jobs: {
+    id: string
+    deviceId: string
+    deviceName?: string
+    deviceSign?: string
+    hourStart: string
+    archiveName: string
+    remoteDir: string
+    status: string
+    bytes: number
+    payloadCount: number
+    lastError?: string
+    uploadedAt?: string
+    updatedAt: string
+  }[]
+}
+
+function DataSaveSettingsPage({ runtime, busy, onRuntimeSaved, onError, setBusy }: {
+  runtime: RuntimeSettings
   busy: boolean
-  onSave: (next: RuntimeSettings) => Promise<void>
+  onRuntimeSaved: (next: RuntimeSettings) => void
+  onError: (message: string) => void
+  setBusy: (value: boolean) => void
 }) {
-  const [form, setForm] = useState(() => normalizeRuntimeSettings(value))
-  const [password, setPassword] = useState('')
-  const [pstnToken, setPstnToken] = useState('')
-  const [geoipToken, setGeoipToken] = useState('')
+  const [form, setForm] = useState(() => normalizeRuntimeSettings(runtime))
   const [ftpPassword, setFtpPassword] = useState('')
   const [ftpProbeBusy, setFtpProbeBusy] = useState(false)
   const [ftpProbeMessage, setFtpProbeMessage] = useState('')
   const [archiveDevices, setArchiveDevices] = useState<Device[]>([])
   const [archiveBusyID, setArchiveBusyID] = useState('')
   const [archiveError, setArchiveError] = useState('')
+  const [status, setStatus] = useState<SyslogArchiveStatus | null>(null)
+  const [statusError, setStatusError] = useState('')
+  const [verifyBusyID, setVerifyBusyID] = useState('')
+  const [verifyMessage, setVerifyMessage] = useState('')
+  const syslogArchive = form.syslogArchive || normalizeRuntimeSettings(form).syslogArchive!
+  const loadStatus = useCallback(() => {
+    api<SyslogArchiveStatus>('/system/syslog-archive/status')
+      .then(setStatus)
+      .catch((reason) => setStatusError(reason instanceof Error ? reason.message : 'Статус архива недоступен'))
+  }, [])
+  useEffect(() => {
+    setForm(normalizeRuntimeSettings(runtime))
+  }, [runtime])
   useEffect(() => {
     void api<{ items: Device[] }>('/devices')
       .then((response) => setArchiveDevices((response.items || []).filter((d) => d.capabilities?.syslog)))
       .catch((reason) => setArchiveError(reason instanceof Error ? reason.message : 'Ошибка загрузки устройств'))
-  }, [])
-  const updateProjection = (patch: Partial<RuntimeSettings['projection']>) =>
-    setForm((current) => ({ ...current, projection: { ...current.projection, ...patch } }))
-  const updateCoverage = (patch: Partial<RuntimeSettings['coverage']>) =>
-    setForm((current) => ({ ...current, coverage: { ...current.coverage, ...patch } }))
-  const updateVoip = (patch: Partial<RuntimeSettings['voipmonitor']>) =>
-    setForm((current) => ({ ...current, voipmonitor: { ...current.voipmonitor, ...patch } }))
-  const updateEnrichment = (key: 'pstn' | 'geoip', patch: Partial<NonNullable<RuntimeSettings['enrichment']>['pstn']>) =>
-    setForm((current) => {
-      const enrichment = normalizeRuntimeSettings(current).enrichment!
-      return {
-        ...current,
-        enrichment: {
-          ...enrichment,
-          [key]: { ...enrichment[key], ...patch },
-        },
-      }
-    })
-  const updatePlatform = (patch: Partial<RuntimeSettings['platform']>) =>
-    setForm((current) => ({ ...current, platform: { ...current.platform, ...patch } }))
-  const updateContainers = (patch: Partial<RuntimeSettings['containers']>) =>
-    setForm((current) => ({ ...current, containers: { ...current.containers, ...patch } }))
+    loadStatus()
+  }, [loadStatus])
   const updateArchive = (patch: Partial<NonNullable<RuntimeSettings['syslogArchive']>>) =>
     setForm((current) => {
-      const syslogArchive = normalizeRuntimeSettings(current).syslogArchive!
-      return { ...current, syslogArchive: { ...syslogArchive, ...patch } }
+      const next = normalizeRuntimeSettings(current).syslogArchive!
+      return { ...current, syslogArchive: { ...next, ...patch } }
     })
+  const probeFTP = (remoteDir: string, onMessage: (text: string) => void, setBusyFlag: (value: boolean) => void) => {
+    if (!remoteDir.trim()) {
+      onMessage('Укажите каталог устройства')
+      return
+    }
+    setBusyFlag(true)
+    onMessage('')
+    void api<{ ok: boolean; steps?: { name: string; ok: boolean; duration?: string; error?: string }[]; error?: string }>(
+      '/system/runtime-settings/syslog-archive/test-ftp',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          ftpHost: syslogArchive.ftpHost,
+          ftpPort: syslogArchive.ftpPort,
+          ftpUser: syslogArchive.ftpUser,
+          ftpPassword: ftpPassword || undefined,
+          ftpTls: syslogArchive.ftpTls,
+          remoteDir,
+        }),
+      },
+    ).then((response) => {
+      onMessage(`Подключение успешно. Файл пробы удалён. ${formatProbeSteps(response.steps)}`)
+    }).catch((reason) => {
+      const text = reason instanceof Error ? reason.message : 'Не удалось проверить FTP'
+      onMessage(text)
+    }).finally(() => setBusyFlag(false))
+  }
   const saveDeviceArchive = async (device: Device, enabled: boolean, remoteDir: string) => {
     setArchiveBusyID(device.id)
     setArchiveError('')
@@ -3639,18 +3741,199 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
         }),
       })
       setArchiveDevices((current) => current.map((item) => item.id === updated.id ? updated : item))
+      loadStatus()
     } catch (reason) {
       setArchiveError(reason instanceof Error ? reason.message : 'Ошибка сохранения схемы архива')
     } finally {
       setArchiveBusyID('')
     }
   }
+  const skipLabel = (reason?: string) => {
+    switch (reason) {
+      case 'disabled': return 'архив выключен'
+      case 'emptyDir': return 'нет каталога'
+      case 'emptySign': return 'пустой sign'
+      default: return reason || ''
+    }
+  }
+  return <section className="runtime-settings">
+    <div className="page-heading"><div><h3>Сохранение данных</h3>
+      <p>10-минутные ZIP raw Syslog на внешний FTP. Сырой Syslog в ClickHouse — короткий буфер (~2–3 часа), не склад.
+        Файл пробы FTP удаляется после проверки; ZIP появляются только у jobs со статусом uploaded.</p></div></div>
+
+    <article className="runtime-card">
+      <h4>Состояние архива</h4>
+      {statusError && <div className="form-error">{statusError}</div>}
+      {status && <div className="runtime-note">
+        Worker: <strong>{status.worker.alive ? 'ok' : 'down'}</strong>
+        {status.worker.lastError ? ` · ${status.worker.lastError}` : ''}
+        {' · '}failed {formatCount(status.counts.failed)}
+        {' · '}uploaded {formatCount(status.counts.uploaded)}
+        {' · '}pending {formatCount(status.counts.pending)}
+        {' · '}лаг {formatCount(status.lagSeconds)} с
+        {' · '}FTP {status.ftpConfigured ? 'настроен' : 'не настроен'}
+        {' · '}spool {formatBytes(status.spoolBytes)} / {formatBytes(status.spoolBudget)}
+      </div>}
+      {verifyMessage && <p className="runtime-note">{verifyMessage}</p>}
+      <table className="table-fit"><thead><tr>
+        <th>Устройство</th><th>Имя</th><th>Каталог</th><th>Статус</th>
+        <th>Байт</th><th>Ошибка</th><th></th>
+      </tr></thead>
+        <tbody>
+          {(status?.jobs || []).length === 0 && <tr><td colSpan={7}>Нет задач архива</td></tr>}
+          {(status?.jobs || []).map((job) => <tr key={job.id}>
+            <td>{job.deviceName || job.deviceSign || job.deviceId}</td>
+            <td className="mono">{job.archiveName}</td>
+            <td className="mono">{job.remoteDir}</td>
+            <td>{job.status}</td>
+            <td>{formatBytes(job.bytes)}</td>
+            <td>{job.lastError || '—'}</td>
+            <td>{job.status === 'uploaded' && <button className="secondary" type="button"
+              disabled={verifyBusyID === job.id}
+              onClick={() => {
+                setVerifyBusyID(job.id)
+                setVerifyMessage('')
+                void api<{ ok: boolean; archiveName: string; remoteDir: string }>(
+                  `/system/syslog-archive/jobs/${job.id}/verify`,
+                  { method: 'POST', body: '{}' },
+                ).then((response) => setVerifyMessage(
+                  response.ok
+                    ? `SIZE совпал: ${response.remoteDir}/${response.archiveName}`
+                    : `На FTP нет файла ${response.remoteDir}/${response.archiveName}`,
+                )).catch((reason) => setVerifyMessage(
+                  reason instanceof Error ? reason.message : 'Не удалось проверить SIZE',
+                )).finally(() => setVerifyBusyID(''))
+              }}>{verifyBusyID === job.id ? 'SIZE…' : 'SIZE'}</button>}</td>
+          </tr>)}
+        </tbody></table>
+    </article>
+
+    <article className="runtime-card">
+      <h4>Архив Syslog (FTP)</h4>
+      <p className="runtime-note">Имя: {'{deviceSign}_{DD.MM.YYYY}_{HH-mm}.zip'}. При недоступности FTP архивы
+        копятся локально и отправляются позже.</p>
+      <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.enabled}
+        onChange={(e) => updateArchive({ enabled: e.target.checked })} /> Включён</label>
+      <div className="runtime-grid">
+        <label>FTP host<input value={syslogArchive.ftpHost}
+          onChange={(e) => updateArchive({ ftpHost: e.target.value })} /></label>
+        <label>FTP port<input type="number" min={1} max={65535} value={syslogArchive.ftpPort}
+          onChange={(e) => updateArchive({ ftpPort: Number(e.target.value) })} /></label>
+        <label>FTP user<input value={syslogArchive.ftpUser}
+          onChange={(e) => updateArchive({ ftpUser: e.target.value })} /></label>
+        <label>FTP password<input type="password"
+          placeholder={syslogArchive.passwordSet ? '•••••••• (не менять)' : 'пароль'}
+          value={ftpPassword} onChange={(e) => setFtpPassword(e.target.value)} /></label>
+        <label>Local spool<input value={syslogArchive.localSpoolDir}
+          onChange={(e) => updateArchive({ localSpoolDir: e.target.value })} /></label>
+        <label>Close delay<input value={syslogArchive.closeDelay}
+          onChange={(e) => updateArchive({ closeDelay: e.target.value })} /></label>
+        <label>Lookback hours<input type="number" min={1} max={720} value={syslogArchive.lookbackHours}
+          onChange={(e) => updateArchive({ lookbackHours: Number(e.target.value) })} /></label>
+        <label>Max archive bytes<input type="number" value={syslogArchive.maxArchiveBytes}
+          onChange={(e) => updateArchive({ maxArchiveBytes: Number(e.target.value) })} /></label>
+        <label>Spool budget bytes<input type="number" value={syslogArchive.spoolBudgetBytes}
+          onChange={(e) => updateArchive({ spoolBudgetBytes: Number(e.target.value) })} /></label>
+      </div>
+      <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.ftpTls}
+        onChange={(e) => updateArchive({ ftpTls: e.target.checked })} /> Explicit FTPS (TLS)</label>
+      {ftpProbeMessage && <p className="runtime-note">{ftpProbeMessage}</p>}
+      <div className="dialog-actions">
+        <button className="secondary" type="button" disabled={ftpProbeBusy || busy}
+          onClick={() => {
+            const remoteDir = archiveDevices.find((d) => d.syslogArchiveRemoteDir)?.syslogArchiveRemoteDir || ''
+            probeFTP(remoteDir, setFtpProbeMessage, setFtpProbeBusy)
+          }}>{ftpProbeBusy ? 'Проверка…' : 'Проверить подключение'}</button>
+        <button className="primary" disabled={busy} onClick={() => {
+          setBusy(true)
+          onError('')
+          void api<{ settings: RuntimeSettings }>('/system/runtime-settings', {
+            method: 'PATCH',
+            body: JSON.stringify({
+              syslogArchive: {
+                ...syslogArchive,
+                ftpPassword: ftpPassword || undefined,
+              },
+            }),
+          }).then((response) => {
+            onRuntimeSaved(response.settings)
+            loadStatus()
+          }).catch((reason) => {
+            onError(reason instanceof Error ? reason.message : 'Ошибка сохранения архива')
+          }).finally(() => setBusy(false))
+        }}>Сохранить FTP</button>
+      </div>
+    </article>
+
+    <article className="runtime-card">
+      <h4>Архив Syslog по оборудованию</h4>
+      <p className="runtime-note">Включение и каталог на FTP сохраняются отдельно для каждого устройства.</p>
+      {archiveError && <div className="form-error">{archiveError}</div>}
+      {archiveDevices.length === 0 && <div className="table-empty">
+        <strong>Нет устройств с Syslog</strong>
+      </div>}
+      {status?.devices?.map((row) => row.skipReason || row.nameMismatch ? (
+        <p key={`hint-${row.deviceId}`} className="runtime-note">
+          {row.name}: {skipLabel(row.skipReason)}{row.nameMismatch ? ' · leftover hourly имя на :00' : ''}
+        </p>
+      ) : null)}
+      {archiveDevices.map((device) => <DeviceArchiveSchemeRow
+        key={`${device.id}:${device.syslogArchiveEnabled}:${device.syslogArchiveRemoteDir || ''}`}
+        device={device}
+        busy={archiveBusyID === device.id}
+        probeBusy={ftpProbeBusy && archiveBusyID === `probe-${device.id}`}
+        onSave={(enabled, remoteDir) => void saveDeviceArchive(device, enabled, remoteDir)}
+        onProbe={(remoteDir) => {
+          setArchiveBusyID(`probe-${device.id}`)
+          probeFTP(remoteDir, (text) => {
+            setArchiveError('')
+            setFtpProbeMessage(`${device.name}: ${text}`)
+          }, (value) => {
+            setFtpProbeBusy(value)
+            if (!value) setArchiveBusyID('')
+          })
+        }}
+      />)}
+    </article>
+  </section>
+}
+
+function RuntimeSettingsEditor({ value, busy, onSave }: {
+  value: RuntimeSettings
+  busy: boolean
+  onSave: (next: RuntimeSettings) => Promise<void>
+}) {
+  const [form, setForm] = useState(() => normalizeRuntimeSettings(value))
+  const [password, setPassword] = useState('')
+  const [pstnToken, setPstnToken] = useState('')
+  const [geoipToken, setGeoipToken] = useState('')
+  const updateProjection = (patch: Partial<RuntimeSettings['projection']>) =>
+    setForm((current) => ({ ...current, projection: { ...current.projection, ...patch } }))
+  const updateCoverage = (patch: Partial<RuntimeSettings['coverage']>) =>
+    setForm((current) => ({ ...current, coverage: { ...current.coverage, ...patch } }))
+  const updateVoip = (patch: Partial<RuntimeSettings['voipmonitor']>) =>
+    setForm((current) => ({ ...current, voipmonitor: { ...current.voipmonitor, ...patch } }))
+  const updateEnrichment = (key: 'pstn' | 'geoip', patch: Partial<NonNullable<RuntimeSettings['enrichment']>['pstn']>) =>
+    setForm((current) => {
+      const enrichment = normalizeRuntimeSettings(current).enrichment!
+      return {
+        ...current,
+        enrichment: {
+          ...enrichment,
+          [key]: { ...enrichment[key], ...patch },
+        },
+      }
+    })
+  const updatePlatform = (patch: Partial<RuntimeSettings['platform']>) =>
+    setForm((current) => ({ ...current, platform: { ...current.platform, ...patch } }))
+  const updateContainers = (patch: Partial<RuntimeSettings['containers']>) =>
+    setForm((current) => ({ ...current, containers: { ...current.containers, ...patch } }))
   const enrichment = form.enrichment || normalizeRuntimeSettings(form).enrichment!
-  const syslogArchive = form.syslogArchive || normalizeRuntimeSettings(form).syslogArchive!
   return <section className="runtime-settings">
     <div className="page-heading"><div><h3>Операционные параметры</h3>
-      <p>AntiFraud projection, coverage, VoIPmonitor, обогащение CDR, архив Syslog и export. Значения хранятся в БД и
-        применяются без правки .env (инфраструктурные секреты остаются в .env).</p></div></div>
+      <p>AntiFraud projection, coverage, VoIPmonitor, обогащение CDR и export. Значения хранятся в БД и
+        применяются без правки .env (инфраструктурные секреты остаются в .env). Архив Syslog — во вкладке
+        «Сохранение данных».</p></div></div>
 
     <article className="runtime-card">
       <h4>Custom AntiFraud projection</h4>
@@ -3810,78 +4093,6 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
     </article>
 
     <article className="runtime-card">
-      <h4>Архив Syslog (FTP)</h4>
-      <p className="runtime-note">10-минутные ZIP с raw syslog на внешний FTP (6 файлов в час).
-        Имя: {'{deviceSign}_{DD.MM.YYYY}_{HH-mm}.zip'}. При недоступности FTP архивы
-        копятся локально и отправляются позже после проверки размера на сервере.
-        Сырой Syslog в ClickHouse — короткий буфер (~2–3 часа), не склад.</p>
-      <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.enabled}
-        onChange={(e) => updateArchive({ enabled: e.target.checked })} /> Включён</label>
-      <div className="runtime-grid">
-        <label>FTP host<input value={syslogArchive.ftpHost}
-          onChange={(e) => updateArchive({ ftpHost: e.target.value })} /></label>
-        <label>FTP port<input type="number" min={1} max={65535} value={syslogArchive.ftpPort}
-          onChange={(e) => updateArchive({ ftpPort: Number(e.target.value) })} /></label>
-        <label>FTP user<input value={syslogArchive.ftpUser}
-          onChange={(e) => updateArchive({ ftpUser: e.target.value })} /></label>
-        <label>FTP password<input type="password"
-          placeholder={syslogArchive.passwordSet ? '•••••••• (не менять)' : 'пароль'}
-          value={ftpPassword} onChange={(e) => setFtpPassword(e.target.value)} /></label>
-        <label>Local spool<input value={syslogArchive.localSpoolDir}
-          onChange={(e) => updateArchive({ localSpoolDir: e.target.value })} /></label>
-        <label>Close delay<input value={syslogArchive.closeDelay}
-          onChange={(e) => updateArchive({ closeDelay: e.target.value })} /></label>
-        <label>Lookback hours<input type="number" min={1} max={720} value={syslogArchive.lookbackHours}
-          onChange={(e) => updateArchive({ lookbackHours: Number(e.target.value) })} /></label>
-        <label>Max archive bytes<input type="number" value={syslogArchive.maxArchiveBytes}
-          onChange={(e) => updateArchive({ maxArchiveBytes: Number(e.target.value) })} /></label>
-        <label>Spool budget bytes<input type="number" value={syslogArchive.spoolBudgetBytes}
-          onChange={(e) => updateArchive({ spoolBudgetBytes: Number(e.target.value) })} /></label>
-      </div>
-      <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.ftpTls}
-        onChange={(e) => updateArchive({ ftpTls: e.target.checked })} /> Explicit FTPS (TLS)</label>
-      {ftpProbeMessage && <p className="runtime-note">{ftpProbeMessage}</p>}
-      <div className="dialog-actions">
-        <button className="secondary" type="button" disabled={ftpProbeBusy || busy}
-          onClick={() => {
-            setFtpProbeBusy(true)
-            setFtpProbeMessage('')
-            void api<{ ok: boolean }>('/system/runtime-settings/syslog-archive/test-ftp', {
-              method: 'POST',
-              body: JSON.stringify({
-                ftpHost: syslogArchive.ftpHost,
-                ftpPort: syslogArchive.ftpPort,
-                ftpUser: syslogArchive.ftpUser,
-                ftpPassword: ftpPassword || undefined,
-                ftpTls: syslogArchive.ftpTls,
-                remoteDir: archiveDevices.find((d) => d.syslogArchiveRemoteDir)?.syslogArchiveRemoteDir || '/',
-              }),
-            }).then(() => setFtpProbeMessage('Подключение успешно: login, запись и удаление пробы прошли.'))
-              .catch((reason) => setFtpProbeMessage(
-                reason instanceof Error ? reason.message : 'Не удалось проверить FTP',
-              ))
-              .finally(() => setFtpProbeBusy(false))
-          }}>{ftpProbeBusy ? 'Проверка…' : 'Проверить подключение'}</button>
-      </div>
-    </article>
-
-    <article className="runtime-card">
-      <h4>Архив Syslog по оборудованию</h4>
-      <p className="runtime-note">Для каждого устройства с Syslog: включение архивирования и каталог на FTP.
-        Имя файла: {'{deviceSign}_{DD.MM.YYYY}_{HH-mm}.zip'}.</p>
-      {archiveError && <div className="form-error">{archiveError}</div>}
-      {archiveDevices.length === 0 && <div className="table-empty">
-        <strong>Нет устройств с Syslog</strong>
-      </div>}
-      {archiveDevices.map((device) => <DeviceArchiveSchemeRow
-        key={`${device.id}:${device.syslogArchiveEnabled}:${device.syslogArchiveRemoteDir || ''}`}
-        device={device}
-        busy={archiveBusyID === device.id}
-        onSave={(enabled, remoteDir) => void saveDeviceArchive(device, enabled, remoteDir)}
-      />)}
-    </article>
-
-    <article className="runtime-card">
       <h4>Платформа</h4>
       <div className="runtime-grid">
         <label>ClickHouse admission capacity<input type="number" min={4} max={128}
@@ -3943,21 +4154,20 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
               token: geoipToken || undefined,
             },
           },
-          syslogArchive: {
-            ...syslogArchive,
-            ftpPassword: ftpPassword || undefined,
-          },
         }
-        void onSave(payload)
+        const { syslogArchive: _ignored, ...withoutArchive } = payload
+        void onSave(withoutArchive as RuntimeSettings)
       }}>Сохранить параметры</button>
     </div>
   </section>
 }
 
-function DeviceArchiveSchemeRow({ device, busy, onSave }: {
+function DeviceArchiveSchemeRow({ device, busy, probeBusy, onSave, onProbe }: {
   device: Device
   busy: boolean
+  probeBusy?: boolean
   onSave: (enabled: boolean, remoteDir: string) => void
+  onProbe?: (remoteDir: string) => void
 }) {
   const [enabled, setEnabled] = useState(Boolean(device.syslogArchiveEnabled))
   const [remoteDir, setRemoteDir] = useState(device.syslogArchiveRemoteDir || '')
@@ -3973,6 +4183,8 @@ function DeviceArchiveSchemeRow({ device, busy, onSave }: {
       onChange={(e) => setRemoteDir(e.target.value)} /></label>
     <button className="secondary" type="button" disabled={busy}
       onClick={() => onSave(enabled, remoteDir)}>Сохранить</button>
+    {onProbe && <button className="secondary" type="button" disabled={busy || probeBusy}
+      onClick={() => onProbe(remoteDir)}>{probeBusy ? 'Проверка…' : 'Проверить каталог'}</button>}
   </div>
 }
 

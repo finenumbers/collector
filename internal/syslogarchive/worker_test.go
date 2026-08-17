@@ -24,4 +24,7 @@ func TestWorkerUsesTenMinuteSlots(t *testing.T) {
 	if !strings.Contains(source, "maxArchiveBuildsPerTick") {
 		t.Fatal("pending ZIP builds must be rate-limited per tick")
 	}
+	if !strings.Contains(source, "livenessLoop") {
+		t.Fatal("worker process must heartbeat independently of tick duration")
+	}
 }

@@ -23,6 +23,7 @@ import (
 type SettingsFunc func() runtimesettings.SyslogArchiveSettings
 
 const maxArchiveBuildsPerTick = 4
+const maxDayFolderRelocatePerTick = 20
 
 var errArchiveAbandoned = errors.New("archive job abandoned")
 
@@ -122,13 +123,14 @@ func (w *Worker) tick(ctx context.Context) {
 			builds++
 		}
 		if !worked {
-			return
+			break
 		}
 		cfg = w.settings()
 		if !cfg.Enabled {
 			return
 		}
 	}
+	w.relocateDayFolders(ctx, cfg)
 }
 
 func (w *Worker) settings() runtimesettings.SyslogArchiveSettings {
@@ -214,7 +216,8 @@ func (w *Worker) enqueueClosedSlots(ctx context.Context, cfg runtimesettings.Sys
 				break
 			}
 			if _, err := w.Store.EnsureSyslogArchiveJob(
-				ctx, device.ID, slot, name, device.SyslogArchiveRemoteDir, device.ActiveTimezone,
+				ctx, device.ID, slot, name,
+				CanonicalArchiveDir(device.SyslogArchiveRemoteDir, name), device.ActiveTimezone,
 			); err != nil && !errors.Is(err, store.ErrNotFound) {
 				slog.Error("ensure syslog archive job", "device", device.ID, "slot", slot, "error", err)
 			}
@@ -222,7 +225,8 @@ func (w *Worker) enqueueClosedSlots(ctx context.Context, cfg runtimesettings.Sys
 		stale := oldest.Add(-SlotDuration)
 		if name, nameErr := ArchiveName(device.DeviceSign, stale, loc); nameErr == nil {
 			_ = w.Store.EnsureSyslogArchiveSkippedStale(
-				ctx, device.ID, stale, name, device.SyslogArchiveRemoteDir, device.ActiveTimezone,
+				ctx, device.ID, stale, name,
+				CanonicalArchiveDir(device.SyslogArchiveRemoteDir, name), device.ActiveTimezone,
 			)
 		}
 	}
@@ -405,12 +409,26 @@ func (w *Worker) uploadReady(ctx context.Context, cfg runtimesettings.SyslogArch
 		job.Status = store.SyslogArchiveStatusUploading
 	}
 
-	if ok, _ := client.RemoteMatches(uploadCtx, job.RemoteDir, job.ArchiveName, job.Bytes); ok {
-		if err := w.Store.MarkSyslogArchiveUploaded(ctx, job.ID, w.WorkerID); err != nil {
+	dest := CanonicalArchiveDir(job.RemoteDir, job.ArchiveName)
+	base := ArchiveDayBaseDir(job.RemoteDir, job.ArchiveName)
+	if ok, _ := client.RemoteMatches(uploadCtx, dest, job.ArchiveName, job.Bytes); ok {
+		if err := w.Store.MarkSyslogArchiveUploaded(ctx, job.ID, w.WorkerID, dest); err != nil {
 			return err
 		}
 		_ = os.Remove(job.LocalPath)
 		return nil
+	}
+	if dest != base {
+		if ok, _ := client.RemoteMatches(uploadCtx, base, job.ArchiveName, job.Bytes); ok {
+			if err := client.Move(uploadCtx, base, dest, job.ArchiveName, job.Bytes); err != nil {
+				return err
+			}
+			if err := w.Store.MarkSyslogArchiveUploaded(ctx, job.ID, w.WorkerID, dest); err != nil {
+				return err
+			}
+			_ = os.Remove(job.LocalPath)
+			return nil
+		}
 	}
 
 	file, err := os.Open(job.LocalPath)
@@ -418,14 +436,50 @@ func (w *Worker) uploadReady(ctx context.Context, cfg runtimesettings.SyslogArch
 		return err
 	}
 	defer file.Close()
-	if err := client.UploadAtomic(uploadCtx, job.RemoteDir, job.ArchiveName, file, job.Bytes); err != nil {
+	if err := client.UploadAtomic(uploadCtx, dest, job.ArchiveName, file, job.Bytes); err != nil {
 		return err
 	}
-	if err := w.Store.MarkSyslogArchiveUploaded(ctx, job.ID, w.WorkerID); err != nil {
+	if err := w.Store.MarkSyslogArchiveUploaded(ctx, job.ID, w.WorkerID, dest); err != nil {
 		return err
 	}
 	_ = os.Remove(job.LocalPath)
 	return nil
+}
+
+func (w *Worker) relocateDayFolders(ctx context.Context, cfg runtimesettings.SyslogArchiveSettings) {
+	if w.Store == nil {
+		return
+	}
+	client := ftpclient.New(ftpclient.Config{
+		Host: cfg.FTPHost, Port: cfg.FTPPort, User: cfg.FTPUser,
+		Password: cfg.FTPPassword, TLS: cfg.FTPTLS,
+	})
+	if !client.Configured() {
+		return
+	}
+	jobs, err := w.Store.ListSyslogArchiveUploadedForRelocate(ctx, maxDayFolderRelocatePerTick)
+	if err != nil {
+		slog.Warn("syslog archive day-folder list", "error", err)
+		return
+	}
+	moveCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	for _, job := range jobs {
+		dest := CanonicalArchiveDir(job.RemoteDir, job.ArchiveName)
+		if dest == ftpclient.NormalizeRemoteDir(job.RemoteDir) {
+			continue
+		}
+		base := ArchiveDayBaseDir(job.RemoteDir, job.ArchiveName)
+		if err := client.Move(moveCtx, base, dest, job.ArchiveName, job.Bytes); err != nil {
+			slog.Warn("syslog archive day-folder move",
+				"job", job.ID, "src", base, "dest", dest, "name", job.ArchiveName, "error", err)
+			continue
+		}
+		if err := w.Store.SetSyslogArchiveRemoteDirQuiet(ctx, job.ID, dest); err != nil &&
+			!errors.Is(err, store.ErrNotFound) {
+			slog.Warn("syslog archive day-folder path", "job", job.ID, "error", err)
+		}
+	}
 }
 
 func (w *Worker) slotUTCHoursBlocked(

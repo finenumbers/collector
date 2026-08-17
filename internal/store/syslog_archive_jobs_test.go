@@ -24,4 +24,10 @@ func TestClaimSyslogArchiveJobRebuildsFailedWithoutLocalPath(t *testing.T) {
 	if !strings.Contains(source, "AND e.status NOT IN ('abandoned','skipped_stale')") {
 		t.Fatal("device last_error must ignore abandoned/stale job reasons")
 	}
+	if !strings.Contains(source, "remote_dir=CASE WHEN $3<>'' THEN $3 ELSE remote_dir END") {
+		t.Fatal("uploaded jobs must persist the canonical FTP day directory")
+	}
+	if !strings.Contains(source, "SetSyslogArchiveRemoteDirQuiet") {
+		t.Fatal("day-folder relocate must not bump updated_at")
+	}
 }

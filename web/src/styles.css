@@ -203,6 +203,14 @@ main { min-width: 0; min-height: 0; overflow: hidden; display: flex;
 .search input { flex: 1; height: calc(var(--control-height) - 2px); border: 0; padding: 0 7px 0 0; }
 .table-shell { position: relative; min-height: 0; height: 0; flex: 1 1 0; overflow-x: auto; overflow-y: scroll;
   scrollbar-gutter: stable; overscroll-behavior: contain; border: 1px solid var(--line); background: var(--panel); }
+.archive-jobs-shell {
+  max-height: min(1378px, 70vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.archive-jobs-shell table { width: 100%; }
 .table-loading { position: sticky; top: 0; z-index: 5; height: 2px; background: var(--accent); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 /* Column widths follow the widest cell/header in that column (no ellipsis clamp). */

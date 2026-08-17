@@ -130,6 +130,58 @@ func (c *Client) RemoteMatches(ctx context.Context, remoteDir, name string, want
 	return matched, err
 }
 
+// Move renames remoteDir/name into destDir/name after mkdir dest. If dest already
+// matches wantBytes, the source is deleted. Rename is tried as dest-absolute then
+// dest-relative to the source CWD.
+func (c *Client) Move(ctx context.Context, srcDir, destDir, name string, wantBytes int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.Configured() {
+		return errors.New("ftp not configured")
+	}
+	src := NormalizeRemoteDir(srcDir)
+	dest := NormalizeRemoteDir(destDir)
+	file := path.Base(name)
+	if file == "" || file == "." || file == "/" {
+		return errors.New("invalid archive name")
+	}
+	if src == dest {
+		return nil
+	}
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Quit() }()
+	return runOnConn(ctx, conn, func() error {
+		if err := ensureDirs(conn, dest); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dest, err)
+		}
+		if err := conn.ChangeDir(dest); err == nil {
+			if err := verifySize(conn, file, wantBytes); err == nil {
+				if err := conn.ChangeDir(src); err == nil {
+					_ = conn.Delete(file)
+				}
+				return nil
+			}
+		}
+		if err := conn.ChangeDir(src); err != nil {
+			return fmt.Errorf("cwd %s: %w", src, err)
+		}
+		destPath := dest + "/" + file
+		if err := conn.Rename(file, destPath); err != nil {
+			if relErr := conn.Rename(file, path.Join(path.Base(dest), file)); relErr != nil {
+				return fmt.Errorf("rename %s -> %s: %w", file, destPath, err)
+			}
+		}
+		if err := conn.ChangeDir(dest); err != nil {
+			return fmt.Errorf("cwd %s: %w", dest, err)
+		}
+		return verifySize(conn, file, wantBytes)
+	})
+}
+
 func (c *Client) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	addr := net.JoinHostPort(c.cfg.Host, fmt.Sprintf("%d", c.cfg.Port))
 	opts := []ftp.DialOption{

@@ -3419,6 +3419,7 @@ function SystemSettingsPage({ user }: { user: User }) {
       )}
       {tab === 'dataSave' && canManageUsers(user.role) && runtime && (
         <DataSaveSettingsPage
+          key={JSON.stringify(runtime)}
           runtime={runtime}
           busy={busy}
           onRuntimeSaved={setRuntime}
@@ -3677,9 +3678,6 @@ function DataSaveSettingsPage({ runtime, busy, onRuntimeSaved, onError, setBusy 
       .then(setStatus)
       .catch((reason) => setStatusError(reason instanceof Error ? reason.message : 'Статус архива недоступен'))
   }, [])
-  useEffect(() => {
-    setForm(normalizeRuntimeSettings(runtime))
-  }, [runtime])
   useEffect(() => {
     void api<{ items: Device[] }>('/devices')
       .then((response) => setArchiveDevices((response.items || []).filter((d) => d.capabilities?.syslog)))
@@ -4154,9 +4152,9 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
               token: geoipToken || undefined,
             },
           },
+          syslogArchive: undefined,
         }
-        const { syslogArchive: _ignored, ...withoutArchive } = payload
-        void onSave(withoutArchive as RuntimeSettings)
+        void onSave(payload)
       }}>Сохранить параметры</button>
     </div>
   </section>

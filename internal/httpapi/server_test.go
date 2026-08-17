@@ -564,6 +564,9 @@ func TestStaticHandlerConfinesRequestsToStaticRoot(t *testing.T) {
 	if response.Code != http.StatusOK || response.Body.String() != "safe-index" {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("index.html Cache-Control=%q, want no-store", response.Header().Get("Cache-Control"))
+	}
 }
 
 func TestLogoutClearsSecureSessionCookie(t *testing.T) {
@@ -594,6 +597,31 @@ func TestSyslogArchiveFTPProbeValidatesInput(t *testing.T) {
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/system/runtime-settings/syslog-archive/test-ftp",
 		strings.NewReader(`{"ftpHost":"","ftpUser":"u"}`))
+	server.testSyslogArchiveFTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want 400", response.Code)
+	}
+}
+
+func TestSyslogArchiveFTPProbeRequiresRemoteDir(t *testing.T) {
+	server := &Server{}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/system/runtime-settings/syslog-archive/test-ftp",
+		strings.NewReader(`{"ftpHost":"ftp.example","ftpUser":"u","ftpPassword":"p"}`))
+	server.testSyslogArchiveFTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want 400", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "remote directory is required") {
+		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
+}
+
+func TestSyslogArchiveFTPProbeRejectsParentDir(t *testing.T) {
+	server := &Server{}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/system/runtime-settings/syslog-archive/test-ftp",
+		strings.NewReader(`{"ftpHost":"ftp.example","ftpUser":"u","ftpPassword":"p","remoteDir":"/a/../b"}`))
 	server.testSyslogArchiveFTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want 400", response.Code)

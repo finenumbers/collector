@@ -51,8 +51,20 @@ func TestSanitizeDeviceSign(t *testing.T) {
 	if got := SanitizeDeviceSign(" MTS-01! "); got != "mts-01" {
 		t.Fatalf("got %q", got)
 	}
+}
+
+func TestArchiveNameRejectsEmptySign(t *testing.T) {
 	if _, err := ArchiveName("!!!", time.Now(), time.UTC); err == nil {
 		t.Fatal("expected empty sign error")
+	}
+}
+
+func TestIsLegacyHourlyArchiveName(t *testing.T) {
+	if !IsLegacyHourlyArchiveName("fixer_17.08.2026_14.zip") {
+		t.Fatal("hourly leftover should match")
+	}
+	if IsLegacyHourlyArchiveName("fixer_17.08.2026_14-00.zip") {
+		t.Fatal("ten-minute name must not match")
 	}
 }
 

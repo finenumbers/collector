@@ -99,6 +99,8 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 	}
 	exports, exportErr := s.Store.ExportQueueStats(ctx)
 	noteErr("exports", exportErr)
+	syslogArchive, archiveErr := s.buildSyslogArchiveStatus(ctx)
+	noteErr("syslogArchive", archiveErr)
 
 	devices := make([]map[string]any, 0, len(deviceStats))
 	var maxDeviceLag, maxEventTipLag int64
@@ -211,6 +213,7 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		"reconciliationQueue": reconciliation,
 		"derived":             warehouse,
 		"exports":             exports,
+		"syslogArchive":       syslogArchiveSummary(syslogArchive),
 	}
 	if degraded {
 		value["errors"] = sectionErrors
@@ -223,6 +226,22 @@ func (s *Server) refreshDiagnostics(done chan struct{}) {
 		refreshErr = errors.New("operational diagnostics unavailable")
 	}
 	s.finishDiagnostics(done, value, refreshErr)
+}
+
+func syslogArchiveSummary(status map[string]any) map[string]any {
+	if status == nil {
+		return nil
+	}
+	worker, _ := status["worker"].(store.SyslogArchiveWorkerState)
+	counts, _ := status["counts"].(store.SyslogArchiveJobCounts)
+	lag, _ := status["lagSeconds"].(int64)
+	enabled, _ := status["enabled"].(bool)
+	return map[string]any{
+		"enabled":     enabled,
+		"workerAlive": worker.Alive,
+		"failed":      counts.Failed,
+		"lagSeconds":  lag,
+	}
 }
 
 func (s *Server) finishDiagnostics(done chan struct{}, value map[string]any, err error) {

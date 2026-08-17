@@ -46,6 +46,11 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.WorkerID == "" {
 		w.WorkerID = fmt.Sprintf("syslog-archive-%d", os.Getpid())
 	}
+	slog.Info("syslog archive worker started", "worker", w.WorkerID, "poll", w.Poll)
+	if w.Store != nil {
+		_ = w.Store.TouchSyslogArchiveWorker(ctx, w.WorkerID)
+	}
+	go w.livenessLoop(ctx)
 	ticker := time.NewTicker(w.Poll)
 	defer ticker.Stop()
 	w.tick(ctx)
@@ -59,10 +64,33 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+func (w *Worker) livenessLoop(ctx context.Context) {
+	if w.Store == nil {
+		return
+	}
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := w.Store.TouchSyslogArchiveWorker(ctx, w.WorkerID); err != nil {
+				slog.Warn("syslog archive worker heartbeat", "error", err)
+			}
+		}
+	}
+}
+
 func (w *Worker) tick(ctx context.Context) {
+	tickErr := ""
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			slog.Error("syslog archive tick panic", "panic", recovered)
+			tickErr = fmt.Sprintf("panic: %v", recovered)
+		}
+		if w.Store != nil {
+			_ = w.Store.NoteSyslogArchiveWorkerTick(ctx, w.WorkerID, tickErr)
 		}
 	}()
 	w.applyBufferTTL(ctx)
@@ -75,6 +103,7 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 	if err := os.MkdirAll(cfg.LocalSpoolDir, 0o755); err != nil {
 		slog.Error("syslog archive spool mkdir", "error", err)
+		tickErr = err.Error()
 		return
 	}
 	w.gcOrphans(cfg.LocalSpoolDir)
@@ -85,6 +114,7 @@ func (w *Worker) tick(ctx context.Context) {
 		worked, built, err := w.processOne(ctx, cfg, allowBuild)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			slog.Error("syslog archive job failed", "error", err)
+			tickErr = err.Error()
 		}
 		if built {
 			builds++
@@ -171,7 +201,9 @@ func (w *Worker) enqueueClosedSlots(ctx context.Context, cfg runtimesettings.Sys
 			}
 			name, nameErr := ArchiveName(device.DeviceSign, slot, loc)
 			if nameErr != nil {
-				continue
+				slog.Warn("syslog archive skip device",
+					"device", device.ID, "name", device.Name, "reason", "emptySign")
+				break
 			}
 			if _, err := w.Store.EnsureSyslogArchiveJob(
 				ctx, device.ID, slot, name, device.SyslogArchiveRemoteDir, device.ActiveTimezone,
@@ -399,6 +431,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, jobID uuid.UUID) {
 			return
 		case <-ticker.C:
 			_ = w.Store.HeartbeatSyslogArchiveJob(ctx, jobID, w.WorkerID, w.Lease)
+			_ = w.Store.TouchSyslogArchiveWorker(ctx, w.WorkerID)
 		}
 	}
 }

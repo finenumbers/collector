@@ -28,6 +28,18 @@ type Client struct {
 	cfg Config
 }
 
+type ProbeStep struct {
+	Name     string `json:"name"`
+	OK       bool   `json:"ok"`
+	Duration string `json:"duration"`
+	Error    string `json:"error,omitempty"`
+}
+
+type ProbeReport struct {
+	OK    bool        `json:"ok"`
+	Steps []ProbeStep `json:"steps"`
+}
+
 func New(cfg Config) *Client {
 	if cfg.Port <= 0 {
 		cfg.Port = 21
@@ -63,37 +75,31 @@ func (c *Client) UploadAtomic(
 	defer func() { _ = conn.Quit() }()
 
 	dir := NormalizeRemoteDir(remoteDir)
-	if err := ensureDirs(conn, dir); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-	if err := conn.ChangeDir(dir); err != nil {
-		return fmt.Errorf("cwd %s: %w", dir, err)
-	}
-
 	finalName := path.Base(name)
 	partName := finalName + ".part"
-	_ = conn.Delete(partName)
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := conn.Stor(partName, r); err != nil {
+	return runOnConn(ctx, conn, func() error {
+		if err := ensureDirs(conn, dir); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+		if err := conn.ChangeDir(dir); err != nil {
+			return fmt.Errorf("cwd %s: %w", dir, err)
+		}
 		_ = conn.Delete(partName)
-		return fmt.Errorf("stor: %w", err)
-	}
-	if err := verifySize(conn, partName, wantBytes); err != nil {
-		_ = conn.Delete(partName)
-		return err
-	}
-	_ = conn.Delete(finalName)
-	if err := conn.Rename(partName, finalName); err != nil {
-		_ = conn.Delete(partName)
-		return fmt.Errorf("rename: %w", err)
-	}
-	if err := verifySize(conn, finalName, wantBytes); err != nil {
-		return err
-	}
-	return nil
+		if err := conn.Stor(partName, r); err != nil {
+			_ = conn.Delete(partName)
+			return fmt.Errorf("stor: %w", err)
+		}
+		if err := verifySize(conn, partName, wantBytes); err != nil {
+			_ = conn.Delete(partName)
+			return err
+		}
+		_ = conn.Delete(finalName)
+		if err := conn.Rename(partName, finalName); err != nil {
+			_ = conn.Delete(partName)
+			return fmt.Errorf("rename: %w", err)
+		}
+		return verifySize(conn, finalName, wantBytes)
+	})
 }
 
 // RemoteMatches reports whether remoteDir/name exists with the given size.
@@ -110,19 +116,26 @@ func (c *Client) RemoteMatches(ctx context.Context, remoteDir, name string, want
 	}
 	defer func() { _ = conn.Quit() }()
 	dir := NormalizeRemoteDir(remoteDir)
-	if err := conn.ChangeDir(dir); err != nil {
-		return false, nil
-	}
-	if err := verifySize(conn, path.Base(name), wantBytes); err != nil {
-		return false, nil
-	}
-	return true, nil
+	matched := false
+	err = runOnConn(ctx, conn, func() error {
+		if err := conn.ChangeDir(dir); err != nil {
+			return nil
+		}
+		if err := verifySize(conn, path.Base(name), wantBytes); err != nil {
+			return nil
+		}
+		matched = true
+		return nil
+	})
+	return matched, err
 }
 
 func (c *Client) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	addr := net.JoinHostPort(c.cfg.Host, fmt.Sprintf("%d", c.cfg.Port))
 	opts := []ftp.DialOption{
 		ftp.DialWithTimeout(c.cfg.DialTimeout),
+		ftp.DialWithShutTimeout(c.cfg.IOTimeout),
+		ftp.DialWithContext(ctx),
 	}
 	if c.cfg.TLS {
 		opts = append(opts, ftp.DialWithExplicitTLS(&tls.Config{
@@ -157,38 +170,114 @@ func (c *Client) dial(ctx context.Context) (*ftp.ServerConn, error) {
 }
 
 func (c *Client) Probe(ctx context.Context, remoteDir string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !c.Configured() {
-		return errors.New("ftp not configured")
-	}
-	conn, err := c.dial(ctx)
+	report, err := c.ProbeDetailed(ctx, remoteDir)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Quit() }()
-	dir := NormalizeRemoteDir(remoteDir)
-	if err := ensureDirs(conn, dir); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-	if err := conn.ChangeDir(dir); err != nil {
-		return fmt.Errorf("cwd %s: %w", dir, err)
-	}
-	const probeName = ".collector-ftp-probe"
-	payload := []byte("collector-ftp-probe\n")
-	_ = conn.Delete(probeName)
-	if err := conn.Stor(probeName, strings.NewReader(string(payload))); err != nil {
-		return fmt.Errorf("stor probe: %w", err)
-	}
-	if err := verifySize(conn, probeName, int64(len(payload))); err != nil {
-		_ = conn.Delete(probeName)
-		return err
-	}
-	if err := conn.Delete(probeName); err != nil {
-		return fmt.Errorf("delete probe: %w", err)
+	if !report.OK {
+		return errors.New("ftp probe failed")
 	}
 	return nil
+}
+
+func (c *Client) ProbeDetailed(ctx context.Context, remoteDir string) (ProbeReport, error) {
+	report := ProbeReport{}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if !c.Configured() {
+		return report, errors.New("ftp not configured")
+	}
+	if err := ValidateRemoteDir(remoteDir); err != nil {
+		return report, err
+	}
+
+	step := func(name string, fn func() error) error {
+		start := time.Now()
+		item := ProbeStep{Name: name}
+		err := fn()
+		item.Duration = time.Since(start).Round(time.Millisecond).String()
+		if err != nil {
+			item.Error = err.Error()
+			report.Steps = append(report.Steps, item)
+			return err
+		}
+		item.OK = true
+		report.Steps = append(report.Steps, item)
+		return nil
+	}
+
+	var conn *ftp.ServerConn
+	if err := step("login", func() error {
+		var dialErr error
+		conn, dialErr = c.dial(ctx)
+		return dialErr
+	}); err != nil {
+		return report, err
+	}
+	defer func() { _ = conn.Quit() }()
+
+	dir := NormalizeRemoteDir(remoteDir)
+	const probeName = ".collector-ftp-probe"
+	payload := []byte("collector-ftp-probe\n")
+	err := runOnConn(ctx, conn, func() error {
+		if err := step("cwd", func() error {
+			if err := ensureDirs(conn, dir); err != nil {
+				return fmt.Errorf("mkdir %s: %w", dir, err)
+			}
+			if err := conn.ChangeDir(dir); err != nil {
+				return fmt.Errorf("cwd %s: %w", dir, err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		_ = conn.Delete(probeName)
+		if err := step("stor", func() error {
+			if err := conn.Stor(probeName, strings.NewReader(string(payload))); err != nil {
+				return fmt.Errorf("stor probe: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := step("size", func() error {
+			if err := verifySize(conn, probeName, int64(len(payload))); err != nil {
+				_ = conn.Delete(probeName)
+				return err
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return step("dele", func() error {
+			if err := conn.Delete(probeName); err != nil {
+				return fmt.Errorf("delete probe: %w", err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return report, err
+	}
+	report.OK = true
+	return report, nil
+}
+
+func runOnConn(ctx context.Context, conn *ftp.ServerConn, fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case <-ctx.Done():
+		_ = conn.Quit()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
 }
 
 func verifySize(conn *ftp.ServerConn, name string, want int64) error {

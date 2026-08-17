@@ -119,6 +119,10 @@ func (s *Server) Handler() http.Handler {
 			private.With(s.requireAdmin).Post(
 				"/system/runtime-settings/syslog-archive/test-ftp", s.testSyslogArchiveFTP,
 			)
+			private.With(s.requireAdmin).Get("/system/syslog-archive/status", s.syslogArchiveStatus)
+			private.With(s.requireAdmin).Post(
+				"/system/syslog-archive/jobs/{jobID}/verify", s.verifySyslogArchiveJob,
+			)
 			private.With(s.requireAdmin).Post(
 				"/devices/{deviceID}/projection/requeue-failed", s.requeueFailedProjection,
 			)
@@ -329,6 +333,7 @@ func (s *Server) systemInfo(writer http.ResponseWriter, request *http.Request) {
 	services["clickhouse"] = s.Analytics.Conn.Ping(ctx) == nil
 	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
 	services["export_worker"] = s.exportWorkerHealthy(ctx)
+	services["syslog_archive_worker"] = s.syslogArchiveWorkerHealthy(ctx)
 	if s.Archive != nil {
 		exists, err := s.Archive.Client.BucketExists(ctx, s.Archive.Bucket)
 		services["minio"] = err == nil && exists
@@ -481,6 +486,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	services["clickhouse"] = s.Analytics.Conn.Ping(serviceCtx) == nil
 	services["nats"] = s.NATS != nil && s.NATS.IsConnected()
 	services["export_worker"] = s.exportWorkerHealthy(serviceCtx)
+	services["syslog_archive_worker"] = s.syslogArchiveWorkerHealthy(serviceCtx)
 	var spoolDepth uint64
 	if s.Spool != nil {
 		if depth, depthErr := s.Spool.Depth(); depthErr == nil {
@@ -1545,6 +1551,7 @@ func (s *Server) staticHandler() http.Handler {
 			writeError(writer, http.StatusNotFound, "web application is not built")
 			return
 		}
+		writer.Header().Set("Cache-Control", "no-store")
 		http.ServeContent(writer, request, "index.html", info.ModTime(), index)
 	})
 }

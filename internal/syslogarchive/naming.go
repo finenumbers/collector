@@ -16,6 +16,11 @@ const RawRetentionAfterHourEnd = 2 * time.Hour
 
 var deviceSignPattern = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
+var (
+	tenMinuteArchiveName = regexp.MustCompile(`_[0-9]{2}-[0-9]{2}\.zip$`)
+	hourlyArchiveName    = regexp.MustCompile(`_[0-9]{2}\.zip$`)
+)
+
 func SanitizeDeviceSign(sign string) string {
 	sign = strings.ToLower(strings.TrimSpace(sign))
 	sign = deviceSignPattern.ReplaceAllString(sign, "")
@@ -35,6 +40,11 @@ func ArchiveName(deviceSign string, slotStart time.Time, loc *time.Location) (st
 	local := slotStart.In(loc)
 	return fmt.Sprintf("%s_%02d.%02d.%04d_%02d-%02d.zip",
 		sign, local.Day(), int(local.Month()), local.Year(), local.Hour(), local.Minute()), nil
+}
+
+// IsLegacyHourlyArchiveName reports leftover hourly `{sign}_{DD.MM.YYYY}_{HH}.zip`.
+func IsLegacyHourlyArchiveName(name string) bool {
+	return hourlyArchiveName.MatchString(name) && !tenMinuteArchiveName.MatchString(name)
 }
 
 // TruncateSlot returns the 10-minute slot start containing t in loc.

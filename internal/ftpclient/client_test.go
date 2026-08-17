@@ -1,14 +1,17 @@
 package ftpclient
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestNormalizeRemoteDir(t *testing.T) {
 	cases := map[string]string{
-		"":           "/",
-		"archives":   "/archives",
-		"/a/b/":      "/a/b",
-		"/a/../b":    "/b",
-		`\x\y`:       "/x/y",
+		"":         "/",
+		"archives": "/archives",
+		"/a/b/":    "/a/b",
+		"/a/../b":  "/b",
+		`\x\y`:     "/x/y",
 	}
 	for in, want := range cases {
 		if got := NormalizeRemoteDir(in); got != want {
@@ -26,5 +29,12 @@ func TestValidateRemoteDir(t *testing.T) {
 	}
 	if err := ValidateRemoteDir("/a/../b"); err == nil {
 		t.Fatal("expected .. error")
+	}
+}
+
+func TestProbeRequiresConfig(t *testing.T) {
+	client := New(Config{})
+	if err := client.Probe(context.Background(), "/"); err == nil {
+		t.Fatal("expected not configured")
 	}
 }

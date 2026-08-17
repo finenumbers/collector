@@ -264,18 +264,18 @@ func TestPostgresMigrateBaselinesLegacySchemaWithoutRevisionBump(t *testing.T) {
 			if !cleanupApplied {
 				t.Fatal("legacy cleanup migration was not applied")
 			}
-			var syslogActive, syslogPending, cdrPending int
+			var antifraudActive, antifraudPending, cdrPending int
 			if err := store.DB.QueryRow(ctx, `SELECT
-				max(active_days) FILTER (WHERE policy_class='syslog'),
-				max(pending_days) FILTER (WHERE policy_class='syslog'),
+				max(active_days) FILTER (WHERE policy_class='antifraud'),
+				max(pending_days) FILTER (WHERE policy_class='antifraud'),
 				max(pending_days) FILTER (WHERE policy_class='cdr')
 				FROM retention_policies`).
-				Scan(&syslogActive, &syslogPending, &cdrPending); err != nil {
+				Scan(&antifraudActive, &antifraudPending, &cdrPending); err != nil {
 				t.Fatal(err)
 			}
-			if syslogActive != 30 || syslogPending != 30 || cdrPending != 60 {
+			if antifraudActive != 30 || antifraudPending != 30 || cdrPending != 60 {
 				t.Fatalf("retention reapply state=%d/%d/%d, want 30/30/60",
-					syslogActive, syslogPending, cdrPending)
+					antifraudActive, antifraudPending, cdrPending)
 			}
 			var discoverPending bool
 			if err := store.DB.QueryRow(ctx, `SELECT EXISTS (

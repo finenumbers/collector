@@ -41,7 +41,7 @@ type ManagedUser = User & {
 }
 type SystemInfo = { version: string; status: string; user: User; services: Record<string, boolean> }
 type RetentionPolicy = {
-  policyClass: 'syslog' | 'cdr' | 'softswitch_cdr' | 'raw_cdr_archive'
+  policyClass: 'antifraud' | 'cdr' | 'softswitch_cdr' | 'raw_cdr_archive'
   activeDays: number
   pendingDays?: number
   effectiveAt?: string
@@ -1678,7 +1678,7 @@ function DataView({ device, dataset: datasetProp, admin }: { device: Device; dat
       <span><small>Неуспешных</small><strong>{stats ? stats.failedCalls24h.toLocaleString('ru-RU') : '—'}</strong></span>
       <span><small>Средняя длительность</small><strong>{stats ? formatDurationAverage(stats.averageTalkMs) : '—'}</strong></span>
       {!isSatel && <>
-        <span><small>Syslog сообщений</small><strong>
+        <span><small>Syslog (буфер)</small><strong>
           {stats ? stats.syslogMessages24h.toLocaleString('ru-RU') : '—'}
         </strong></span>
       </>}
@@ -3442,7 +3442,7 @@ function normalizeRuntimeSettings(value: RuntimeSettings): RuntimeSettings {
     passwordSet: false,
     ftpTls: false,
     localSpoolDir: '/data/spool/syslog-archive',
-    closeDelay: '2m',
+    closeDelay: '1m',
     lookbackHours: 48,
     maxArchiveBytes: 2147483648,
     spoolBudgetBytes: 53687091200,
@@ -3580,6 +3580,8 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
   const [pstnToken, setPstnToken] = useState('')
   const [geoipToken, setGeoipToken] = useState('')
   const [ftpPassword, setFtpPassword] = useState('')
+  const [ftpProbeBusy, setFtpProbeBusy] = useState(false)
+  const [ftpProbeMessage, setFtpProbeMessage] = useState('')
   const [archiveDevices, setArchiveDevices] = useState<Device[]>([])
   const [archiveBusyID, setArchiveBusyID] = useState('')
   const [archiveError, setArchiveError] = useState('')
@@ -3809,8 +3811,10 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
 
     <article className="runtime-card">
       <h4>Архив Syslog (FTP)</h4>
-      <p className="runtime-note">Часовые ZIP с raw syslog на внешний FTP. При недоступности FTP архивы
-        копятся локально и отправляются позже после проверки размера на сервере.</p>
+      <p className="runtime-note">10-минутные ZIP с raw syslog на внешний FTP (6 файлов в час).
+        Имя: {'{deviceSign}_{DD.MM.YYYY}_{HH-mm}.zip'}. При недоступности FTP архивы
+        копятся локально и отправляются позже после проверки размера на сервере.
+        Сырой Syslog в ClickHouse — короткий буфер (~2–3 часа), не склад.</p>
       <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.enabled}
         onChange={(e) => updateArchive({ enabled: e.target.checked })} /> Включён</label>
       <div className="runtime-grid">
@@ -3836,12 +3840,35 @@ function RuntimeSettingsEditor({ value, busy, onSave }: {
       </div>
       <label className="checkbox-row"><input type="checkbox" checked={syslogArchive.ftpTls}
         onChange={(e) => updateArchive({ ftpTls: e.target.checked })} /> Explicit FTPS (TLS)</label>
+      {ftpProbeMessage && <p className="runtime-note">{ftpProbeMessage}</p>}
+      <div className="dialog-actions">
+        <button className="secondary" type="button" disabled={ftpProbeBusy || busy}
+          onClick={() => {
+            setFtpProbeBusy(true)
+            setFtpProbeMessage('')
+            void api<{ ok: boolean }>('/system/runtime-settings/syslog-archive/test-ftp', {
+              method: 'POST',
+              body: JSON.stringify({
+                ftpHost: syslogArchive.ftpHost,
+                ftpPort: syslogArchive.ftpPort,
+                ftpUser: syslogArchive.ftpUser,
+                ftpPassword: ftpPassword || undefined,
+                ftpTls: syslogArchive.ftpTls,
+                remoteDir: archiveDevices.find((d) => d.syslogArchiveRemoteDir)?.syslogArchiveRemoteDir || '/',
+              }),
+            }).then(() => setFtpProbeMessage('Подключение успешно: login, запись и удаление пробы прошли.'))
+              .catch((reason) => setFtpProbeMessage(
+                reason instanceof Error ? reason.message : 'Не удалось проверить FTP',
+              ))
+              .finally(() => setFtpProbeBusy(false))
+          }}>{ftpProbeBusy ? 'Проверка…' : 'Проверить подключение'}</button>
+      </div>
     </article>
 
     <article className="runtime-card">
       <h4>Архив Syslog по оборудованию</h4>
       <p className="runtime-note">Для каждого устройства с Syslog: включение архивирования и каталог на FTP.
-        Имя файла: {'{deviceSign}_{DD.MM.YYYY}_{HH}.zip'}.</p>
+        Имя файла: {'{deviceSign}_{DD.MM.YYYY}_{HH-mm}.zip'}.</p>
       {archiveError && <div className="form-error">{archiveError}</div>}
       {archiveDevices.length === 0 && <div className="table-empty">
         <strong>Нет устройств с Syslog</strong>

@@ -117,6 +117,9 @@ func (s *Server) Handler() http.Handler {
 				"/system/runtime-settings/container-limits.env", s.downloadContainerLimitsEnv,
 			)
 			private.With(s.requireAdmin).Post(
+				"/system/runtime-settings/syslog-archive/test-ftp", s.testSyslogArchiveFTP,
+			)
+			private.With(s.requireAdmin).Post(
 				"/devices/{deviceID}/projection/requeue-failed", s.requeueFailedProjection,
 			)
 			private.Get("/dashboard", s.dashboard)
@@ -1561,7 +1564,6 @@ func parsePageLimit(request *http.Request) uint64 {
 func (s *Server) allowCostlyRequest(userID uuid.UUID) bool {
 	return s.allowRate(userID, &s.costlyRates, 10)
 }
-
 
 func (s *Server) allowRate(userID uuid.UUID, rates *map[uuid.UUID]costlyRate, limit int) bool {
 	now := time.Now()

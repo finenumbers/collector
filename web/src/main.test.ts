@@ -21,6 +21,8 @@ describe('custom antifraud UI cleanup', () => {
   it('exposes runtime settings editor in system settings', () => {
     expect(main).toContain('RuntimeSettingsEditor')
     expect(main).toContain("'/system/runtime-settings'")
+    expect(main).toContain('Проверить подключение')
+    expect(main).toContain('syslog-archive/test-ftp')
     expect(main).toContain('Параметры')
     expect(main).toContain('Обогащение CDR (PSTN / GeoIP)')
     expect(main).toContain('enrichmentApis')
@@ -70,7 +72,7 @@ describe('custom antifraud UI cleanup', () => {
     expect(main).not.toContain('/syslog-messages')
     expect(main).not.toContain("label: 'Сообщения Syslog'")
     expect(main).not.toContain('FileClock')
-    expect(main).toContain('Syslog сообщений')
+    expect(main).toContain('Syslog (буфер)')
     expect(main).toContain('Последний приём Syslog')
     expect(main).toContain("dataset === 'syslog' ? 'calls'")
   })

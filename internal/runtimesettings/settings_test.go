@@ -90,6 +90,21 @@ func TestMergePatchKeepsSyslogArchivePassword(t *testing.T) {
 	}
 }
 
+func TestSyslogArchiveCloseDelayMustStayUnderTenMinutes(t *testing.T) {
+	doc := Defaults()
+	if doc.SyslogArchive.CloseDelay != "1m" {
+		t.Fatalf("default closeDelay=%q", doc.SyslogArchive.CloseDelay)
+	}
+	doc.SyslogArchive.CloseDelay = "10m"
+	if err := doc.Validate(); err == nil {
+		t.Fatal("10m closeDelay must be rejected")
+	}
+	doc.SyslogArchive.CloseDelay = "9m"
+	if err := doc.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestContainersComposeEnvFragment(t *testing.T) {
 	fragment := Defaults().Containers.ComposeEnvFragment()
 	for _, key := range []string{

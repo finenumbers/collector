@@ -156,6 +156,41 @@ func (c *Client) dial(ctx context.Context) (*ftp.ServerConn, error) {
 	}
 }
 
+func (c *Client) Probe(ctx context.Context, remoteDir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.Configured() {
+		return errors.New("ftp not configured")
+	}
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Quit() }()
+	dir := NormalizeRemoteDir(remoteDir)
+	if err := ensureDirs(conn, dir); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	if err := conn.ChangeDir(dir); err != nil {
+		return fmt.Errorf("cwd %s: %w", dir, err)
+	}
+	const probeName = ".collector-ftp-probe"
+	payload := []byte("collector-ftp-probe\n")
+	_ = conn.Delete(probeName)
+	if err := conn.Stor(probeName, strings.NewReader(string(payload))); err != nil {
+		return fmt.Errorf("stor probe: %w", err)
+	}
+	if err := verifySize(conn, probeName, int64(len(payload))); err != nil {
+		_ = conn.Delete(probeName)
+		return err
+	}
+	if err := conn.Delete(probeName); err != nil {
+		return fmt.Errorf("delete probe: %w", err)
+	}
+	return nil
+}
+
 func verifySize(conn *ftp.ServerConn, name string, want int64) error {
 	size, err := conn.FileSize(name)
 	if err != nil {

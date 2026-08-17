@@ -13,6 +13,11 @@ describe('system settings RBAC', () => {
 })
 
 describe('retention policy presentation', () => {
+  it('labels AntiFraud retention separately from the Syslog buffer', () => {
+    expect(retentionLabel('antifraud')).toBe('АнтиФрод и RADIUS')
+    expect(retentionDescription('antifraud')).toContain('TTL 72')
+  })
+
   it('distinguishes equipment and softswitch CDR retention', () => {
     expect(retentionLabel('cdr')).toBe('CDR оборудования')
     expect(retentionDescription('cdr')).toContain('оборудования')

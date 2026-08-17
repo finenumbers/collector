@@ -18,4 +18,7 @@ func TestSyslogWorkerDedupesDeviceLookupsPerBatch(t *testing.T) {
 	if !strings.Contains(source, "policies := make(map[uuid.UUID]*policyLookup") {
 		t.Fatal("CustomAntifraudPolicy lookups must be cached per batch")
 	}
+	if !strings.Contains(source, "SyslogUTCHourBlocked") {
+		t.Fatal("sealed UTC hours must skip ClickHouse insert and ACK NATS")
+	}
 }

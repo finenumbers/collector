@@ -107,6 +107,25 @@ func TestSyslogArchiveClaimRetryAndEnsure(t *testing.T) {
 		t.Fatalf("failed without path must not claim when allowBuild=false, err=%v", err)
 	}
 
+	staleUpload := uuid.New()
+	hourStale := hour.Add(25 * time.Minute)
+	if _, err := control.DB.Exec(ctx, `
+		INSERT INTO syslog_archive_jobs
+			(id,device_id,hour_start,archive_name,remote_dir,timezone,status,local_path,
+			 lease_expires_at,next_attempt_at)
+		VALUES ($1,$2,$3,'fixer_17.08.2026_14-35.zip','/old','UTC','uploading','',
+			now()-interval '1 minute',now())`,
+		staleUpload, device.ID, hourStale); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = control.ClaimSyslogArchiveJob(ctx, "worker-b", time.Minute, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.ID != staleUpload || claimed.Status != SyslogArchiveStatusBuilding {
+		t.Fatalf("expired uploading without path should rebuild, got %#v", claimed)
+	}
+
 	pendingHour := hour.Add(30 * time.Minute)
 	first, err := control.EnsureSyslogArchiveJob(ctx, device.ID, pendingHour, "fixer_17.08.2026_14-40.zip", "/old", "UTC")
 	if err != nil {

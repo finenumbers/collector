@@ -24,6 +24,8 @@ type SettingsFunc func() runtimesettings.SyslogArchiveSettings
 
 const maxArchiveBuildsPerTick = 4
 
+var errArchiveAbandoned = errors.New("archive job abandoned")
+
 type Worker struct {
 	Store     *store.Store
 	Analytics *analytics.Client
@@ -112,7 +114,7 @@ func (w *Worker) tick(ctx context.Context) {
 	for {
 		allowBuild := builds < maxArchiveBuildsPerTick
 		worked, built, err := w.processOne(ctx, cfg, allowBuild)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, errArchiveAbandoned) {
 			slog.Error("syslog archive job failed", "error", err)
 			tickErr = err.Error()
 		}
@@ -199,6 +201,12 @@ func (w *Worker) enqueueClosedSlots(ctx context.Context, cfg runtimesettings.Sys
 					continue
 				}
 			}
+			blocked, blockErr := w.slotUTCHoursBlocked(ctx, device.ID, from, to)
+			if blockErr != nil {
+				slog.Error("syslog archive hour blocked", "device", device.ID, "slot", slot, "error", blockErr)
+			} else if blocked {
+				continue
+			}
 			name, nameErr := ArchiveName(device.DeviceSign, slot, loc)
 			if nameErr != nil {
 				slog.Warn("syslog archive skip device",
@@ -241,6 +249,11 @@ func (w *Worker) processOne(
 		err = fmt.Errorf("unexpected claimed status %s", job.Status)
 	}
 	if err != nil {
+		if errors.Is(err, errArchiveAbandoned) {
+			slog.Info("syslog archive job abandoned",
+				"job", job.ID, "device", job.DeviceID, "hour", job.HourStart, "reason", err)
+			return true, false, nil
+		}
 		retry := uploadBackoff(job.Attempts)
 		keepLocal := job.LocalPath != ""
 		if markErr := w.Store.FailSyslogArchiveJob(ctx, job.ID, w.WorkerID, err.Error(), retry, keepLocal); markErr != nil {
@@ -278,14 +291,12 @@ func (w *Worker) build(ctx context.Context, cfg runtimesettings.SyslogArchiveSet
 	}
 	slotLocal := job.HourStart.In(loc)
 	from, to := SlotBoundsUTC(slotLocal)
-	for _, hour := range []time.Time{from.Truncate(time.Hour), to.Add(-time.Nanosecond).Truncate(time.Hour)} {
-		blocked, blockErr := w.Store.SyslogUTCHourBlocked(ctx, job.DeviceID, hour)
-		if blockErr != nil {
-			return blockErr
-		}
-		if blocked {
-			return w.abandon(ctx, job, "utc hour sealed")
-		}
+	blocked, blockErr := w.slotUTCHoursBlocked(ctx, job.DeviceID, from, to)
+	if blockErr != nil {
+		return blockErr
+	}
+	if blocked {
+		return w.abandon(ctx, job, "utc hour sealed")
 	}
 
 	tmp, err := os.CreateTemp(cfg.LocalSpoolDir, "building-*.zip")
@@ -417,9 +428,38 @@ func (w *Worker) uploadReady(ctx context.Context, cfg runtimesettings.SyslogArch
 	return nil
 }
 
+func (w *Worker) slotUTCHoursBlocked(
+	ctx context.Context, deviceID uuid.UUID, from, to time.Time,
+) (bool, error) {
+	hours := []time.Time{from.Truncate(time.Hour), to.Add(-time.Nanosecond).Truncate(time.Hour)}
+	seen := map[time.Time]struct{}{}
+	for _, hour := range hours {
+		if _, ok := seen[hour]; ok {
+			continue
+		}
+		seen[hour] = struct{}{}
+		blocked, err := w.Store.SyslogUTCHourBlocked(ctx, deviceID, hour)
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (w *Worker) abandon(ctx context.Context, job store.SyslogArchiveJob, msg string) error {
-	_ = w.Store.AbandonSyslogArchiveJob(ctx, job.ID, w.WorkerID, msg)
-	return errors.New(msg)
+	if err := w.Store.AbandonSyslogArchiveJob(ctx, job.ID, w.WorkerID, msg); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: %s", errArchiveAbandoned, msg)
+}
+
+// HideWorkerLastError reports whether a worker last_error is an operational
+// abandon (sealed/purged hour), not an FTP or build failure for the status line.
+func HideWorkerLastError(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "utc hour sealed")
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context, jobID uuid.UUID) {

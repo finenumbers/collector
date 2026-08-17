@@ -51,6 +51,9 @@ func (s *Server) buildSyslogArchiveStatus(ctx context.Context) (map[string]any, 
 	if s.Store != nil {
 		if state, err := s.Store.SyslogArchiveWorkerState(ctx, store.SyslogArchiveWorkerHeartbeatTimeout); err == nil {
 			worker = state
+			if syslogarchive.HideWorkerLastError(worker.LastError) {
+				worker.LastError = ""
+			}
 		} else {
 			return nil, err
 		}

@@ -21,4 +21,7 @@ func TestClaimSyslogArchiveJobRebuildsFailedWithoutLocalPath(t *testing.T) {
 	if !strings.Contains(source, "status='uploading' AND local_path=''") {
 		t.Fatal("uploading jobs without a local ZIP must rebuild")
 	}
+	if !strings.Contains(source, "AND e.status NOT IN ('abandoned','skipped_stale')") {
+		t.Fatal("device last_error must ignore abandoned/stale job reasons")
+	}
 }

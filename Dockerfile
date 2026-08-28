@@ -5,7 +5,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.25-alpine AS backend
+FROM golang:1.27-alpine AS backend
 ARG VERSION=dev
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
